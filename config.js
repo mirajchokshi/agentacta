@@ -1,0 +1,42 @@
+const fs = require('fs');
+const path = require('path');
+
+const CONFIG_FILE = path.join(process.cwd(), 'agentacta.config.json');
+
+const DEFAULTS = {
+  port: 4003,
+  storage: 'reference',
+  sessionsPath: null,
+  dbPath: './agentacta.db'
+};
+
+function loadConfig() {
+  let fileConfig = {};
+
+  if (fs.existsSync(CONFIG_FILE)) {
+    try {
+      fileConfig = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    } catch (err) {
+      console.error(`Warning: Could not parse ${CONFIG_FILE}:`, err.message);
+    }
+  } else {
+    // First-run: create default config
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(DEFAULTS, null, 2) + '\n');
+    console.log(`Created default config: ${CONFIG_FILE}`);
+  }
+
+  const config = { ...DEFAULTS, ...fileConfig };
+
+  // Env var overrides (highest priority)
+  if (process.env.PORT) config.port = parseInt(process.env.PORT);
+  if (process.env.AGENTACTA_STORAGE) config.storage = process.env.AGENTACTA_STORAGE;
+  if (process.env.AGENTACTA_SESSIONS_PATH) config.sessionsPath = process.env.AGENTACTA_SESSIONS_PATH;
+  if (process.env.AGENTACTA_DB_PATH) config.dbPath = process.env.AGENTACTA_DB_PATH;
+
+  // Resolve dbPath relative to cwd
+  config.dbPath = path.resolve(config.dbPath);
+
+  return config;
+}
+
+module.exports = { loadConfig, CONFIG_FILE };

@@ -1,0 +1,41 @@
+{
+  "name": "agentacta",
+  "version": "1.0.0",
+  "description": "Audit trail and search engine for AI agent sessions",
+  "main": "index.js",
+  "bin": {
+    "agentacta": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "index": "node indexer.js",
+    "demo": "node scripts/seed-demo.js && node index.js --demo",
+    "seed-demo": "node scripts/seed-demo.js"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "audit",
+    "search",
+    "openclaw",
+    "claude",
+    "sessions",
+    "tool-calls",
+    "sqlite",
+    "fts5"
+  ],
+  "author": "Miraj Chokshi",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mirajchokshi/agentacta"
+  },
+  "homepage": "https://github.com/mirajchokshi/agentacta",
+  "dependencies": {
+    "better-sqlite3": "^11.0.0"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^24.37.3",
+    "puppeteer-screen-recorder": "^3.0.6"
+  }
+}

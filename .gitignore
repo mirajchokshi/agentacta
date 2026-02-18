@@ -1,0 +1,12 @@
+node_modules/
+*.db
+*.db-shm
+*.db-wal
+agentacta.config.json
+PLAN.md
+
+# Demo videos (keep only the final)
+screenshots/demo.mp4
+screenshots/demo-v2.mp4
+screenshots/demo-voiced.mp4
+screenshots/demo-voiced-v2.mp4
