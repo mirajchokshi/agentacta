@@ -62,7 +62,7 @@ Open `http://localhost:4003` in your browser.
 
 AgentActa automatically finds your sessions in:
 - `~/.openclaw/agents/*/sessions/` (OpenClaw)
-- `~/.claude/projects/*/sessions/` (Claude Code)
+- `~/.claude/projects/*/` (Claude Code)
 
 Or point it at a custom path:
 
@@ -76,7 +76,7 @@ AGENTACTA_SESSIONS_PATH=/path/to/sessions agentacta
 Full-text search powered by SQLite FTS5. Filter by message type (messages, tool calls, results) and role (user, assistant). Quick search suggestions are generated from your actual data — most-used tools, common topics, frequently touched files.
 
 ### Sessions
-Browse all indexed sessions with auto-generated summaries, token breakdowns (output vs input), and model info. Click into any session to see the full event history, most recent first.
+Browse all indexed sessions with auto-generated summaries, token breakdowns (output vs input), and model info. Sessions are automatically tagged by type — cron jobs, sub-agent tasks, and heartbeat sessions get distinct badges. Click into any session to see the full event history, most recent first.
 
 ### Timeline
 Pick a date, see everything that happened. Messages, tool invocations, file changes — most recent first.
@@ -101,13 +101,14 @@ Data never leaves your machine.
 
 ## Configuration
 
-On first run, AgentActa creates `agentacta.config.json` with sensible defaults:
+On first run, AgentActa creates a config file with sensible defaults at `~/.config/agentacta/config.json` (or `agentacta.config.json` in the current directory if it exists):
 
 ```json
 {
   "port": 4003,
   "storage": "reference",
-  "sessionDirs": []
+  "sessionsPath": null,
+  "dbPath": "./agentacta.db"
 }
 ```
 
@@ -199,7 +200,7 @@ All data stays local. AgentActa runs entirely on your machine — no cloud servi
 
 ## Contributing
 
-PRs welcome. If you're adding support for a new agent format, add a parser in `indexer.js` and open a PR.
+PRs welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup and guidelines. If you're adding support for a new agent format, add a parser in `indexer.js` and open a PR.
 
 ## Etymology
 
