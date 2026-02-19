@@ -30,11 +30,18 @@ function discoverSessionDirs(config) {
     }
   }
 
-  // Scan ~/.claude/projects/*/sessions/
+  // Scan ~/.claude/projects/*/ (Claude Code stores JSONL directly in project dirs)
   const claudeProjects = path.join(home, '.claude/projects');
   if (fs.existsSync(claudeProjects)) {
     for (const proj of fs.readdirSync(claudeProjects)) {
-      const sp = path.join(claudeProjects, proj, 'sessions');
+      const projDir = path.join(claudeProjects, proj);
+      // Claude Code: JSONL files directly in project dir
+      if (fs.existsSync(projDir) && fs.statSync(projDir).isDirectory()) {
+        const hasJsonl = fs.readdirSync(projDir).some(f => f.endsWith('.jsonl'));
+        if (hasJsonl) dirs.push({ path: projDir, agent: `claude-${proj}` });
+      }
+      // Also check sessions/ subdirectory (future-proofing)
+      const sp = path.join(projDir, 'sessions');
       if (fs.existsSync(sp) && fs.statSync(sp).isDirectory()) {
         dirs.push({ path: sp, agent: `claude-${proj}` });
       }
@@ -133,22 +140,39 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
   let firstMessageTimestamp = null;
 
   const firstLine = JSON.parse(lines[0]);
+  let isClaudeCode = false;
+
   if (firstLine.type === 'session') {
+    // OpenClaw format
     sessionId = firstLine.id;
     sessionStart = firstLine.timestamp;
-    // Parse agent info from session metadata
     if (firstLine.agent) agent = firstLine.agent;
     if (firstLine.sessionType) sessionType = firstLine.sessionType;
-    // Detect sub-agent from ID patterns
     if (sessionId.includes('subagent')) sessionType = 'subagent';
-
-    stmts.deleteEvents.run(sessionId);
-    stmts.deleteSession.run(sessionId);
-    stmts.deleteFileActivity.run(sessionId);
-    if (stmts.deleteArchive) stmts.deleteArchive.run(sessionId);
+  } else if (firstLine.type === 'user' || firstLine.type === 'assistant' || firstLine.type === 'file-history-snapshot') {
+    // Claude Code format — no session header, extract from first message line
+    isClaudeCode = true;
+    for (const line of lines) {
+      let obj; try { obj = JSON.parse(line); } catch { continue; }
+      if ((obj.type === 'user' || obj.type === 'assistant') && obj.sessionId) {
+        sessionId = obj.sessionId;
+        sessionStart = obj.timestamp;
+        break;
+      }
+    }
+    if (!sessionId) {
+      // Fallback: use filename as session ID
+      sessionId = path.basename(filePath, '.jsonl');
+      sessionStart = new Date(firstLine.timestamp || Date.now()).toISOString();
+    }
   } else {
     return { skipped: true };
   }
+
+  stmts.deleteEvents.run(sessionId);
+  stmts.deleteSession.run(sessionId);
+  stmts.deleteFileActivity.run(sessionId);
+  if (stmts.deleteArchive) stmts.deleteArchive.run(sessionId);
 
   const pendingEvents = [];
   const fileActivities = [];
@@ -157,15 +181,33 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
     let obj;
     try { obj = JSON.parse(line); } catch { continue; }
 
-    if (obj.type === 'session' || obj.type === 'model_change' || obj.type === 'thinking_level_change' || obj.type === 'custom') {
+    if (obj.type === 'session' || obj.type === 'model_change' || obj.type === 'thinking_level_change' || obj.type === 'custom' || obj.type === 'file-history-snapshot') {
       if (obj.type === 'model_change') model = obj.modelId || model;
       continue;
     }
 
+    // Normalize: Claude Code uses top-level type "user"/"assistant" with message object
+    // OpenClaw uses type "message" with message.role
+    let msg, ts;
     if (obj.type === 'message' && obj.message) {
-      const msg = obj.message;
-      const ts = obj.timestamp;
+      msg = obj.message;
+      ts = obj.timestamp;
+    } else if ((obj.type === 'user' || obj.type === 'assistant') && obj.message) {
+      // Claude Code format: wrap into consistent shape
+      msg = obj.message;
+      if (!msg.role) msg.role = obj.type === 'user' ? 'user' : 'assistant';
+      ts = obj.timestamp;
+    } else {
+      continue;
+    }
+
+    if (msg) {
       sessionEnd = ts;
+
+      // Extract model from assistant messages as fallback
+      if (!model && msg.role === 'assistant' && msg.model && msg.model !== 'delivery-mirror' && !msg.model.startsWith('<')) {
+        model = msg.model;
+      }
 
       // Cost tracking
       if (msg.usage && msg.usage.cost && typeof msg.usage.cost.total === 'number') {
@@ -175,15 +217,23 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
         totalTokens += msg.usage.totalTokens;
       }
       if (msg.usage) {
+        // OpenClaw format
         if (typeof msg.usage.input === 'number') totalInputTokens += msg.usage.input;
         if (typeof msg.usage.output === 'number') totalOutputTokens += msg.usage.output;
         if (typeof msg.usage.cacheRead === 'number') totalCacheReadTokens += msg.usage.cacheRead;
         if (typeof msg.usage.cacheWrite === 'number') totalCacheWriteTokens += msg.usage.cacheWrite;
+        // Claude Code format
+        if (typeof msg.usage.input_tokens === 'number') totalInputTokens += msg.usage.input_tokens;
+        if (typeof msg.usage.output_tokens === 'number') totalOutputTokens += msg.usage.output_tokens;
+        if (typeof msg.usage.cache_read_input_tokens === 'number') totalCacheReadTokens += msg.usage.cache_read_input_tokens;
+        if (typeof msg.usage.cache_creation_input_tokens === 'number') totalCacheWriteTokens += msg.usage.cache_creation_input_tokens;
       }
+
+      const eventId = obj.id || obj.uuid || `evt-${Date.parse(ts) || Math.random()}`;
 
       const tr = extractToolResult(msg);
       if (tr) {
-        pendingEvents.push([obj.id, sessionId, ts, 'tool_result', 'tool', tr.content, tr.toolName, null, tr.content]);
+        pendingEvents.push([eventId, sessionId, ts, 'tool_result', 'tool', tr.content, tr.toolName, null, tr.content]);
         continue;
       }
 
@@ -191,7 +241,7 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
       const role = msg.role || 'unknown';
 
       if (content) {
-        pendingEvents.push([obj.id, sessionId, ts, 'message', role, content, null, null, null]);
+        pendingEvents.push([eventId, sessionId, ts, 'message', role, content, null, null, null]);
         msgCount++;
         // Better summary: skip heartbeat messages
         if (!summary && role === 'user' && !isHeartbeat(content)) {
@@ -200,14 +250,14 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
         // Capture initial prompt from first substantial user message
         if (!initialPrompt && role === 'user' && content.trim().length > 10 && !isHeartbeat(content)) {
           initialPrompt = content.slice(0, 500); // Limit to 500 chars
-          firstMessageId = obj.id;
+          firstMessageId = eventId;
           firstMessageTimestamp = ts;
         }
       }
 
       const tools = extractToolCalls(msg);
       for (const tool of tools) {
-        pendingEvents.push([tool.id || `${obj.id}-${tool.name}`, sessionId, ts, 'tool_call', role, null, tool.name, tool.args, null]);
+        pendingEvents.push([tool.id || `${eventId}-${tool.name}`, sessionId, ts, 'tool_call', role, null, tool.name, tool.args, null]);
         toolCount++;
 
         // File activity tracking
@@ -225,6 +275,21 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
   // If no real summary found, check if it's a heartbeat session
   if (!summary) {
     summary = 'Heartbeat session';
+  }
+
+  // Infer session type from first user message content
+  if (!sessionType && initialPrompt) {
+    const p = initialPrompt.toLowerCase();
+    if (p.includes('[cron:')) sessionType = 'cron';
+    else if (p.includes('heartbeat') && p.includes('heartbeat_ok')) sessionType = 'heartbeat';
+  }
+  if (!sessionType && !initialPrompt) sessionType = 'heartbeat';
+  // Detect subagent: task-style prompts injected by sessions_spawn
+  // These typically start with a date/time stamp and contain a detailed task
+  if (!sessionType && initialPrompt) {
+    const p = initialPrompt.trim();
+    // Sub-agent prompts start with "[Wed 2026-..." or "You are working on..."
+    if (/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-/.test(p)) sessionType = 'subagent';
   }
 
   stmts.upsertSession.run(sessionId, sessionStart, sessionEnd, msgCount, toolCount, model, summary, agent, sessionType, totalCost, totalTokens, totalInputTokens, totalOutputTokens, totalCacheReadTokens, totalCacheWriteTokens, initialPrompt, firstMessageId, firstMessageTimestamp);
