@@ -1,5 +1,9 @@
 # AgentActa
 
+[![CI](https://github.com/mirajchokshi/agentacta/actions/workflows/ci.yml/badge.svg)](https://github.com/mirajchokshi/agentacta/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/agentacta)](https://www.npmjs.com/package/agentacta)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 **Your AI agent does hundreds of things. Can you find them?**
 
 AgentActa is an audit trail and search engine for AI agent sessions. It indexes everything your agent did — every message, tool call, file edit, web search, and decision — into a fast, searchable local interface.
