@@ -16,7 +16,7 @@ if (process.argv.includes('--demo')) {
 }
 
 const { loadConfig } = require('./config');
-const { open, init } = require('./db');
+const { open, init, createStmts } = require('./db');
 const { discoverSessionDirs, indexFile } = require('./indexer');
 
 const config = loadConfig();
@@ -102,19 +102,7 @@ init();
 const db = open();
 
 // Live re-indexing setup
-const stmts = {
-  getState: db.prepare('SELECT * FROM index_state WHERE file_path = ?'),
-  getSession: db.prepare('SELECT id FROM sessions WHERE id = ?'),
-  deleteEvents: db.prepare('DELETE FROM events WHERE session_id = ?'),
-  deleteSession: db.prepare('DELETE FROM sessions WHERE id = ?'),
-  deleteFileActivity: db.prepare('DELETE FROM file_activity WHERE session_id = ?'),
-  insertEvent: db.prepare(`INSERT OR REPLACE INTO events (id, session_id, timestamp, type, role, content, tool_name, tool_args, tool_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-  upsertSession: db.prepare(`INSERT OR REPLACE INTO sessions (id, start_time, end_time, message_count, tool_count, model, summary, agent, session_type, total_cost, total_tokens, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-  upsertState: db.prepare(`INSERT OR REPLACE INTO index_state (file_path, last_offset, last_modified) VALUES (?, ?, ?)`),
-  insertFileActivity: db.prepare(`INSERT INTO file_activity (session_id, file_path, operation, timestamp) VALUES (?, ?, ?, ?)`),
-  deleteArchive: db.prepare('DELETE FROM archive WHERE session_id = ?'),
-  insertArchive: db.prepare('INSERT INTO archive (session_id, line_number, raw_json) VALUES (?, ?, ?)')
-};
+const stmts = createStmts(db);
 
 const sessionDirs = discoverSessionDirs(config);
 
@@ -368,3 +356,21 @@ const server = http.createServer((req, res) => {
 
 const HOST = process.env.AGENTACTA_HOST || '127.0.0.1';
 server.listen(PORT, HOST, () => console.log(`AgentActa running on http://${HOST}:${PORT}`));
+
+// Graceful shutdown
+function shutdown(signal) {
+  console.log(`\n${signal} received, shutting down...`);
+  server.close(() => {
+    try { db.close(); } catch {}
+    console.log('AgentActa stopped.');
+    process.exit(0);
+  });
+  // Force exit after 5s if server doesn't close
+  setTimeout(() => {
+    try { db.close(); } catch {}
+    process.exit(1);
+  }, 5000);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

@@ -35,7 +35,10 @@ function init(dbPath) {
       input_tokens INTEGER DEFAULT 0,
       output_tokens INTEGER DEFAULT 0,
       cache_read_tokens INTEGER DEFAULT 0,
-      cache_write_tokens INTEGER DEFAULT 0
+      cache_write_tokens INTEGER DEFAULT 0,
+      initial_prompt TEXT,
+      first_message_id TEXT,
+      first_message_timestamp TEXT
     );
 
     CREATE TABLE IF NOT EXISTS events (
@@ -115,4 +118,20 @@ function init(dbPath) {
   db.close();
 }
 
-module.exports = { open, init };
+function createStmts(db) {
+  return {
+    getState: db.prepare('SELECT * FROM index_state WHERE file_path = ?'),
+    getSession: db.prepare('SELECT id FROM sessions WHERE id = ?'),
+    deleteEvents: db.prepare('DELETE FROM events WHERE session_id = ?'),
+    deleteSession: db.prepare('DELETE FROM sessions WHERE id = ?'),
+    deleteFileActivity: db.prepare('DELETE FROM file_activity WHERE session_id = ?'),
+    insertEvent: db.prepare(`INSERT OR REPLACE INTO events (id, session_id, timestamp, type, role, content, tool_name, tool_args, tool_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+    upsertSession: db.prepare(`INSERT OR REPLACE INTO sessions (id, start_time, end_time, message_count, tool_count, model, summary, agent, session_type, total_cost, total_tokens, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, initial_prompt, first_message_id, first_message_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+    upsertState: db.prepare(`INSERT OR REPLACE INTO index_state (file_path, last_offset, last_modified) VALUES (?, ?, ?)`),
+    insertFileActivity: db.prepare(`INSERT INTO file_activity (session_id, file_path, operation, timestamp) VALUES (?, ?, ?, ?)`),
+    deleteArchive: db.prepare('DELETE FROM archive WHERE session_id = ?'),
+    insertArchive: db.prepare('INSERT INTO archive (session_id, line_number, raw_json) VALUES (?, ?, ?)')
+  };
+}
+
+module.exports = { open, init, createStmts };

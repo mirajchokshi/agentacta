@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { open, init } = require('./db');
+const { open, init, createStmts } = require('./db');
 const { loadConfig } = require('./config');
 
 const REINDEX = process.argv.includes('--reindex');
@@ -128,6 +128,9 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
   let totalOutputTokens = 0;
   let totalCacheReadTokens = 0;
   let totalCacheWriteTokens = 0;
+  let initialPrompt = null;
+  let firstMessageId = null;
+  let firstMessageTimestamp = null;
 
   const firstLine = JSON.parse(lines[0]);
   if (firstLine.type === 'session') {
@@ -194,6 +197,12 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
         if (!summary && role === 'user' && !isHeartbeat(content)) {
           summary = content.slice(0, 200);
         }
+        // Capture initial prompt from first substantial user message
+        if (!initialPrompt && role === 'user' && content.trim().length > 10 && !isHeartbeat(content)) {
+          initialPrompt = content.slice(0, 500); // Limit to 500 chars
+          firstMessageId = obj.id;
+          firstMessageTimestamp = ts;
+        }
       }
 
       const tools = extractToolCalls(msg);
@@ -218,7 +227,7 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
     summary = 'Heartbeat session';
   }
 
-  stmts.upsertSession.run(sessionId, sessionStart, sessionEnd, msgCount, toolCount, model, summary, agent, sessionType, totalCost, totalTokens, totalInputTokens, totalOutputTokens, totalCacheReadTokens, totalCacheWriteTokens);
+  stmts.upsertSession.run(sessionId, sessionStart, sessionEnd, msgCount, toolCount, model, summary, agent, sessionType, totalCost, totalTokens, totalInputTokens, totalOutputTokens, totalCacheReadTokens, totalCacheWriteTokens, initialPrompt, firstMessageId, firstMessageTimestamp);
   for (const ev of pendingEvents) stmts.insertEvent.run(...ev);
   for (const fa of fileActivities) stmts.insertFileActivity.run(...fa);
 
@@ -242,19 +251,7 @@ function run() {
 
   console.log(`AgentActa indexer running in ${config.storage} mode`);
 
-  const stmts = {
-    getState: db.prepare('SELECT * FROM index_state WHERE file_path = ?'),
-    getSession: db.prepare('SELECT id FROM sessions WHERE id = ?'),
-    deleteEvents: db.prepare('DELETE FROM events WHERE session_id = ?'),
-    deleteSession: db.prepare('DELETE FROM sessions WHERE id = ?'),
-    deleteFileActivity: db.prepare('DELETE FROM file_activity WHERE session_id = ?'),
-    insertEvent: db.prepare(`INSERT OR REPLACE INTO events (id, session_id, timestamp, type, role, content, tool_name, tool_args, tool_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-    upsertSession: db.prepare(`INSERT OR REPLACE INTO sessions (id, start_time, end_time, message_count, tool_count, model, summary, agent, session_type, total_cost, total_tokens, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-    upsertState: db.prepare(`INSERT OR REPLACE INTO index_state (file_path, last_offset, last_modified) VALUES (?, ?, ?)`),
-    insertFileActivity: db.prepare(`INSERT INTO file_activity (session_id, file_path, operation, timestamp) VALUES (?, ?, ?, ?)`),
-    deleteArchive: db.prepare('DELETE FROM archive WHERE session_id = ?'),
-    insertArchive: db.prepare('INSERT INTO archive (session_id, line_number, raw_json) VALUES (?, ?, ?)')
-  };
+  const stmts = createStmts(db);
 
   const sessionDirs = discoverSessionDirs(config);
   console.log(`Discovered ${sessionDirs.length} session directories:`);
@@ -314,19 +311,7 @@ function run() {
 function indexAll(db, config) {
   const sessionDirs = discoverSessionDirs(config);
   const archiveMode = config.storage === 'archive';
-  const stmts = {
-    getState: db.prepare('SELECT * FROM index_state WHERE file_path = ?'),
-    getSession: db.prepare('SELECT id FROM sessions WHERE id = ?'),
-    deleteEvents: db.prepare('DELETE FROM events WHERE session_id = ?'),
-    deleteSession: db.prepare('DELETE FROM sessions WHERE id = ?'),
-    deleteFileActivity: db.prepare('DELETE FROM file_activity WHERE session_id = ?'),
-    insertEvent: db.prepare(`INSERT OR REPLACE INTO events (id, session_id, timestamp, type, role, content, tool_name, tool_args, tool_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-    upsertSession: db.prepare(`INSERT OR REPLACE INTO sessions (id, start_time, end_time, message_count, tool_count, model, summary, agent, session_type, total_cost, total_tokens, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-    upsertState: db.prepare(`INSERT OR REPLACE INTO index_state (file_path, last_offset, last_modified) VALUES (?, ?, ?)`),
-    insertFileActivity: db.prepare(`INSERT INTO file_activity (session_id, file_path, operation, timestamp) VALUES (?, ?, ?, ?)`),
-    deleteArchive: db.prepare('DELETE FROM archive WHERE session_id = ?'),
-    insertArchive: db.prepare('INSERT INTO archive (session_id, line_number, raw_json) VALUES (?, ?, ?)')
-  };
+  const stmts = createStmts(db);
   let totalSessions = 0;
   for (const dir of sessionDirs) {
     const files = fs.readdirSync(dir.path).filter(f => f.endsWith('.jsonl'));

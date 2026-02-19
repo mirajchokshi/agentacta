@@ -1,7 +1,18 @@
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
-const CONFIG_FILE = path.join(process.cwd(), 'agentacta.config.json');
+const CWD_CONFIG_FILE = path.join(process.cwd(), 'agentacta.config.json');
+const XDG_CONFIG_DIR = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'agentacta');
+const XDG_CONFIG_FILE = path.join(XDG_CONFIG_DIR, 'config.json');
+
+// Resolve config file: CWD first (backward compat), then XDG default
+function resolveConfigFile() {
+  if (fs.existsSync(CWD_CONFIG_FILE)) return CWD_CONFIG_FILE;
+  return XDG_CONFIG_FILE;
+}
+
+const CONFIG_FILE = resolveConfigFile();
 
 const DEFAULTS = {
   port: 4003,
@@ -20,7 +31,9 @@ function loadConfig() {
       console.error(`Warning: Could not parse ${CONFIG_FILE}:`, err.message);
     }
   } else {
-    // First-run: create default config
+    // First-run: create default config in XDG location
+    const dir = path.dirname(CONFIG_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(DEFAULTS, null, 2) + '\n');
     console.log(`Created default config: ${CONFIG_FILE}`);
   }

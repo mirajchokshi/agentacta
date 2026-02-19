@@ -57,6 +57,8 @@ function truncate(s, n = 200) {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
+// Removed jumpToInitialPrompt - now handled within session view
+
 function badgeClass(type, role) {
   if (type === 'tool_call') return 'badge-tool_call';
   if (type === 'tool_result') return 'badge-tool_result';
@@ -88,7 +90,7 @@ function renderEvent(ev) {
     body = `<div class="event-content">${escHtml(ev.content || '')}</div>`;
   }
 
-  return `<div class="event-item">
+  return `<div class="event-item" data-event-id="${ev.id}">
     <div class="event-time">${fmtTimeShort(ev.timestamp)}</div>
     ${badge}
     <div class="event-body">${body}</div>
@@ -114,6 +116,7 @@ function fmtTimeOnly(ts) {
 function renderSessionItem(s) {
   const duration = fmtDuration(s.start_time, s.end_time);
   const timeRange = `${fmtTime(s.start_time)} → ${s.end_time ? fmtTimeOnly(s.end_time) : 'now'}`;
+
   return `
     <div class="session-item" data-id="${s.id}">
       <div class="session-header">
@@ -286,7 +289,8 @@ async function viewSession(id) {
     <div class="back-btn" id="backBtn">← Back</div>
     <div style="display:flex;justify-content:space-between;align-items:center">
       <div class="page-title">Session</div>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;align-items:center">
+        ${s.first_message_id ? `<button class="jump-to-start-btn" id="jumpToStartBtn" title="Jump to initial prompt">↗️ Initial Prompt</button>` : ''}
         ${data.hasArchive ? `<a class="export-btn" href="#" onclick="dlExport('/api/archive/export/${id}','session.jsonl');return false">📦 JSONL</a>` : ''}
         <a class="export-btn" href="#" onclick="dlExport('/api/export/session/${id}?format=md','session.md');return false">📄 MD</a>
         <a class="export-btn" href="#" onclick="dlExport('/api/export/session/${id}?format=json','session.json');return false">📋 JSON</a>
@@ -318,6 +322,20 @@ async function viewSession(id) {
     else if (window._lastView === 'files') viewFiles();
     else viewSessions();
   });
+
+  const jumpBtn = $('#jumpToStartBtn');
+  if (jumpBtn) {
+    jumpBtn.addEventListener('click', () => {
+      const firstMessage = document.querySelector(`[data-event-id="${s.first_message_id}"]`);
+      if (firstMessage) {
+        firstMessage.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        firstMessage.style.background = 'var(--accent-bg)';
+        setTimeout(() => {
+          firstMessage.style.background = '';
+        }, 2000);
+      }
+    });
+  }
 }
 
 async function viewTimeline(date) {

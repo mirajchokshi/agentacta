@@ -6,9 +6,19 @@
   "bin": {
     "agentacta": "./index.js"
   },
+  "files": [
+    "index.js",
+    "indexer.js",
+    "db.js",
+    "config.js",
+    "public/",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "start": "node index.js",
     "index": "node indexer.js",
+    "test": "node --test tests/*.test.js",
     "demo": "node scripts/seed-demo.js && node index.js --demo",
     "seed-demo": "node scripts/seed-demo.js"
   },
