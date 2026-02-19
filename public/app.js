@@ -480,21 +480,28 @@ function renderFiles() {
       groups[dir].push(f);
     });
 
-    // Sort groups by total touches
+    // Sort groups by active sort criteria
+    const groupMetric = (files) => {
+      if (sort === 'touches') return files.reduce((s, f) => s + f.touch_count, 0);
+      if (sort === 'sessions') return files.reduce((s, f) => s + f.session_count, 0);
+      if (sort === 'recent') return Math.max(...files.map(f => new Date(f.last_touched).getTime()));
+      return 0;
+    };
     const sortedGroups = Object.entries(groups).sort((a, b) => {
-      const aTotal = a[1].reduce((s, f) => s + f.touch_count, 0);
-      const bTotal = b[1].reduce((s, f) => s + f.touch_count, 0);
-      return bTotal - aTotal;
+      if (sort === 'name') return a[0].localeCompare(b[0]);
+      return groupMetric(b[1]) - groupMetric(a[1]);
     });
 
     listEl.innerHTML = sortedGroups.map(([dir, dirFiles]) => {
       const totalTouches = dirFiles.reduce((s, f) => s + f.touch_count, 0);
+      const totalSessions = dirFiles.reduce((s, f) => s + f.session_count, 0);
+      const groupStat = sort === 'sessions' ? `${totalSessions} sessions` : `${totalTouches} touches`;
       return `
         <div class="file-group">
           <div class="file-group-header" data-dir="${escHtml(dir)}">
             <span class="file-group-arrow">▶</span>
             <span class="file-group-name">~/${escHtml(dir)}</span>
-            <span style="color:var(--text2);font-size:12px;margin-left:auto">${dirFiles.length} files · ${totalTouches} touches</span>
+            <span style="color:var(--text2);font-size:12px;margin-left:auto">${dirFiles.length} files · ${groupStat}</span>
           </div>
           <div class="file-group-items" style="display:none">
             ${dirFiles.map(f => renderFileItem(f)).join('')}
