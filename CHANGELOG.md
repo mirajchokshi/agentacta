@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Sort options (Most touched, Recent, Most sessions, A-Z) now work correctly in group-by-directory view
+- Model/sub-agent tags extracted from session data via fallback logic when `model_change` events are absent
+
+### Changed
+- Config path defaults to `~/.config/agentacta/config.json` (XDG), with CWD fallback for backward compatibility
+- Refactored duplicated DB statements into shared `createStmts(db)` helper
+- Graceful shutdown on SIGTERM/SIGINT with 5s force timeout
+- Service worker cache bumped to v3 with network-first strategy for CSS/JS
+- Cleaned up repo: removed duplicate root icons, moved `start-agentacta.sh` to `scripts/`
+
+### Added
+- Test suite: 20 tests across 4 suites (db, indexer, config, api) using `node:test`
+- CI workflow (`.github/workflows/ci.yml`) for Node 20/22
+- CONTRIBUTING.md
+
 ## [1.0.0] - 2026-02-18
 
 ### Features
