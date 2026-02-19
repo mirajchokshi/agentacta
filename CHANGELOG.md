@@ -1,22 +1,25 @@
 # Changelog
 
-## [Unreleased]
+## [1.1.0] - 2026-02-18
+
+### Added
+- **Claude Code support**: parse Claude Code JSONL format, auto-discover sessions in `~/.claude/projects/*/`
+- Session type inference from first user message (cron, heartbeat, sub-agent)
+- Model extraction fallback from assistant `message.model` when no `model_change` event exists
+- Test suite: 20 tests across 4 suites (db, indexer, config, api) using `node:test`
+- CI workflow (`.github/workflows/ci.yml`) for Node 20/22
+- CONTRIBUTING.md
+- Graceful shutdown on SIGTERM/SIGINT with 5s force timeout
 
 ### Fixed
 - Sort options (Most touched, Recent, Most sessions, A-Z) now work correctly in group-by-directory view
-- Model/sub-agent tags extracted from session data via fallback logic when `model_change` events are absent
+- Synthetic model names (`delivery-mirror`, `<synthetic>`) filtered from session metadata
 
 ### Changed
 - Config path defaults to `~/.config/agentacta/config.json` (XDG), with CWD fallback for backward compatibility
 - Refactored duplicated DB statements into shared `createStmts(db)` helper
-- Graceful shutdown on SIGTERM/SIGINT with 5s force timeout
 - Service worker cache bumped to v3 with network-first strategy for CSS/JS
 - Cleaned up repo: removed duplicate root icons, moved `start-agentacta.sh` to `scripts/`
-
-### Added
-- Test suite: 20 tests across 4 suites (db, indexer, config, api) using `node:test`
-- CI workflow (`.github/workflows/ci.yml`) for Node 20/22
-- CONTRIBUTING.md
 
 ## [1.0.0] - 2026-02-18
 
