@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.4] - 2026-02-21
+
+### Added
+- Session project tags (green pills) showing all inferred projects touched in a session
+
+### Fixed
+- Infer workspace project from session cwd so chat-heavy sessions still get project tags when possible
+
+
 ## [1.1.3] - 2026-02-21
 
 ### Changed
