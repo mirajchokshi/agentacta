@@ -107,6 +107,38 @@ function extractFilePaths(toolName, toolArgs) {
   return paths;
 }
 
+function extractProjectFromPath(filePath) {
+  if (!filePath || typeof filePath !== 'string') return null;
+
+  const normalized = filePath.replace(/\\/g, '/');
+
+  // Relative paths are usually from workspace cwd -> treat as workspace activity
+  if (!normalized.startsWith('/') && !normalized.startsWith('~')) return 'workspace';
+
+  let rel = normalized
+    .replace(/^\/home\/[^/]+\//, '')
+    .replace(/^\/Users\/[^/]+\//, '')
+    .replace(/^~\//, '');
+
+  const parts = rel.split('/').filter(Boolean);
+  if (!parts.length) return null;
+
+  // Common repo location: ~/Developer/<repo>/...
+  if (parts[0] === 'Developer' && parts[1]) return parts[1];
+
+  // OpenClaw workspace and agent stores
+  if (parts[0] === '.openclaw' && parts[1] === 'workspace') return 'workspace';
+  if (parts[0] === '.openclaw' && parts[1] === 'agents' && parts[2]) return `agent:${parts[2]}`;
+
+  // Claude Code projects
+  if (parts[0] === '.claude' && parts[1] === 'projects' && parts[2]) return `claude:${parts[2]}`;
+
+  // Shared files area
+  if (parts[0] === 'Shared') return 'shared';
+
+  return null;
+}
+
 function indexFile(db, filePath, agentName, stmts, archiveMode) {
   const stat = fs.statSync(filePath);
   const mtime = stat.mtime.toISOString();
@@ -177,6 +209,7 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
 
   const pendingEvents = [];
   const fileActivities = [];
+  const projectCounts = new Map();
 
   for (const line of lines) {
     let obj;
@@ -272,6 +305,9 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
             : tool.name.includes('edit') || tool.name === 'Edit' ? 'edit'
             : 'read';
           fileActivities.push([sessionId, fp, op, ts]);
+
+          const project = extractProjectFromPath(fp);
+          if (project) projectCounts.set(project, (projectCounts.get(project) || 0) + 1);
         }
       }
     }
@@ -301,7 +337,12 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
   }
 
   const modelsJson = modelsSet.size > 0 ? JSON.stringify([...modelsSet]) : null;
-  stmts.upsertSession.run(sessionId, sessionStart, sessionEnd, msgCount, toolCount, model, summary, agent, sessionType, totalCost, totalTokens, totalInputTokens, totalOutputTokens, totalCacheReadTokens, totalCacheWriteTokens, initialPrompt, firstMessageId, firstMessageTimestamp, modelsJson);
+  const projects = [...projectCounts.entries()]
+    .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
+    .map(([name]) => name);
+  const projectsJson = projects.length > 0 ? JSON.stringify(projects) : null;
+
+  stmts.upsertSession.run(sessionId, sessionStart, sessionEnd, msgCount, toolCount, model, summary, agent, sessionType, totalCost, totalTokens, totalInputTokens, totalOutputTokens, totalCacheReadTokens, totalCacheWriteTokens, initialPrompt, firstMessageId, firstMessageTimestamp, modelsJson, projectsJson);
   for (const ev of pendingEvents) stmts.insertEvent.run(...ev);
   for (const fa of fileActivities) stmts.insertFileActivity.run(...fa);
 

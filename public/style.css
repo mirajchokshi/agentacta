@@ -180,6 +180,7 @@ body {
 }
 
 .session-time { font-size: 13px; color: var(--text2); font-family: var(--mono); }
+.session-project { font-size: 11px; color: var(--accent2); background: rgba(63,185,80,0.14); padding: 2px 8px; border-radius: 10px; }
 .session-model { font-size: 11px; color: var(--purple); background: rgba(188,140,255,0.1); padding: 2px 8px; border-radius: 10px; }
 .session-summary { font-size: 14px; color: var(--text); line-height: 1.4; }
 .session-meta { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--text2); }

@@ -113,6 +113,14 @@ function fmtTimeOnly(ts) {
   return new Date(ts).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
 }
 
+function renderProjectTags(s) {
+  let projects = [];
+  if (s.projects) {
+    try { projects = JSON.parse(s.projects); } catch {}
+  }
+  return projects.map(p => `<span class="session-project">${escHtml(p)}</span>`).join('');
+}
+
 function renderModelTags(s) {
   // Prefer models array if present, fall back to single model
   let models = [];
@@ -132,6 +140,7 @@ function renderSessionItem(s) {
       <div class="session-header">
         <span class="session-time">${timeRange} · ${duration}</span>
         <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          ${renderProjectTags(s)}
           ${s.agent && s.agent !== 'main' ? `<span class="session-agent">${escHtml(s.agent)}</span>` : ''}
           ${s.session_type ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
           ${renderModelTags(s)}
@@ -318,6 +327,7 @@ async function viewSession(id) {
       <div class="session-header">
         <span class="session-time">${fmtDate(s.start_time)} · ${fmtTimeShort(s.start_time)} – ${fmtTimeShort(s.end_time)}</span>
         <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          ${renderProjectTags(s)}
           ${s.agent && s.agent !== 'main' ? `<span class="session-agent">${escHtml(s.agent)}</span>` : ''}
           ${s.session_type ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
           ${renderModelTags(s)}
