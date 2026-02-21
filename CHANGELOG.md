@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.2] - 2026-02-21
+
+### Changed
+- fix: update tests for new models parameter
+
+
 ## [1.1.0] - 2026-02-18
 
 ### Added
