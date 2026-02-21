@@ -113,6 +113,16 @@ function fmtTimeOnly(ts) {
   return new Date(ts).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
 }
 
+function renderModelTags(s) {
+  // Prefer models array if present, fall back to single model
+  let models = [];
+  if (s.models) {
+    try { models = JSON.parse(s.models); } catch {}
+  }
+  if (!models.length && s.model) models = [s.model];
+  return models.map(m => `<span class="session-model">${escHtml(m)}</span>`).join('');
+}
+
 function renderSessionItem(s) {
   const duration = fmtDuration(s.start_time, s.end_time);
   const timeRange = `${fmtTime(s.start_time)} → ${s.end_time ? fmtTimeOnly(s.end_time) : 'now'}`;
@@ -121,10 +131,10 @@ function renderSessionItem(s) {
     <div class="session-item" data-id="${s.id}">
       <div class="session-header">
         <span class="session-time">${timeRange} · ${duration}</span>
-        <span style="display:flex;gap:6px;align-items:center">
+        <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           ${s.agent && s.agent !== 'main' ? `<span class="session-agent">${escHtml(s.agent)}</span>` : ''}
           ${s.session_type ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
-          ${s.model ? `<span class="session-model">${escHtml(s.model)}</span>` : ''}
+          ${renderModelTags(s)}
         </span>
       </div>
       <div class="session-summary">${escHtml(truncate(s.summary || 'No summary', 120))}</div>
@@ -307,10 +317,10 @@ async function viewSession(id) {
     <div class="session-item" style="cursor:default">
       <div class="session-header">
         <span class="session-time">${fmtDate(s.start_time)} · ${fmtTimeShort(s.start_time)} – ${fmtTimeShort(s.end_time)}</span>
-        <span style="display:flex;gap:6px;align-items:center">
+        <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           ${s.agent && s.agent !== 'main' ? `<span class="session-agent">${escHtml(s.agent)}</span>` : ''}
           ${s.session_type ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
-          ${s.model ? `<span class="session-model">${escHtml(s.model)}</span>` : ''}
+          ${renderModelTags(s)}
         </span>
       </div>
       <div class="session-meta" style="display:grid;grid-template-columns:repeat(2,1fr);gap:6px 16px">

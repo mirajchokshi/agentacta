@@ -126,6 +126,7 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
   let msgCount = 0;
   let toolCount = 0;
   let model = null;
+  const modelsSet = new Set();
   let summary = '';
   let sessionType = null;
   let agent = agentName;
@@ -182,7 +183,10 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
     try { obj = JSON.parse(line); } catch { continue; }
 
     if (obj.type === 'session' || obj.type === 'model_change' || obj.type === 'thinking_level_change' || obj.type === 'custom' || obj.type === 'file-history-snapshot') {
-      if (obj.type === 'model_change') model = obj.modelId || model;
+      if (obj.type === 'model_change' && obj.modelId) {
+        if (!model) model = obj.modelId; // First model for backwards compat
+        modelsSet.add(obj.modelId); // Collect all unique models
+      }
       continue;
     }
 
@@ -204,9 +208,10 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
     if (msg) {
       sessionEnd = ts;
 
-      // Extract model from assistant messages as fallback
-      if (!model && msg.role === 'assistant' && msg.model && msg.model !== 'delivery-mirror' && !msg.model.startsWith('<')) {
-        model = msg.model;
+      // Extract model from assistant messages
+      if (msg.role === 'assistant' && msg.model && msg.model !== 'delivery-mirror' && !msg.model.startsWith('<')) {
+        if (!model) model = msg.model; // Keep first model for backwards compat
+        modelsSet.add(msg.model); // Collect all unique models
       }
 
       // Cost tracking
@@ -292,7 +297,8 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
     if (/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-/.test(p)) sessionType = 'subagent';
   }
 
-  stmts.upsertSession.run(sessionId, sessionStart, sessionEnd, msgCount, toolCount, model, summary, agent, sessionType, totalCost, totalTokens, totalInputTokens, totalOutputTokens, totalCacheReadTokens, totalCacheWriteTokens, initialPrompt, firstMessageId, firstMessageTimestamp);
+  const modelsJson = modelsSet.size > 0 ? JSON.stringify([...modelsSet]) : null;
+  stmts.upsertSession.run(sessionId, sessionStart, sessionEnd, msgCount, toolCount, model, summary, agent, sessionType, totalCost, totalTokens, totalInputTokens, totalOutputTokens, totalCacheReadTokens, totalCacheWriteTokens, initialPrompt, firstMessageId, firstMessageTimestamp, modelsJson);
   for (const ev of pendingEvents) stmts.insertEvent.run(...ev);
   for (const fa of fileActivities) stmts.insertFileActivity.run(...fa);
 
