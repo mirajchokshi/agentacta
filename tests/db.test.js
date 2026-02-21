@@ -54,7 +54,7 @@ describe('db', () => {
     const db = open(TEST_DB);
     const stmts = createStmts(db);
     stmts.upsertSession.run('test-sess-1', '2025-01-01T00:00:00Z', '2025-01-01T01:00:00Z',
-      1, 0, 'test-model', 'test summary', 'main', null, 0, 0, 0, 0, 0, 0, null, null, null);
+      1, 0, 'test-model', 'test summary', 'main', null, 0, 0, 0, 0, 0, 0, null, null, null, null);
     stmts.insertEvent.run('evt-1', 'test-sess-1', '2025-01-01T00:00:00Z', 'message', 'user',
       'hello world unique_search_term', null, null, null);
     const results = db.prepare("SELECT * FROM events_fts WHERE events_fts MATCH 'unique_search_term'").all();

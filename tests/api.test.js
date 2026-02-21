@@ -61,7 +61,7 @@ describe('api', () => {
 
     // Insert test data directly
     stmts.upsertSession.run('api-sess-1', '2025-01-01T00:00:00Z', '2025-01-01T00:02:00Z',
-      2, 0, 'test-model', 'test api query', 'main', null, 0.01, 500, 200, 300, 0, 0, 'test api query', 'api-msg-1', '2025-01-01T00:01:00Z');
+      2, 0, 'test-model', 'test api query', 'main', null, 0.01, 500, 200, 300, 0, 0, 'test api query', 'api-msg-1', '2025-01-01T00:01:00Z', null);
     stmts.insertEvent.run('api-evt-1', 'api-sess-1', '2025-01-01T00:01:00Z', 'message', 'user', 'test api query', null, null, null);
     stmts.insertEvent.run('api-evt-2', 'api-sess-1', '2025-01-01T00:02:00Z', 'message', 'assistant', 'test response', null, null, null);
 
