@@ -59,22 +59,14 @@ jobs:
         run: |
           VERSION=${{ steps.bump.outputs.version }}
           TODAY=$(date +%Y-%m-%d)
-          
-          # Get first line of commit message only (avoid sed issues with multiline)
           COMMIT_TITLE=$(echo "${{ github.event.head_commit.message }}" | head -1)
           
-          # Create changelog entry in temp file
-          cat > /tmp/changelog_entry.txt << EOF
-          
-## [$VERSION] - $TODAY
-
-### Changed
-- $COMMIT_TITLE
-
-EOF
-          
-          # Insert after # Changelog header
-          sed -i '/^# Changelog$/r /tmp/changelog_entry.txt' CHANGELOG.md
+          # Create entry and prepend after header
+          echo -e "\n## [$VERSION] - $TODAY\n\n### Changed\n- $COMMIT_TITLE\n" > /tmp/entry.txt
+          head -1 CHANGELOG.md > /tmp/new_changelog.md
+          cat /tmp/entry.txt >> /tmp/new_changelog.md
+          tail -n +2 CHANGELOG.md >> /tmp/new_changelog.md
+          mv /tmp/new_changelog.md CHANGELOG.md
 
       - name: Commit and tag
         run: |

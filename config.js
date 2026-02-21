@@ -53,3 +53,4 @@ function loadConfig() {
 }
 
 module.exports = { loadConfig, CONFIG_FILE };
+// v1.1.3
