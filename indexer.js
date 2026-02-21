@@ -290,7 +290,7 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
   }
   if (!sessionType && !initialPrompt) sessionType = 'heartbeat';
   // Detect subagent: task-style prompts injected by sessions_spawn
-  // These typically start with a date/time stamp and contain a detailed task
+  // These typically start with a date/time stamp (e.g. "[Wed 2026-...")
   // But exclude System Messages (cron announcements injected into main session)
   if (!sessionType && initialPrompt) {
     const p = initialPrompt.trim();
