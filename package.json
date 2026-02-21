@@ -20,8 +20,7 @@
     "index": "node indexer.js",
     "test": "node --test tests/*.test.js",
     "demo": "node scripts/seed-demo.js && node index.js --demo",
-    "seed-demo": "node scripts/seed-demo.js",
-    "release": "./scripts/release.sh"
+    "seed-demo": "node scripts/seed-demo.js"
   },
   "keywords": [
     "ai",
