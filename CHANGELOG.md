@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.3] - 2026-02-21
+
+### Changed
+- fix: simplify changelog update logic
+
+
 ## [1.1.2] - 2026-02-21
 
 ### Changed
