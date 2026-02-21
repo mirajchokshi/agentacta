@@ -291,10 +291,13 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
   if (!sessionType && !initialPrompt) sessionType = 'heartbeat';
   // Detect subagent: task-style prompts injected by sessions_spawn
   // These typically start with a date/time stamp and contain a detailed task
+  // But exclude System Messages (cron announcements injected into main session)
   if (!sessionType && initialPrompt) {
     const p = initialPrompt.trim();
-    // Sub-agent prompts start with "[Wed 2026-..." or "You are working on..."
-    if (/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-/.test(p)) sessionType = 'subagent';
+    // Sub-agent prompts start with "[Wed 2026-..." but NOT "[... [System Message]"
+    if (/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-/.test(p) && !p.includes('[System Message]')) {
+      sessionType = 'subagent';
+    }
   }
 
   const modelsJson = modelsSet.size > 0 ? JSON.stringify([...modelsSet]) : null;
