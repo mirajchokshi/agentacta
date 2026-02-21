@@ -218,7 +218,11 @@ async function showSearchHome() {
   });
 
   $$('.session-item', el).forEach(item => {
-    item.addEventListener('click', () => viewSession(item.dataset.id));
+    item.addEventListener('click', () => {
+      window._lastView = 'search';
+      window._lastSearchQuery = $('#searchInput')?.value || '';
+      viewSession(item.dataset.id);
+    });
   });
 }
 
@@ -260,11 +264,16 @@ async function doSearch(q) {
   `).join('');
 
   $$('.session-link', el).forEach(link => {
-    link.addEventListener('click', () => viewSession(link.dataset.session));
+    link.addEventListener('click', () => {
+      window._lastView = 'search';
+      window._lastSearchQuery = q;
+      viewSession(link.dataset.session);
+    });
   });
 }
 
 async function viewSessions() {
+  window._currentSessionId = null;
   content.innerHTML = '<div class="loading">Loading…</div>';
   const data = await api('/sessions?limit=200');
 
@@ -278,6 +287,7 @@ async function viewSessions() {
 }
 
 async function viewSession(id) {
+  window._currentSessionId = id;
   content.innerHTML = '<div class="loading">Loading…</div>';
   const data = await api(`/sessions/${id}`);
 
@@ -287,14 +297,12 @@ async function viewSession(id) {
   const cost = fmtCost(s.total_cost);
   let html = `
     <div class="back-btn" id="backBtn">← Back</div>
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <div class="page-title">Session</div>
-      <div style="display:flex;gap:8px;align-items:center">
-        ${s.first_message_id ? `<button class="jump-to-start-btn" id="jumpToStartBtn" title="Jump to initial prompt">↗️ Initial Prompt</button>` : ''}
-        ${data.hasArchive ? `<a class="export-btn" href="#" onclick="dlExport('/api/archive/export/${id}','session.jsonl');return false">📦 JSONL</a>` : ''}
-        <a class="export-btn" href="#" onclick="dlExport('/api/export/session/${id}?format=md','session.md');return false">📄 MD</a>
-        <a class="export-btn" href="#" onclick="dlExport('/api/export/session/${id}?format=json','session.json');return false">📋 JSON</a>
-      </div>
+    <div class="page-title">Session</div>
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+      ${s.first_message_id ? `<button class="jump-to-start-btn" id="jumpToStartBtn" title="Jump to initial prompt">↗️ Initial Prompt</button>` : ''}
+      ${data.hasArchive ? `<a class="export-btn" href="#" onclick="dlExport('/api/archive/export/${id}','session.jsonl');return false">📦 JSONL</a>` : ''}
+      <a class="export-btn" href="#" onclick="dlExport('/api/export/session/${id}?format=md','session.md');return false">📄 MD</a>
+      <a class="export-btn" href="#" onclick="dlExport('/api/export/session/${id}?format=json','session.json');return false">📋 JSON</a>
     </div>
     <div class="session-item" style="cursor:default">
       <div class="session-header">
@@ -320,6 +328,7 @@ async function viewSession(id) {
   $('#backBtn').addEventListener('click', () => {
     if (window._lastView === 'timeline') viewTimeline();
     else if (window._lastView === 'files') viewFiles();
+    else if (window._lastView === 'search') viewSearch(window._lastSearchQuery || '');
     else viewSessions();
   });
 
@@ -613,6 +622,40 @@ $$('.nav-item').forEach(item => {
 
 viewSearch();
 
+// Swipe right from left edge to go back
+(function initSwipeBack() {
+  let startX = 0, startY = 0, swiping = false;
+  const edgeWidth = 30; // px from left edge
+  const threshold = 80;
+
+  document.addEventListener('touchstart', e => {
+    const x = e.touches[0].clientX;
+    if (x <= edgeWidth) {
+      startX = x;
+      startY = e.touches[0].clientY;
+      swiping = true;
+    }
+  }, { passive: true });
+
+  document.addEventListener('touchmove', e => {
+    if (!swiping) return;
+    const dx = e.touches[0].clientX - startX;
+    const dy = Math.abs(e.touches[0].clientY - startY);
+    // Cancel if vertical movement exceeds horizontal (it's a scroll)
+    if (dy > dx) { swiping = false; }
+  }, { passive: true });
+
+  document.addEventListener('touchend', e => {
+    if (!swiping) return;
+    swiping = false;
+    const dx = e.changedTouches[0].clientX - startX;
+    if (dx > threshold) {
+      const backBtn = $('#backBtn');
+      if (backBtn) backBtn.click();
+    }
+  });
+})();
+
 // Pull to refresh
 (function initPTR() {
   let startY = 0;
@@ -652,8 +695,14 @@ viewSearch();
       indicator.classList.add('refreshing');
       try {
         await api('/reindex');
-        const active = $('.nav-item.active');
-        if (active) active.click();
+        // If viewing a session detail, refresh it in place
+        const backBtn = $('#backBtn');
+        if (backBtn && window._currentSessionId) {
+          await viewSession(window._currentSessionId);
+        } else {
+          const active = $('.nav-item.active');
+          if (active) active.click();
+        }
       } catch(err) {}
       setTimeout(() => {
         indicator.classList.remove('visible', 'refreshing');
