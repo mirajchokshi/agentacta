@@ -211,6 +211,12 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
   const fileActivities = [];
   const projectCounts = new Map();
 
+  // Seed project from session cwd when available (helps chat-only sessions)
+  if (firstLine && firstLine.cwd) {
+    const p = extractProjectFromPath(firstLine.cwd);
+    if (p) projectCounts.set(p, 1);
+  }
+
   for (const line of lines) {
     let obj;
     try { obj = JSON.parse(line); } catch { continue; }
