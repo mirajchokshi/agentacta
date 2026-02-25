@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.5] - 2026-02-25
+
+### Added
+- Configurable `projectAliases` in config to normalize inferred project tags (e.g. rename old project names)
+- Stats: collapse Claude session paths into one aggregated entry
+
+### Changed
+- Stats: label main agent as `openclaw-main` for clarity
+- Improved session UX and search robustness
+
+### Fixed
+- Config test no longer affected by local config file in working directory
+
 ## [1.1.4] - 2026-02-21
 
 ### Added
