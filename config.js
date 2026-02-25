@@ -18,7 +18,8 @@ const DEFAULTS = {
   port: 4003,
   storage: 'reference',
   sessionsPath: null,
-  dbPath: './agentacta.db'
+  dbPath: './agentacta.db',
+  projectAliases: {}
 };
 
 function loadConfig() {
@@ -45,9 +46,17 @@ function loadConfig() {
   if (process.env.AGENTACTA_STORAGE) config.storage = process.env.AGENTACTA_STORAGE;
   if (process.env.AGENTACTA_SESSIONS_PATH) config.sessionsPath = process.env.AGENTACTA_SESSIONS_PATH;
   if (process.env.AGENTACTA_DB_PATH) config.dbPath = process.env.AGENTACTA_DB_PATH;
+  if (process.env.AGENTACTA_PROJECT_ALIASES_JSON) {
+    try {
+      config.projectAliases = JSON.parse(process.env.AGENTACTA_PROJECT_ALIASES_JSON);
+    } catch (err) {
+      console.error('Warning: Could not parse AGENTACTA_PROJECT_ALIASES_JSON:', err.message);
+    }
+  }
 
   // Resolve dbPath relative to cwd
   config.dbPath = path.resolve(config.dbPath);
+  if (!config.projectAliases || typeof config.projectAliases !== 'object') config.projectAliases = {};
 
   return config;
 }

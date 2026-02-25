@@ -108,7 +108,8 @@ On first run, AgentActa creates a config file with sensible defaults at `~/.conf
   "port": 4003,
   "storage": "reference",
   "sessionsPath": null,
-  "dbPath": "./agentacta.db"
+  "dbPath": "./agentacta.db",
+  "projectAliases": {}
 }
 ```
 
@@ -126,6 +127,7 @@ On first run, AgentActa creates a config file with sensible defaults at `~/.conf
 | `AGENTACTA_SESSIONS_PATH` | Auto-detected | Custom sessions directory |
 | `AGENTACTA_DB_PATH` | `./agentacta.db` | Database file location |
 | `AGENTACTA_STORAGE` | `reference` | Storage mode (`reference` or `archive`) |
+| `AGENTACTA_PROJECT_ALIASES_JSON` | unset | JSON object mapping inferred project names (e.g. `{"old-name":"new-name"}`) |
 
 ## API
 

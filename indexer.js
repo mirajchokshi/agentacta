@@ -107,13 +107,19 @@ function extractFilePaths(toolName, toolArgs) {
   return paths;
 }
 
-function extractProjectFromPath(filePath) {
+function aliasProject(project, config) {
+  if (!project) return project;
+  const aliases = (config && config.projectAliases && typeof config.projectAliases === 'object') ? config.projectAliases : {};
+  return aliases[project] || project;
+}
+
+function extractProjectFromPath(filePath, config) {
   if (!filePath || typeof filePath !== 'string') return null;
 
   const normalized = filePath.replace(/\\/g, '/');
 
   // Relative paths are usually from workspace cwd -> treat as workspace activity
-  if (!normalized.startsWith('/') && !normalized.startsWith('~')) return 'workspace';
+  if (!normalized.startsWith('/') && !normalized.startsWith('~')) return aliasProject('workspace', config);
 
   let rel = normalized
     .replace(/^\/home\/[^/]+\//, '')
@@ -124,22 +130,22 @@ function extractProjectFromPath(filePath) {
   if (!parts.length) return null;
 
   // Common repo location: ~/Developer/<repo>/...
-  if (parts[0] === 'Developer' && parts[1]) return parts[1];
+  if (parts[0] === 'Developer' && parts[1]) return aliasProject(parts[1], config);
 
   // OpenClaw workspace and agent stores
-  if (parts[0] === '.openclaw' && parts[1] === 'workspace') return 'workspace';
-  if (parts[0] === '.openclaw' && parts[1] === 'agents' && parts[2]) return `agent:${parts[2]}`;
+  if (parts[0] === '.openclaw' && parts[1] === 'workspace') return aliasProject('workspace', config);
+  if (parts[0] === '.openclaw' && parts[1] === 'agents' && parts[2]) return aliasProject(`agent:${parts[2]}`, config);
 
   // Claude Code projects
-  if (parts[0] === '.claude' && parts[1] === 'projects' && parts[2]) return `claude:${parts[2]}`;
+  if (parts[0] === '.claude' && parts[1] === 'projects' && parts[2]) return aliasProject(`claude:${parts[2]}`, config);
 
   // Shared files area
-  if (parts[0] === 'Shared') return 'shared';
+  if (parts[0] === 'Shared') return aliasProject('shared', config);
 
   return null;
 }
 
-function indexFile(db, filePath, agentName, stmts, archiveMode) {
+function indexFile(db, filePath, agentName, stmts, archiveMode, config) {
   const stat = fs.statSync(filePath);
   const mtime = stat.mtime.toISOString();
 
@@ -312,7 +318,7 @@ function indexFile(db, filePath, agentName, stmts, archiveMode) {
             : 'read';
           fileActivities.push([sessionId, fp, op, ts]);
 
-          const project = extractProjectFromPath(fp);
+          const project = extractProjectFromPath(fp, config);
           if (project) projectCounts.set(project, (projectCounts.get(project) || 0) + 1);
         }
       }
@@ -391,7 +397,7 @@ function run() {
   const indexMany = db.transaction(() => {
     let indexed = 0;
     for (const f of allFiles) {
-      const result = indexFile(db, f.path, f.agent, stmts, archiveMode);
+      const result = indexFile(db, f.path, f.agent, stmts, archiveMode, config);
       if (!result.skipped) {
         indexed++;
         if (indexed % 10 === 0) process.stdout.write('.');
@@ -416,7 +422,7 @@ function run() {
         if (!fs.existsSync(filePath)) return;
         setTimeout(() => {
           try {
-            const result = indexFile(db, filePath, dir.agent, stmts, archiveMode);
+            const result = indexFile(db, filePath, dir.agent, stmts, archiveMode, config);
             if (!result.skipped) console.log(`Re-indexed: ${filename} (${dir.agent})`);
           } catch (err) {
             console.error(`Error re-indexing ${filename}:`, err.message);
@@ -437,7 +443,7 @@ function indexAll(db, config) {
   for (const dir of sessionDirs) {
     const files = fs.readdirSync(dir.path).filter(f => f.endsWith('.jsonl'));
     for (const file of files) {
-      const result = indexFile(db, path.join(dir.path, file), dir.agent, stmts, archiveMode);
+      const result = indexFile(db, path.join(dir.path, file), dir.agent, stmts, archiveMode, config);
       if (!result.skipped) totalSessions++;
     }
   }
