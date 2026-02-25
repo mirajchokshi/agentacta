@@ -464,13 +464,31 @@ async function viewStats() {
       <div class="stat-card"><div class="label">DB Size</div><div class="value" style="font-size:18px">${escHtml(data.dbSize?.display || 'N/A')}</div></div>
     </div>
 
-    ${data.sessionDirs && data.sessionDirs.length ? `<div class="section-label">Sessions Paths</div>
-    <div style="font-size:13px;color:var(--text2);font-family:var(--mono)">
-      ${data.sessionDirs.map(d => {
-        const display = d.path.replace(/^\/home\/[^/]+/, '~').replace(/^\/Users\/[^/]+/, '~');
-        return `<div style="margin-bottom:4px">📂 ${escHtml(display)} <span style="color:var(--accent)">(${escHtml(d.agent)})</span></div>`;
-      }).join('')}
-    </div>` : ''}
+    ${data.sessionDirs && data.sessionDirs.length ? (() => {
+      const dirs = data.sessionDirs || [];
+      const claudeDirs = dirs.filter(d => d.agent === 'claude-code' || /^claude-/.test(d.agent || ''));
+      const otherDirs = dirs.filter(d => !(d.agent === 'claude-code' || /^claude-/.test(d.agent || '')));
+
+      const lines = [];
+
+      if (claudeDirs.length) {
+        const projects = new Set();
+        for (const d of claudeDirs) {
+          const m = (d.path || '').match(/[\\/]\.claude[\\/]projects[\\/]([^\\/]+)$/);
+          if (m && m[1]) projects.add(m[1]);
+        }
+        const projectCount = projects.size || claudeDirs.length;
+        lines.push(`<div style="margin-bottom:4px">📂 ~/.claude/projects/* <span style="color:var(--accent)">(claude-code · ${projectCount} workspace${projectCount === 1 ? '' : 's'})</span></div>`);
+      }
+
+      for (const d of otherDirs) {
+        const display = (d.path || '').replace(/^\/home\/[^/]+/, '~').replace(/^\/Users\/[^/]+/, '~');
+        lines.push(`<div style="margin-bottom:4px">📂 ${escHtml(display)} <span style="color:var(--accent)">(${escHtml(d.agent)})</span></div>`);
+      }
+
+      return `<div class="section-label">Sessions Paths</div>
+      <div style="font-size:13px;color:var(--text2);font-family:var(--mono)">${lines.join('')}</div>`;
+    })() : ''}
 
     ${data.agents && data.agents.length > 1 ? `<div class="section-label">Agents</div><div class="filters">${data.agents.map(a => `<span class="filter-chip">${escHtml(a)}</span>`).join('')}</div>` : ''}
     <div class="section-label">Date Range</div>
