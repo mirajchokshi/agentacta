@@ -38,12 +38,12 @@ function discoverSessionDirs(config) {
       // Claude Code: JSONL files directly in project dir
       if (fs.existsSync(projDir) && fs.statSync(projDir).isDirectory()) {
         const hasJsonl = fs.readdirSync(projDir).some(f => f.endsWith('.jsonl'));
-        if (hasJsonl) dirs.push({ path: projDir, agent: `claude-${proj}` });
+        if (hasJsonl) dirs.push({ path: projDir, agent: 'claude-code' });
       }
       // Also check sessions/ subdirectory (future-proofing)
       const sp = path.join(projDir, 'sessions');
       if (fs.existsSync(sp) && fs.statSync(sp).isDirectory()) {
-        dirs.push({ path: sp, agent: `claude-${proj}` });
+        dirs.push({ path: sp, agent: 'claude-code' });
       }
     }
   }

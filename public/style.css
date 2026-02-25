@@ -459,6 +459,64 @@ mark { background: rgba(210,153,34,0.3); color: var(--text); border-radius: 2px;
   border-color: var(--accent2);
 }
 
+/* Session ID (copyable) */
+.session-id-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  width: 100%;
+}
+
+.session-id-label {
+  font-size: 11px;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+
+.session-id-value {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text2);
+  background: var(--bg3);
+  padding: 2px 8px;
+  border-radius: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-id-copy {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text2);
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 12px;
+  line-height: 1;
+  transition: all 0.15s;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+}
+
+.session-id-copy:hover { color: var(--text); border-color: var(--accent); }
+
+.session-id-copied {
+  font-size: 11px;
+  color: var(--accent2);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.session-id-copied.show { opacity: 1; }
+
 /* File activity */
 .file-item {
   background: var(--bg2);
@@ -560,4 +618,6 @@ mark { background: rgba(210,153,34,0.3); color: var(--text); border-radius: 2px;
 
   .result-meta { flex-wrap: wrap; }
   .tool-args { font-size: 11px; }
+
+  .session-id-value { font-size: 11px; }
 }

@@ -97,6 +97,31 @@ function getDbSize() {
   }
 }
 
+function normalizeAgentLabel(agent) {
+  if (!agent) return agent;
+  if (agent === 'main') return 'main';
+  if (agent.startsWith('claude-') || agent.startsWith('claude--')) return 'claude-code';
+  return agent;
+}
+
+function looksLikeSessionId(q) {
+  const s = (q || '').trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+}
+
+function toFtsQuery(q) {
+  const s = (q || '').trim();
+  if (!s) return '';
+  // Quote each token so dashes and punctuation don't break FTS parsing.
+  // Example: abc-def -> "abc-def"
+  const tokens = s.match(/"[^"]+"|\S+/g) || [];
+  return tokens
+    .map(t => t.replace(/^"|"$/g, '').replace(/"/g, '""'))
+    .filter(Boolean)
+    .map(t => `"${t}"`)
+    .join(' AND ');
+}
+
 // Init DB and start watcher
 init();
 const db = open();
@@ -197,7 +222,11 @@ const server = http.createServer((req, res) => {
       const tools = db.prepare("SELECT DISTINCT tool_name FROM events WHERE tool_name IS NOT NULL").all().map(r => r.tool_name);
       const dateRange = db.prepare('SELECT MIN(start_time) as earliest, MAX(start_time) as latest FROM sessions').get();
       const costData = db.prepare('SELECT SUM(total_cost) as cost, SUM(total_tokens) as tokens FROM sessions').get();
-      const agents = db.prepare('SELECT DISTINCT agent FROM sessions WHERE agent IS NOT NULL').all().map(r => r.agent);
+      const agents = [...new Set(
+        db.prepare('SELECT DISTINCT agent FROM sessions WHERE agent IS NOT NULL').all()
+          .map(r => normalizeAgentLabel(r.agent))
+          .filter(Boolean)
+      )];
       const dbSize = getDbSize();
       json(res, { sessions, events, messages, toolCalls, uniqueTools: tools.length, tools, dateRange, totalCost: costData.cost || 0, totalTokens: costData.tokens || 0, agents, storageMode: config.storage, dbSize, sessionDirs: sessionDirs.map(d => ({ path: d.path, agent: d.agent })) });
     }
@@ -256,7 +285,12 @@ const server = http.createServer((req, res) => {
       if (!q) { json(res, { error: 'No query' }, 400); return; }
       let results;
       try {
-        results = db.prepare(`SELECT e.*, s.start_time as session_start, s.summary as session_summary FROM events_fts fts JOIN events e ON e.rowid = fts.rowid JOIN sessions s ON s.id = e.session_id WHERE events_fts MATCH ? ORDER BY e.timestamp DESC LIMIT 200`).all(q);
+        if (looksLikeSessionId(q)) {
+          results = db.prepare(`SELECT e.*, s.start_time as session_start, s.summary as session_summary FROM events e JOIN sessions s ON s.id = e.session_id WHERE e.session_id = ? ORDER BY e.timestamp DESC LIMIT 200`).all(q.trim());
+        } else {
+          const ftsQuery = toFtsQuery(q);
+          results = db.prepare(`SELECT e.*, s.start_time as session_start, s.summary as session_summary FROM events_fts fts JOIN events e ON e.rowid = fts.rowid JOIN sessions s ON s.id = e.session_id WHERE events_fts MATCH ? ORDER BY e.timestamp DESC LIMIT 200`).all(ftsQuery);
+        }
       } catch (err) { json(res, { error: 'Invalid search query' }, 400); return; }
       if (format === 'md') {
         let md = `# Search Results: "${q}"\n\n${results.length} results\n\n`;
@@ -280,18 +314,32 @@ const server = http.createServer((req, res) => {
 
       if (!q) { json(res, { results: [], total: 0 }); }
       else {
-        let sql = `SELECT e.*, s.start_time as session_start, s.summary as session_summary
-                    FROM events_fts fts
-                    JOIN events e ON e.rowid = fts.rowid
-                    JOIN sessions s ON s.id = e.session_id
-                    WHERE events_fts MATCH ?`;
-        const params = [q];
+        const isSessionLookup = looksLikeSessionId(q);
+        let sql;
+        const params = [];
+
+        if (isSessionLookup) {
+          sql = `SELECT e.*, s.start_time as session_start, s.summary as session_summary
+                 FROM events e
+                 JOIN sessions s ON s.id = e.session_id
+                 WHERE e.session_id = ?`;
+          params.push(q.trim());
+        } else {
+          sql = `SELECT e.*, s.start_time as session_start, s.summary as session_summary
+                 FROM events_fts fts
+                 JOIN events e ON e.rowid = fts.rowid
+                 JOIN sessions s ON s.id = e.session_id
+                 WHERE events_fts MATCH ?`;
+          params.push(toFtsQuery(q));
+        }
+
         if (type) { sql += ` AND e.type = ?`; params.push(type); }
         if (role) { sql += ` AND e.role = ?`; params.push(role); }
         if (from) { sql += ` AND e.timestamp >= ?`; params.push(from); }
         if (to) { sql += ` AND e.timestamp <= ?`; params.push(to); }
         sql += ` ORDER BY e.timestamp DESC LIMIT ?`;
         params.push(limit);
+
         try {
           const results = db.prepare(sql).all(...params);
           json(res, { results, total: results.length });

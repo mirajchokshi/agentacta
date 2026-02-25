@@ -57,6 +57,11 @@ function truncate(s, n = 200) {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
+function shortSessionId(id) {
+  if (!id) return '';
+  return id.length > 24 ? `${id.slice(0, 8)}…${id.slice(-8)}` : id;
+}
+
 // Removed jumpToInitialPrompt - now handled within session view
 
 function badgeClass(type, role) {
@@ -113,6 +118,12 @@ function fmtTimeOnly(ts) {
   return new Date(ts).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
 }
 
+function normalizeAgentLabel(a) {
+  if (!a) return a;
+  if (a.startsWith('claude-') || a.startsWith('claude--')) return 'claude-code';
+  return a;
+}
+
 function renderProjectTags(s) {
   let projects = [];
   if (s.projects) {
@@ -141,7 +152,7 @@ function renderSessionItem(s) {
         <span class="session-time">${timeRange} · ${duration}</span>
         <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           ${renderProjectTags(s)}
-          ${s.agent && s.agent !== 'main' ? `<span class="session-agent">${escHtml(s.agent)}</span>` : ''}
+          ${s.agent && normalizeAgentLabel(s.agent) !== 'main' ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
           ${s.session_type ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
           ${renderModelTags(s)}
         </span>
@@ -317,6 +328,12 @@ async function viewSession(id) {
   let html = `
     <div class="back-btn" id="backBtn">← Back</div>
     <div class="page-title">Session</div>
+    <div class="session-id-row">
+      <span class="session-id-label">ID</span>
+      <span class="session-id-value" title="${escHtml(id)}">${escHtml(id)}</span>
+      <button class="session-id-copy" id="copySessionId" title="Copy session ID">⧉</button>
+      <span class="session-id-copied" id="copyConfirm">Copied!</span>
+    </div>
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
       ${s.first_message_id ? `<button class="jump-to-start-btn" id="jumpToStartBtn" title="Jump to initial prompt">↗️ Initial Prompt</button>` : ''}
       ${data.hasArchive ? `<a class="export-btn" href="#" onclick="dlExport('/api/archive/export/${id}','session.jsonl');return false">📦 JSONL</a>` : ''}
@@ -328,7 +345,7 @@ async function viewSession(id) {
         <span class="session-time">${fmtDate(s.start_time)} · ${fmtTimeShort(s.start_time)} – ${fmtTimeShort(s.end_time)}</span>
         <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           ${renderProjectTags(s)}
-          ${s.agent && s.agent !== 'main' ? `<span class="session-agent">${escHtml(s.agent)}</span>` : ''}
+          ${s.agent && normalizeAgentLabel(s.agent) !== 'main' ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
           ${s.session_type ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
           ${renderModelTags(s)}
         </span>
@@ -350,6 +367,46 @@ async function viewSession(id) {
     else if (window._lastView === 'files') viewFiles();
     else if (window._lastView === 'search') viewSearch(window._lastSearchQuery || '');
     else viewSessions();
+  });
+
+  $('#copySessionId').addEventListener('click', async () => {
+    const conf = $('#copyConfirm');
+    const showCopied = () => {
+      conf.textContent = 'Copied!';
+      conf.classList.add('show');
+      setTimeout(() => conf.classList.remove('show'), 1500);
+    };
+
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(id);
+        showCopied();
+        return;
+      }
+
+      // Fallback for non-secure contexts (http/local)
+      const ta = document.createElement('textarea');
+      ta.value = id;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      ta.style.pointerEvents = 'none';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+
+      if (ok) showCopied();
+      else throw new Error('Copy failed');
+    } catch {
+      conf.textContent = 'Press Ctrl/Cmd+C';
+      conf.classList.add('show');
+      setTimeout(() => {
+        conf.classList.remove('show');
+        conf.textContent = 'Copied!';
+      }, 1800);
+    }
   });
 
   const jumpBtn = $('#jumpToStartBtn');
