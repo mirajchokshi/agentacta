@@ -99,7 +99,7 @@ function getDbSize() {
 
 function normalizeAgentLabel(agent) {
   if (!agent) return agent;
-  if (agent === 'main') return 'main';
+  if (agent === 'main') return 'openclaw-main';
   if (agent.startsWith('claude-') || agent.startsWith('claude--')) return 'claude-code';
   return agent;
 }

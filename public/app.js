@@ -120,6 +120,7 @@ function fmtTimeOnly(ts) {
 
 function normalizeAgentLabel(a) {
   if (!a) return a;
+  if (a === 'main') return 'openclaw-main';
   if (a.startsWith('claude-') || a.startsWith('claude--')) return 'claude-code';
   return a;
 }
@@ -152,7 +153,7 @@ function renderSessionItem(s) {
         <span class="session-time">${timeRange} · ${duration}</span>
         <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           ${renderProjectTags(s)}
-          ${s.agent && normalizeAgentLabel(s.agent) !== 'main' ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
+          ${s.agent && s.agent !== 'main' ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
           ${s.session_type ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
           ${renderModelTags(s)}
         </span>
@@ -345,7 +346,7 @@ async function viewSession(id) {
         <span class="session-time">${fmtDate(s.start_time)} · ${fmtTimeShort(s.start_time)} – ${fmtTimeShort(s.end_time)}</span>
         <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           ${renderProjectTags(s)}
-          ${s.agent && normalizeAgentLabel(s.agent) !== 'main' ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
+          ${s.agent && s.agent !== 'main' ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
           ${s.session_type ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
           ${renderModelTags(s)}
         </span>
@@ -483,7 +484,7 @@ async function viewStats() {
 
       for (const d of otherDirs) {
         const display = (d.path || '').replace(/^\/home\/[^/]+/, '~').replace(/^\/Users\/[^/]+/, '~');
-        lines.push(`<div style="margin-bottom:4px">📂 ${escHtml(display)} <span style="color:var(--accent)">(${escHtml(d.agent)})</span></div>`);
+        lines.push(`<div style="margin-bottom:4px">📂 ${escHtml(display)} <span style="color:var(--accent)">(${escHtml(normalizeAgentLabel(d.agent))})</span></div>`);
       }
 
       return `<div class="section-label">Sessions Paths</div>
