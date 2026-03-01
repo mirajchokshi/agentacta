@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.2] - 2026-02-28
+
+### Fixed
+- Session detail crashed mobile Safari on large sessions (679KB+ payload, 700+ events)
+- White flash when navigating into session detail view
+- Scroll position not resetting between session views
+- Scroll listener leak when navigating back from session detail
+- Pull-to-refresh double-fire race condition
+
+### Changed
+- Session events now paginate with infinite scroll (50 at a time)
+- Initial Prompt button loads all events before scrolling to target
+- API wrapper catches network errors and bad JSON gracefully
+- All views handle server-unavailable state with friendly error
+
 ## [1.2.1] - 2026-02-28
 
 ### Fixed

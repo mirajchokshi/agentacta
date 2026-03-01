@@ -146,20 +146,28 @@ for (const dir of sessionDirs) {
 
 console.log(`Watching ${sessionDirs.length} session directories`);
 
+// Debounce map: filePath -> timeout handle
+const _reindexTimers = new Map();
+const REINDEX_DEBOUNCE_MS = 2000;
+
 for (const dir of sessionDirs) {
   try {
     fs.watch(dir.path, { persistent: false }, (eventType, filename) => {
       if (!filename || !filename.endsWith('.jsonl')) return;
       const filePath = path.join(dir.path, filename);
       if (!fs.existsSync(filePath)) return;
-      setTimeout(() => {
+
+      // Debounce: cancel pending re-index for this file, schedule a new one
+      if (_reindexTimers.has(filePath)) clearTimeout(_reindexTimers.get(filePath));
+      _reindexTimers.set(filePath, setTimeout(() => {
+        _reindexTimers.delete(filePath);
         try {
           const result = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE);
           if (!result.skipped) console.log(`Live re-indexed: ${filename} (${dir.agent})`);
         } catch (err) {
           console.error(`Error re-indexing ${filename}:`, err.message);
         }
-      }, 500);
+      }, REINDEX_DEBOUNCE_MS));
     });
     console.log(`  Watching: ${dir.path}`);
   } catch (err) {
@@ -403,6 +411,17 @@ const server = http.createServer((req, res) => {
 });
 
 const HOST = process.env.AGENTACTA_HOST || '127.0.0.1';
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} in use, retrying in 2s...`);
+    setTimeout(() => {
+      server.close();
+      server.listen(PORT, HOST);
+    }, 2000);
+  } else {
+    throw err;
+  }
+});
 server.listen(PORT, HOST, () => console.log(`AgentActa running on http://${HOST}:${PORT}`));
 
 // Graceful shutdown

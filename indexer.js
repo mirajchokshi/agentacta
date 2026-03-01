@@ -208,11 +208,7 @@ function indexFile(db, filePath, agentName, stmts, archiveMode, config) {
     return { skipped: true };
   }
 
-  stmts.deleteEvents.run(sessionId);
-  stmts.deleteSession.run(sessionId);
-  stmts.deleteFileActivity.run(sessionId);
-  if (stmts.deleteArchive) stmts.deleteArchive.run(sessionId);
-
+  // --- Parse the entire file BEFORE any DB operations ---
   const pendingEvents = [];
   const fileActivities = [];
   const projectCounts = new Map();
@@ -338,11 +334,8 @@ function indexFile(db, filePath, agentName, stmts, archiveMode, config) {
   }
   if (!sessionType && !initialPrompt) sessionType = 'heartbeat';
   // Detect subagent: task-style prompts injected by sessions_spawn
-  // These typically start with a date/time stamp (e.g. "[Wed 2026-...")
-  // But exclude System Messages (cron announcements injected into main session)
   if (!sessionType && initialPrompt) {
     const p = initialPrompt.trim();
-    // Sub-agent prompts start with "[Wed 2026-..." but NOT "[... [System Message]"
     if (/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-/.test(p) && !p.includes('[System Message]')) {
       sessionType = 'subagent';
     }
@@ -354,18 +347,28 @@ function indexFile(db, filePath, agentName, stmts, archiveMode, config) {
     .map(([name]) => name);
   const projectsJson = projects.length > 0 ? JSON.stringify(projects) : null;
 
-  stmts.upsertSession.run(sessionId, sessionStart, sessionEnd, msgCount, toolCount, model, summary, agent, sessionType, totalCost, totalTokens, totalInputTokens, totalOutputTokens, totalCacheReadTokens, totalCacheWriteTokens, initialPrompt, firstMessageId, firstMessageTimestamp, modelsJson, projectsJson);
-  for (const ev of pendingEvents) stmts.insertEvent.run(...ev);
-  for (const fa of fileActivities) stmts.insertFileActivity.run(...fa);
+  // --- All DB operations in a single transaction for atomicity ---
+  const commitIndex = db.transaction(() => {
+    stmts.deleteEvents.run(sessionId);
+    stmts.deleteFileActivity.run(sessionId);
+    if (stmts.deleteArchive) stmts.deleteArchive.run(sessionId);
+    stmts.deleteSession.run(sessionId);
 
-  // Archive mode: store raw JSONL lines
-  if (archiveMode && stmts.insertArchive) {
-    for (let i = 0; i < lines.length; i++) {
-      stmts.insertArchive.run(sessionId, i + 1, lines[i]);
+    stmts.upsertSession.run(sessionId, sessionStart, sessionEnd, msgCount, toolCount, model, summary, agent, sessionType, totalCost, totalTokens, totalInputTokens, totalOutputTokens, totalCacheReadTokens, totalCacheWriteTokens, initialPrompt, firstMessageId, firstMessageTimestamp, modelsJson, projectsJson);
+    for (const ev of pendingEvents) stmts.insertEvent.run(...ev);
+    for (const fa of fileActivities) stmts.insertFileActivity.run(...fa);
+
+    // Archive mode: store raw JSONL lines
+    if (archiveMode && stmts.insertArchive) {
+      for (let i = 0; i < lines.length; i++) {
+        stmts.insertArchive.run(sessionId, i + 1, lines[i]);
+      }
     }
-  }
 
-  stmts.upsertState.run(filePath, lines.length, mtime);
+    stmts.upsertState.run(filePath, lines.length, mtime);
+  });
+
+  commitIndex();
 
   return { sessionId, msgCount, toolCount };
 }
@@ -443,8 +446,12 @@ function indexAll(db, config) {
   for (const dir of sessionDirs) {
     const files = fs.readdirSync(dir.path).filter(f => f.endsWith('.jsonl'));
     for (const file of files) {
-      const result = indexFile(db, path.join(dir.path, file), dir.agent, stmts, archiveMode, config);
-      if (!result.skipped) totalSessions++;
+      try {
+        const result = indexFile(db, path.join(dir.path, file), dir.agent, stmts, archiveMode, config);
+        if (!result.skipped) totalSessions++;
+      } catch (err) {
+        console.error(`Error indexing ${file}:`, err.message);
+      }
     }
   }
   const stats = db.prepare('SELECT COUNT(*) as sessions FROM sessions').get();

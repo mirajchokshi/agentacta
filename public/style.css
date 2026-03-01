@@ -1349,3 +1349,21 @@ mark {
   }
 }
 
+
+/* Load more button */
+.load-more-btn {
+  text-align: center;
+  padding: var(--space-lg);
+  margin: var(--space-md) 0;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  transition: all var(--duration-normal) var(--ease-out);
+}
+.load-more-btn:hover {
+  background: var(--bg-active);
+  border-color: var(--border-hover);
+}

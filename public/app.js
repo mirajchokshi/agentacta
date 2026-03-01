@@ -4,8 +4,26 @@ const content = $('#content');
 const API = '/api';
 
 async function api(path) {
-  const res = await fetch(API + path);
-  return res.json();
+  let res;
+  try {
+    res = await fetch(API + path);
+  } catch (err) {
+    // Network error (server down, offline, etc.)
+    return { _error: true, error: 'Network error' };
+  }
+  if (!res.ok) {
+    try {
+      const body = await res.json();
+      return { _error: true, error: body.error || `HTTP ${res.status}`, status: res.status };
+    } catch {
+      return { _error: true, error: `HTTP ${res.status}`, status: res.status };
+    }
+  }
+  try {
+    return await res.json();
+  } catch {
+    return { _error: true, error: 'Invalid JSON response' };
+  }
 }
 
 function fmtTime(ts) {
@@ -256,6 +274,10 @@ async function showSearchHome() {
 
   const stats = await api('/stats');
   const sessions = await api('/sessions?limit=5');
+  if (stats._error || sessions._error) {
+    el.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
+    return;
+  }
 
   let suggestions = [];
   try { const r = await fetch('/api/suggestions'); const d = await r.json(); suggestions = d.suggestions || []; } catch(e) { suggestions = []; }
@@ -309,7 +331,7 @@ async function doSearch(q) {
 
   const data = await api(url);
 
-  if (data.error) { el.innerHTML = `<div class="empty"><p>${escHtml(data.error)}</p></div>`; return; }
+  if (data._error || data.error) { el.innerHTML = `<div class="empty"><p>${escHtml(data.error || 'Server error')}</p></div>`; return; }
   if (!data.results.length) { el.innerHTML = '<div class="empty"><h2>No results</h2><p>Try a different search term or adjust filters</p></div>'; return; }
 
   let header = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--space-md)">
@@ -345,6 +367,10 @@ async function viewSessions() {
   window._currentSessionId = null;
   content.innerHTML = '<div class="loading">Loading</div>';
   const data = await api('/sessions?limit=200');
+  if (data._error) {
+    content.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
+    return;
+  }
 
   let html = `<div class="page-title">Sessions</div>`;
   html += data.sessions.map(renderSessionItem).join('');
@@ -358,10 +384,10 @@ async function viewSessions() {
 
 async function viewSession(id) {
   window._currentSessionId = id;
-  content.innerHTML = '<div class="loading">Loading</div>';
+  window.scrollTo(0, 0);
   const data = await api(`/sessions/${id}`);
 
-  if (data.error) { content.innerHTML = `<div class="empty"><h2>${data.error}</h2></div>`; return; }
+  if (data._error || data.error) { content.innerHTML = `<div class="empty"><h2>${escHtml(data.error || 'Unable to load')}</h2></div>`; return; }
 
   const s = data.session;
   const cost = fmtCost(s.total_cost);
@@ -399,11 +425,50 @@ async function viewSession(id) {
     <div class="section-label">Events</div>
   `;
 
-  html += data.events.map(renderEvent).join('');
+  const PAGE_SIZE = 50;
+  const allEvents = data.events;
+  let rendered = 0;
+
+  function renderBatch() {
+    const batch = allEvents.slice(rendered, rendered + PAGE_SIZE);
+    if (!batch.length) return;
+    const frag = document.createElement('div');
+    frag.innerHTML = batch.map(renderEvent).join('');
+    const container = document.getElementById('eventsContainer');
+    if (container) {
+      while (frag.firstChild) container.appendChild(frag.firstChild);
+    }
+    rendered += batch.length;
+
+  }
+
+  html += '<div id="eventsContainer">' + allEvents.slice(0, PAGE_SIZE).map(renderEvent).join('') + '</div>';
+  rendered = Math.min(PAGE_SIZE, allEvents.length);
   content.innerHTML = html;
   transitionView();
 
+  let onScroll = null;
+  if (allEvents.length > PAGE_SIZE) {
+    let loading = false;
+    onScroll = () => {
+      if (loading || rendered >= allEvents.length) return;
+      const scrollBottom = window.innerHeight + window.scrollY;
+      const threshold = document.body.offsetHeight - 300;
+      if (scrollBottom >= threshold) {
+        loading = true;
+        renderBatch();
+        loading = false;
+        if (rendered >= allEvents.length) {
+          window.removeEventListener('scroll', onScroll);
+          onScroll = null;
+        }
+      }
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+  }
+
   $('#backBtn').addEventListener('click', () => {
+    if (onScroll) { window.removeEventListener('scroll', onScroll); onScroll = null; }
     if (window._lastView === 'timeline') viewTimeline();
     else if (window._lastView === 'files') viewFiles();
     else if (window._lastView === 'search') viewSearch(window._lastSearchQuery || '');
@@ -452,6 +517,10 @@ async function viewSession(id) {
   const jumpBtn = $('#jumpToStartBtn');
   if (jumpBtn) {
     jumpBtn.addEventListener('click', () => {
+      // Load all remaining events to find the first message
+      while (rendered < allEvents.length) {
+        renderBatch();
+      }
       const firstMessage = document.querySelector(`[data-event-id="${s.first_message_id}"]`);
       if (firstMessage) {
         firstMessage.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -478,6 +547,10 @@ async function viewTimeline(date) {
   transitionView();
 
   const data = await api(`/timeline?date=${date}`);
+  if (data._error) {
+    $('#timelineContent').innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
+    return;
+  }
   const el = $('#timelineContent');
 
   if (!data.events.length) {
@@ -495,6 +568,10 @@ async function viewTimeline(date) {
 async function viewStats() {
   content.innerHTML = '<div class="loading">Loading</div>';
   const data = await api('/stats');
+  if (data._error) {
+    content.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
+    return;
+  }
 
   let html = `<div class="page-title">Stats</div>
     <div class="stat-grid">
@@ -554,6 +631,10 @@ async function viewFiles() {
   window._lastView = 'files';
   content.innerHTML = '<div class="loading">Loading</div>';
   const data = await api('/files?limit=500');
+  if (data._error) {
+    content.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
+    return;
+  }
   window._allFiles = data.files || [];
   window._fileSort = window._fileSort || 'touches';
   window._fileFilter = window._fileFilter || '';
@@ -719,6 +800,10 @@ function renderFileItem(f) {
 async function viewFileDetail(filePath) {
   content.innerHTML = '<div class="loading">Loading</div>';
   const data = await api(`/files/sessions?path=${encodeURIComponent(filePath)}`);
+  if (data._error) {
+    content.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
+    return;
+  }
 
   let html = `
     <div class="back-btn" id="backBtn">\u2190 Back</div>
@@ -794,6 +879,7 @@ viewSearch();
 (function initPTR() {
   let startY = 0;
   let pulling = false;
+  let refreshing = false;
   const threshold = 80;
 
   const indicator = document.createElement('div');
@@ -823,22 +909,20 @@ viewSearch();
   document.addEventListener('touchend', async e => {
     if (!pulling) return;
     pulling = false;
+    if (refreshing) { indicator.classList.remove('visible'); return; }
     const diff = e.changedTouches[0].clientY - startY;
     if (diff > threshold && indicator.classList.contains('visible')) {
+      refreshing = true;
       indicator.textContent = 'Refreshing\u2026';
       indicator.classList.add('refreshing');
       try {
         await api('/reindex');
-        const backBtn = $('#backBtn');
-        if (backBtn && window._currentSessionId) {
-          await viewSession(window._currentSessionId);
-        } else {
-          const active = $('.nav-item.active');
-          if (active) active.click();
-        }
+        // Just reindex data without re-rendering the view
+        // The next manual navigation will pick up new data
       } catch(err) {}
       setTimeout(() => {
         indicator.classList.remove('visible', 'refreshing');
+        refreshing = false;
       }, 500);
     } else {
       indicator.classList.remove('visible');
