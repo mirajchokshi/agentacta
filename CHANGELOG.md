@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.0] - 2026-02-28
+
+### Changed
+- **Full UI redesign**: dark theme overhaul inspired by Linear/Raycast — refined palette, card-based layouts, better typography, micro-interactions
+- Mobile timeline: stacked vertical layout with compact badges, tighter spacing
+- Mobile container padding rebalanced for centered content
+- Timeline date defaults to local timezone instead of UTC
+
+### Fixed
+- Timeline showed wrong date after 6pm CST (UTC offset bug)
+- Inline padding on timeline wrapper caused left-side dead space on mobile
+
 ## [1.1.5] - 2026-02-25
 
 ### Added
