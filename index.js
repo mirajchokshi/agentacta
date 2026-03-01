@@ -349,9 +349,9 @@ const server = http.createServer((req, res) => {
       }
     }
     else if (pathname === '/api/timeline') {
-      const date = query.date || new Date().toISOString().slice(0, 10);
-      const from = date + 'T00:00:00.000Z';
-      const to = date + 'T23:59:59.999Z';
+      const date = query.date || (() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`; })();
+      const from = new Date(date + 'T00:00:00').toISOString();
+      const to = new Date(date + 'T23:59:59.999').toISOString();
       const events = db.prepare(
         `SELECT e.*, s.summary as session_summary FROM events e
          JOIN sessions s ON s.id = e.session_id

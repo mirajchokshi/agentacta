@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.1] - 2026-02-28
+
+### Fixed
+- Timeline API used UTC for date bucketing — events after 6pm in western timezones showed on the wrong day
+
 ## [1.2.0] - 2026-02-28
 
 ### Changed
