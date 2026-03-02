@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.3] - 2026-03-02
+
+### Changed
+- Upgrade better-sqlite3 from 11.10.0 to 12.6.2
+- Override tar-fs to v3 (fixes symlink traversal vulnerability)
+- Remove unused devDependencies from published package
+- 0 npm audit vulnerabilities
+
 ## [1.3.2] - 2026-03-02
 
 ### Fixed
