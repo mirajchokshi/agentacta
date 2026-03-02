@@ -42,13 +42,13 @@
   },
   "homepage": "https://github.com/mirajchokshi/agentacta",
   "dependencies": {
-    "better-sqlite3": "^11.0.0"
-  },
-  "devDependencies": {
-    "puppeteer-core": "^24.37.3",
-    "puppeteer-screen-recorder": "^3.0.6"
+    "better-sqlite3": "^12.6.2"
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "overrides": {
+    "tar-fs": "^3.0.6",
+    "npmlog": "^7.0.1"
   }
 }
