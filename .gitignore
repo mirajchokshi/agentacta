@@ -1,17 +1,15 @@
 node_modules/
+
+# Runtime artifacts
+*.log
+*.pid
 *.db
 *.db-shm
 *.db-wal
-*.pid
-*.log
+
+# Local config
 agentacta.config.json
 
-# Demo videos (keep only the final)
-screenshots/demo.mp4
-screenshots/demo-v2.mp4
-screenshots/demo-voiced.mp4
-screenshots/demo-voiced-v2.mp4
-screenshots/*.mp4
-screenshots/demo-sm.gif
-screenshots/demo-new.gif
-screenshots/demo-clean.mp4
+# Local demo artifacts
+demo/
+
