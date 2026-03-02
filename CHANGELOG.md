@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.3.0] - 2026-03-01
+
+### Added
+- Near-realtime session detail updates without manual refresh
+- Lightweight delta API endpoint: `GET /api/sessions/:id/events?after=<ts>&afterId=<id>&limit=<n>`
+- New-event visual indicator in session view when user is scrolled away from top
+- SSE test coverage and realtime implementation notes in CONTRIBUTING
+
+### Changed
+- Session detail live updates now use lightweight polling (3s) against delta endpoint for reliability
+- Realtime cursor hardened to composite `(timestamp, id)` to avoid misses on identical timestamps
+
+### Notes
+- Pull-to-refresh behavior remains intact while live updates run in background
+
 ## [1.2.2] - 2026-02-28
 
 ### Fixed
