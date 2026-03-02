@@ -267,11 +267,16 @@ const server = http.createServer((req, res) => {
       if (!session) return json(res, { error: 'Not found' }, 404);
 
       const after = query.after || '1970-01-01T00:00:00.000Z';
+      const afterId = query.afterId || '';
       const limit = Math.min(parseInt(query.limit || '50', 10) || 50, 200);
       const rows = db.prepare(
-        'SELECT * FROM events WHERE session_id = ? AND timestamp > ? ORDER BY timestamp ASC LIMIT ?'
-      ).all(id, after, limit);
-      json(res, { events: rows, after, count: rows.length });
+        `SELECT * FROM events
+         WHERE session_id = ?
+           AND (timestamp > ? OR (timestamp = ? AND id > ?))
+         ORDER BY timestamp ASC, id ASC
+         LIMIT ?`
+      ).all(id, after, after, afterId, limit);
+      json(res, { events: rows, after, afterId, count: rows.length });
     }
 
     else if (pathname.match(/^\/api\/sessions\/[^/]+\/stream$/)) {

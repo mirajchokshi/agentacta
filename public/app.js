@@ -576,12 +576,15 @@ async function viewSession(id) {
 
   // Poll every 3s for new events using delta endpoint
   let lastSeenTs = allEvents.length ? allEvents[0].timestamp : new Date(0).toISOString();
+  let lastSeenId = allEvents.length ? allEvents[0].id : '';
   const pollNewEvents = async () => {
     try {
-      const latest = await api(`/sessions/${id}/events?after=${encodeURIComponent(lastSeenTs)}&limit=50`);
+      const latest = await api(`/sessions/${id}/events?after=${encodeURIComponent(lastSeenTs)}&afterId=${encodeURIComponent(lastSeenId)}&limit=50`);
       const incoming = latest.events || [];
       if (incoming.length) {
-        lastSeenTs = incoming[incoming.length - 1].timestamp || lastSeenTs;
+        const tail = incoming[incoming.length - 1];
+        lastSeenTs = tail.timestamp || lastSeenTs;
+        lastSeenId = tail.id || lastSeenId;
         applyIncomingEvents(incoming);
       }
     } catch (err) {
