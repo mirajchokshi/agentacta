@@ -1077,6 +1077,34 @@ mark {
   animation: highlightFade 2s var(--ease-out);
 }
 
+/* ---- New Events SSE Indicator ---- */
+.new-events-indicator {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--accent);
+  color: #fff;
+  padding: 8px 20px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  z-index: 90;
+  box-shadow: 0 4px 16px rgba(99, 144, 240, 0.4);
+  animation: slideDown 0.3s var(--ease-out);
+}
+
+.new-events-indicator:hover {
+  background: #4a7ae8;
+  transform: translateX(-50%) scale(1.05);
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
 /* ---- Search Home Stats ---- */
 .search-stats {
   display: grid;
