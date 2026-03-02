@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.3.2] - 2026-03-02
+
+### Fixed
+- Manifest consistency: normalized bin path and repository URL (improves Socket.dev supply chain score)
+
+### Added
+- `engines` field in package.json (node >=18.0.0)
+
+## [1.3.1] - 2026-03-02
+
+### Added
+- Hash-based routing with browser back/forward support
+- Deep-linkable session URLs (`#session/<id>`)
+- Billion (B) token formatting for large usage numbers
+
+### Fixed
+- Scroll listener leak on SSE cleanup
+
 ## [1.3.0] - 2026-03-01
 
 ### Added
