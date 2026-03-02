@@ -49,6 +49,7 @@ function dlExport(url, filename) {
 
 function fmtTokens(n) {
   if (!n) return '0';
+  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(4) + 'B';
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
   if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, '') + 'K';
   return n.toLocaleString();
@@ -93,6 +94,50 @@ function transitionView() {
   void content.offsetWidth;
   content.classList.add('view-enter');
 }
+
+// --- Hash routing ---
+window._navDepth = 0;
+
+function setHash(hash, replace) {
+  const target = '#' + hash;
+  if (window.location.hash === target) return;
+  if (replace) {
+    history.replaceState(null, '', target);
+  } else {
+    history.pushState(null, '', target);
+    window._navDepth++;
+  }
+}
+
+function updateNavActive(view) {
+  $$('.nav-item').forEach(i => i.classList.remove('active'));
+  const navItem = $(`.nav-item[data-view="${view}"]`);
+  if (navItem) navItem.classList.add('active');
+}
+
+function handleRoute() {
+  const raw = (window.location.hash || '').slice(1) || 'search';
+  if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
+
+  if (raw.startsWith('session/')) {
+    const id = decodeURIComponent(raw.slice('session/'.length));
+    if (id) { viewSession(id); return; }
+  }
+
+  const view = raw === 'sessions' || raw === 'timeline' || raw === 'files' || raw === 'stats' ? raw : 'search';
+  window._lastView = view;
+  updateNavActive(view);
+  if (view === 'sessions') viewSessions();
+  else if (view === 'files') viewFiles();
+  else if (view === 'timeline') viewTimeline();
+  else if (view === 'stats') viewStats();
+  else viewSearch(window._lastSearchQuery || '');
+}
+
+window.addEventListener('popstate', () => {
+  if (window._navDepth > 0) window._navDepth--;
+  handleRoute();
+});
 
 function renderEvent(ev) {
   const badge = `<span class="event-badge ${badgeClass(ev.type, ev.role)}">${ev.type === 'tool_call' ? 'tool' : ev.role || ev.type}</span>`;
@@ -385,6 +430,7 @@ async function viewSessions() {
 async function viewSession(id) {
   if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
   window._currentSessionId = id;
+  setHash('session/' + encodeURIComponent(id));
   window.scrollTo(0, 0);
   const data = await api(`/sessions/${id}`);
 
@@ -469,12 +515,13 @@ async function viewSession(id) {
   }
 
   $('#backBtn').addEventListener('click', () => {
-    if (onScroll) { window.removeEventListener('scroll', onScroll); onScroll = null; }
-    if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
-    if (window._lastView === 'timeline') viewTimeline();
-    else if (window._lastView === 'files') viewFiles();
-    else if (window._lastView === 'search') viewSearch(window._lastSearchQuery || '');
-    else viewSessions();
+    if (window._navDepth > 0) {
+      history.back();
+    } else {
+      const view = window._lastView || 'sessions';
+      setHash(view, true);
+      handleRoute();
+    }
   });
 
   $('#copySessionId').addEventListener('click', async () => {
@@ -603,6 +650,7 @@ async function viewSession(id) {
   window.addEventListener('scroll', sseScrollHandler, { passive: true });
 
   window._sseCleanup = () => {
+    if (onScroll) { window.removeEventListener('scroll', onScroll); onScroll = null; }
     clearInterval(pollInterval);
     window.removeEventListener('scroll', sseScrollHandler);
     const ind = document.getElementById('newEventsIndicator');
@@ -906,10 +954,10 @@ window._lastView = 'sessions';
 $$('.nav-item').forEach(item => {
   item.addEventListener('click', () => {
     if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
-    $$('.nav-item').forEach(i => i.classList.remove('active'));
-    item.classList.add('active');
     const view = item.dataset.view;
     window._lastView = view;
+    updateNavActive(view);
+    setHash(view);
     if (view === 'search') viewSearch();
     else if (view === 'sessions') viewSessions();
     else if (view === 'files') viewFiles();
@@ -918,7 +966,7 @@ $$('.nav-item').forEach(item => {
   });
 });
 
-viewSearch();
+handleRoute();
 
 // Swipe right from left edge to go back
 (function initSwipeBack() {
