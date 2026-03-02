@@ -14,6 +14,10 @@ One command. Zero config. Full visibility.
 npx agentacta
 ```
 
+<p align="center">
+  <img src="screenshots/demo.gif" alt="AgentActa demo" width="800">
+</p>
+
 ---
 
 ## Why
