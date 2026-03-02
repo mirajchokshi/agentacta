@@ -1,10 +1,10 @@
 {
   "name": "agentacta",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Audit trail and search engine for AI agent sessions",
   "main": "index.js",
   "bin": {
-    "agentacta": "./index.js"
+    "agentacta": "index.js"
   },
   "files": [
     "index.js",
@@ -38,7 +38,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mirajchokshi/agentacta"
+    "url": "git+https://github.com/mirajchokshi/agentacta.git"
   },
   "homepage": "https://github.com/mirajchokshi/agentacta",
   "dependencies": {
@@ -47,5 +47,8 @@
   "devDependencies": {
     "puppeteer-core": "^24.37.3",
     "puppeteer-screen-recorder": "^3.0.6"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
