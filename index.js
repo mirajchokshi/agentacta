@@ -2,6 +2,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { EventEmitter } = require('events');
 
 // --demo flag: use demo session data (must run before config load)
 if (process.argv.includes('--demo')) {
@@ -129,6 +130,10 @@ const db = open();
 // Live re-indexing setup
 const stmts = createStmts(db);
 
+// SSE emitter: notifies connected clients when a session is re-indexed
+const sseEmitter = new EventEmitter();
+sseEmitter.setMaxListeners(100);
+
 const sessionDirs = discoverSessionDirs(config);
 
 // Initial indexing pass
@@ -163,7 +168,10 @@ for (const dir of sessionDirs) {
         _reindexTimers.delete(filePath);
         try {
           const result = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE);
-          if (!result.skipped) console.log(`Live re-indexed: ${filename} (${dir.agent})`);
+          if (!result.skipped) {
+            console.log(`Live re-indexed: ${filename} (${dir.agent})`);
+            if (result.sessionId) sseEmitter.emit('session-update', result.sessionId);
+          }
         } catch (err) {
           console.error(`Error re-indexing ${filename}:`, err.message);
         }
@@ -251,6 +259,47 @@ const server = http.createServer((req, res) => {
       const countSql = agent ? 'SELECT COUNT(*) as c FROM sessions WHERE agent = ?' : 'SELECT COUNT(*) as c FROM sessions';
       const total = agent ? db.prepare(countSql).get(agent).c : db.prepare(countSql).get().c;
       json(res, { sessions: rows, total, limit, offset });
+    }
+    else if (pathname.match(/^\/api\/sessions\/[^/]+\/stream$/)) {
+      const id = pathname.split('/')[3];
+      const session = db.prepare('SELECT id FROM sessions WHERE id = ?').get(id);
+      if (!session) return json(res, { error: 'Not found' }, 404);
+
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no'
+      });
+      res.write(': connected\n\n');
+
+      let lastTs = req.headers['last-event-id'] || query.after || new Date().toISOString();
+
+      const onUpdate = (sessionId) => {
+        if (sessionId !== id) return;
+        try {
+          const rows = db.prepare(
+            'SELECT * FROM events WHERE session_id = ? AND timestamp > ? ORDER BY timestamp ASC'
+          ).all(id, lastTs);
+          if (rows.length) {
+            lastTs = rows[rows.length - 1].timestamp;
+            res.write(`id: ${lastTs}\ndata: ${JSON.stringify(rows)}\n\n`);
+          }
+        } catch (err) {
+          console.error('SSE query error:', err.message);
+        }
+      };
+
+      sseEmitter.on('session-update', onUpdate);
+
+      const ping = setInterval(() => {
+        try { res.write(': ping\n\n'); } catch {}
+      }, 30000);
+
+      req.on('close', () => {
+        sseEmitter.off('session-update', onUpdate);
+        clearInterval(ping);
+      });
     }
     else if (pathname.match(/^\/api\/sessions\/[^/]+$/) && !pathname.includes('export')) {
       const id = pathname.split('/')[3];

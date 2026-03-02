@@ -383,6 +383,7 @@ async function viewSessions() {
 }
 
 async function viewSession(id) {
+  if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
   window._currentSessionId = id;
   window.scrollTo(0, 0);
   const data = await api(`/sessions/${id}`);
@@ -469,6 +470,7 @@ async function viewSession(id) {
 
   $('#backBtn').addEventListener('click', () => {
     if (onScroll) { window.removeEventListener('scroll', onScroll); onScroll = null; }
+    if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
     if (window._lastView === 'timeline') viewTimeline();
     else if (window._lastView === 'files') viewFiles();
     else if (window._lastView === 'search') viewSearch(window._lastSearchQuery || '');
@@ -531,6 +533,68 @@ async function viewSession(id) {
       }
     });
   }
+
+  // --- SSE live updates ---
+  const knownIds = new Set(allEvents.map(e => e.id));
+  const latestTs = allEvents.length ? allEvents[0].timestamp : new Date().toISOString();
+  let pendingNewCount = 0;
+
+  const evtSource = new EventSource(`/api/sessions/${id}/stream?after=${encodeURIComponent(latestTs)}`);
+
+  evtSource.onmessage = (msg) => {
+    const incoming = JSON.parse(msg.data);
+    const container = document.getElementById('eventsContainer');
+    if (!container) return;
+
+    const fresh = incoming.filter(e => !knownIds.has(e.id));
+    if (!fresh.length) return;
+    fresh.forEach(e => knownIds.add(e.id));
+
+    const isAtTop = window.scrollY < 100;
+
+    for (const ev of fresh) {
+      const div = document.createElement('div');
+      div.innerHTML = renderEvent(ev);
+      const el = div.firstElementChild;
+      el.classList.add('event-highlight');
+      container.insertBefore(el, container.firstChild);
+      setTimeout(() => el.classList.remove('event-highlight'), 2000);
+    }
+
+    if (isAtTop) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } else {
+      pendingNewCount += fresh.length;
+      let indicator = document.getElementById('newEventsIndicator');
+      if (!indicator) {
+        indicator = document.createElement('div');
+        indicator.id = 'newEventsIndicator';
+        indicator.className = 'new-events-indicator';
+        document.body.appendChild(indicator);
+        indicator.addEventListener('click', () => {
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+          indicator.remove();
+          pendingNewCount = 0;
+        });
+      }
+      indicator.textContent = `${pendingNewCount} new event${pendingNewCount !== 1 ? 's' : ''} \u2191`;
+    }
+  };
+
+  const sseScrollHandler = () => {
+    if (window.scrollY < 100) {
+      const ind = document.getElementById('newEventsIndicator');
+      if (ind) { ind.remove(); pendingNewCount = 0; }
+    }
+  };
+  window.addEventListener('scroll', sseScrollHandler, { passive: true });
+
+  window._sseCleanup = () => {
+    evtSource.close();
+    window.removeEventListener('scroll', sseScrollHandler);
+    const ind = document.getElementById('newEventsIndicator');
+    if (ind) ind.remove();
+  };
 }
 
 async function viewTimeline(date) {
@@ -828,6 +892,7 @@ window._lastView = 'sessions';
 
 $$('.nav-item').forEach(item => {
   item.addEventListener('click', () => {
+    if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
     $$('.nav-item').forEach(i => i.classList.remove('active'));
     item.classList.add('active');
     const view = item.dataset.view;
