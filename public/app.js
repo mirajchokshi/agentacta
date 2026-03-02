@@ -534,24 +534,19 @@ async function viewSession(id) {
     });
   }
 
-  // --- SSE live updates ---
+    // --- Lightweight realtime updates (polling fallback first) ---
   const knownIds = new Set(allEvents.map(e => e.id));
-  const latestTs = allEvents.length ? allEvents[0].timestamp : new Date().toISOString();
   let pendingNewCount = 0;
 
-  const evtSource = new EventSource(`/api/sessions/${id}/stream?after=${encodeURIComponent(latestTs)}`);
-
-  evtSource.onmessage = (msg) => {
-    const incoming = JSON.parse(msg.data);
+  const applyIncomingEvents = (incoming) => {
     const container = document.getElementById('eventsContainer');
-    if (!container) return;
+    if (!container || !incoming?.length) return;
 
     const fresh = incoming.filter(e => !knownIds.has(e.id));
     if (!fresh.length) return;
     fresh.forEach(e => knownIds.add(e.id));
 
     const isAtTop = window.scrollY < 100;
-
     for (const ev of fresh) {
       const div = document.createElement('div');
       div.innerHTML = renderEvent(ev);
@@ -561,9 +556,7 @@ async function viewSession(id) {
       setTimeout(() => el.classList.remove('event-highlight'), 2000);
     }
 
-    if (isAtTop) {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    } else {
+    if (!isAtTop) {
       pendingNewCount += fresh.length;
       let indicator = document.getElementById('newEventsIndicator');
       if (!indicator) {
@@ -577,9 +570,26 @@ async function viewSession(id) {
           pendingNewCount = 0;
         });
       }
-      indicator.textContent = `${pendingNewCount} new event${pendingNewCount !== 1 ? 's' : ''} \u2191`;
+      indicator.textContent = `${pendingNewCount} new event${pendingNewCount !== 1 ? 's' : ''} ↑`;
     }
   };
+
+  // Poll every 3s for new events using delta endpoint
+  let lastSeenTs = allEvents.length ? allEvents[0].timestamp : new Date(0).toISOString();
+  const pollNewEvents = async () => {
+    try {
+      const latest = await api(`/sessions/${id}/events?after=${encodeURIComponent(lastSeenTs)}&limit=50`);
+      const incoming = latest.events || [];
+      if (incoming.length) {
+        lastSeenTs = incoming[incoming.length - 1].timestamp || lastSeenTs;
+        applyIncomingEvents(incoming);
+      }
+    } catch (err) {
+      // silent; next tick will retry
+    }
+  };
+
+  const pollInterval = setInterval(pollNewEvents, 3000);
 
   const sseScrollHandler = () => {
     if (window.scrollY < 100) {
@@ -590,7 +600,7 @@ async function viewSession(id) {
   window.addEventListener('scroll', sseScrollHandler, { passive: true });
 
   window._sseCleanup = () => {
-    evtSource.close();
+    clearInterval(pollInterval);
     window.removeEventListener('scroll', sseScrollHandler);
     const ind = document.getElementById('newEventsIndicator');
     if (ind) ind.remove();

@@ -260,6 +260,20 @@ const server = http.createServer((req, res) => {
       const total = agent ? db.prepare(countSql).get(agent).c : db.prepare(countSql).get().c;
       json(res, { sessions: rows, total, limit, offset });
     }
+
+    else if (pathname.match(/^\/api\/sessions\/[^/]+\/events$/)) {
+      const id = pathname.split('/')[3];
+      const session = db.prepare('SELECT id FROM sessions WHERE id = ?').get(id);
+      if (!session) return json(res, { error: 'Not found' }, 404);
+
+      const after = query.after || '1970-01-01T00:00:00.000Z';
+      const limit = Math.min(parseInt(query.limit || '50', 10) || 50, 200);
+      const rows = db.prepare(
+        'SELECT * FROM events WHERE session_id = ? AND timestamp > ? ORDER BY timestamp ASC LIMIT ?'
+      ).all(id, after, limit);
+      json(res, { events: rows, after, count: rows.length });
+    }
+
     else if (pathname.match(/^\/api\/sessions\/[^/]+\/stream$/)) {
       const id = pathname.split('/')[3];
       const session = db.prepare('SELECT id FROM sessions WHERE id = ?').get(id);
