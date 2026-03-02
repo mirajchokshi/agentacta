@@ -383,6 +383,7 @@ async function viewSessions() {
 }
 
 async function viewSession(id) {
+  if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
   window._currentSessionId = id;
   window.scrollTo(0, 0);
   const data = await api(`/sessions/${id}`);
@@ -469,6 +470,7 @@ async function viewSession(id) {
 
   $('#backBtn').addEventListener('click', () => {
     if (onScroll) { window.removeEventListener('scroll', onScroll); onScroll = null; }
+    if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
     if (window._lastView === 'timeline') viewTimeline();
     else if (window._lastView === 'files') viewFiles();
     else if (window._lastView === 'search') viewSearch(window._lastSearchQuery || '');
@@ -531,6 +533,81 @@ async function viewSession(id) {
       }
     });
   }
+
+    // --- Lightweight realtime updates (polling fallback first) ---
+  const knownIds = new Set(allEvents.map(e => e.id));
+  let pendingNewCount = 0;
+
+  const applyIncomingEvents = (incoming) => {
+    const container = document.getElementById('eventsContainer');
+    if (!container || !incoming?.length) return;
+
+    const fresh = incoming.filter(e => !knownIds.has(e.id));
+    if (!fresh.length) return;
+    fresh.forEach(e => knownIds.add(e.id));
+
+    const isAtTop = window.scrollY < 100;
+    for (const ev of fresh) {
+      const div = document.createElement('div');
+      div.innerHTML = renderEvent(ev);
+      const el = div.firstElementChild;
+      el.classList.add('event-highlight');
+      container.insertBefore(el, container.firstChild);
+      setTimeout(() => el.classList.remove('event-highlight'), 2000);
+    }
+
+    if (!isAtTop) {
+      pendingNewCount += fresh.length;
+      let indicator = document.getElementById('newEventsIndicator');
+      if (!indicator) {
+        indicator = document.createElement('div');
+        indicator.id = 'newEventsIndicator';
+        indicator.className = 'new-events-indicator';
+        document.body.appendChild(indicator);
+        indicator.addEventListener('click', () => {
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+          indicator.remove();
+          pendingNewCount = 0;
+        });
+      }
+      indicator.textContent = `${pendingNewCount} new event${pendingNewCount !== 1 ? 's' : ''} ↑`;
+    }
+  };
+
+  // Poll every 3s for new events using delta endpoint
+  let lastSeenTs = allEvents.length ? allEvents[0].timestamp : new Date(0).toISOString();
+  let lastSeenId = allEvents.length ? allEvents[0].id : '';
+  const pollNewEvents = async () => {
+    try {
+      const latest = await api(`/sessions/${id}/events?after=${encodeURIComponent(lastSeenTs)}&afterId=${encodeURIComponent(lastSeenId)}&limit=50`);
+      const incoming = latest.events || [];
+      if (incoming.length) {
+        const tail = incoming[incoming.length - 1];
+        lastSeenTs = tail.timestamp || lastSeenTs;
+        lastSeenId = tail.id || lastSeenId;
+        applyIncomingEvents(incoming);
+      }
+    } catch (err) {
+      // silent; next tick will retry
+    }
+  };
+
+  const pollInterval = setInterval(pollNewEvents, 3000);
+
+  const sseScrollHandler = () => {
+    if (window.scrollY < 100) {
+      const ind = document.getElementById('newEventsIndicator');
+      if (ind) { ind.remove(); pendingNewCount = 0; }
+    }
+  };
+  window.addEventListener('scroll', sseScrollHandler, { passive: true });
+
+  window._sseCleanup = () => {
+    clearInterval(pollInterval);
+    window.removeEventListener('scroll', sseScrollHandler);
+    const ind = document.getElementById('newEventsIndicator');
+    if (ind) ind.remove();
+  };
 }
 
 async function viewTimeline(date) {
@@ -828,6 +905,7 @@ window._lastView = 'sessions';
 
 $$('.nav-item').forEach(item => {
   item.addEventListener('click', () => {
+    if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
     $$('.nav-item').forEach(i => i.classList.remove('active'));
     item.classList.add('active');
     const view = item.dataset.view;
