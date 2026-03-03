@@ -226,12 +226,20 @@ function normalizeAgentLabel(a) {
   return a;
 }
 
+function isInternalProjectTag(tag) {
+  if (!tag) return true;
+  if (tag.startsWith('agent:')) return true;
+  if (tag.startsWith('claude:')) return true;
+  return false;
+}
+
 function renderProjectTags(s) {
   let projects = [];
   if (s.projects) {
     try { projects = JSON.parse(s.projects); } catch {}
   }
-  return projects.map(p => `<span class="session-project">${escHtml(p)}</span>`).join('');
+  const visible = [...new Set(projects)].filter(p => !isInternalProjectTag(p));
+  return visible.map(p => `<span class="session-project">${escHtml(p)}</span>`).join('');
 }
 
 function renderModelTags(s) {
@@ -246,6 +254,8 @@ function renderModelTags(s) {
 function renderSessionItem(s) {
   const duration = fmtDuration(s.start_time, s.end_time);
   const timeRange = `${fmtTime(s.start_time)} \u2192 ${s.end_time ? fmtTimeOnly(s.end_time) : 'now'}`;
+  const isSubagent = s.session_type === 'subagent';
+  const showAgentTag = s.agent && s.agent !== 'main' && !isSubagent;
 
   return `
     <div class="session-item" data-id="${s.id}">
@@ -253,8 +263,8 @@ function renderSessionItem(s) {
         <span class="session-time">${timeRange} \u00b7 ${duration}</span>
         <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           ${renderProjectTags(s)}
-          ${s.agent && s.agent !== 'main' ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
-          ${s.session_type ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
+          ${showAgentTag ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
+          ${s.session_type && s.session_type !== normalizeAgentLabel(s.agent || '') ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
           ${renderModelTags(s)}
         </span>
       </div>
@@ -459,7 +469,7 @@ async function viewSession(id) {
         <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           ${renderProjectTags(s)}
           ${s.agent && s.agent !== 'main' ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
-          ${s.session_type ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
+          ${s.session_type && s.session_type !== normalizeAgentLabel(s.agent || '') ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
           ${renderModelTags(s)}
         </span>
       </div>

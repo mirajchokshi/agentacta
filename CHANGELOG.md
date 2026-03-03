@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.3.4] - 2026-03-02
+
+### Added
+- Codex CLI support: auto-discover and index sessions from `~/.codex/sessions/` (recursive)
+- Codex CLI parser support for `session_meta`, `turn_context`, `response_item`, and `event_msg` records
+
+### Changed
+- README updated to mark Codex CLI as supported and document Codex session discovery path
+- Session card tagging simplified for subagent sessions (hide redundant agent pill when `session_type=subagent`)
+- Project tag styling updated to align with existing flat pill style
+
+### Fixed
+- Codex CLI live indexing now handles nested date directories via recursive-source rescan in watch mode
+- Codex model labels now use concrete model IDs (e.g. `gpt-5.3-codex`) instead of provider-only labels
+- Snapshot-only Claude files are classified as `snapshot` (no longer mislabeled as heartbeat)
+- Suppressed noisy internal project chips (`agent:*`, `claude:*`) from session card display
+- Removed duplicate `codex-cli` pills when agent and session_type are equivalent
+- Summary heuristics now skip boilerplate prompt scaffolding and strip leading bracketed datetime prefixes
+
 ## [1.3.3] - 2026-03-02
 
 ### Changed

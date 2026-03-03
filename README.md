@@ -67,6 +67,7 @@ Open `http://localhost:4003` in your browser.
 AgentActa automatically finds your sessions in:
 - `~/.openclaw/agents/*/sessions/` (OpenClaw)
 - `~/.claude/projects/*/` (Claude Code)
+- `~/.codex/sessions/` (Codex CLI)
 
 Or point it at a custom path:
 
@@ -93,7 +94,7 @@ Download any session or search results as Markdown or JSON. Great for sharing, a
 
 ## How It Works
 
-AgentActa reads JSONL session files (the standard format used by OpenClaw and Claude Code), parses every message and tool call, and indexes them into a local SQLite database with FTS5 full-text search.
+AgentActa reads JSONL session files (including OpenClaw, Claude Code, and Codex CLI formats), parses every message and tool call, and indexes them into a local SQLite database with FTS5 full-text search.
 
 The web UI is a single-page app served by a lightweight Node.js HTTP server. No frameworks, no build step, no external dependencies beyond `better-sqlite3`.
 
@@ -201,7 +202,7 @@ All data stays local. AgentActa runs entirely on your machine — no cloud servi
 
 - ✅ [OpenClaw](https://github.com/openclaw/openclaw)
 - ✅ Claude Code
-- 🔜 Codex CLI
+- ✅ Codex CLI
 - 🔜 Custom JSONL formats
 
 ## Contributing

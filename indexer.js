@@ -6,6 +6,25 @@ const { loadConfig } = require('./config');
 const REINDEX = process.argv.includes('--reindex');
 const WATCH = process.argv.includes('--watch');
 
+function listJsonlFiles(baseDir, recursive = false) {
+  if (!fs.existsSync(baseDir)) return [];
+  const out = [];
+
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (recursive) walk(full);
+        continue;
+      }
+      if (entry.isFile() && entry.name.endsWith('.jsonl')) out.push(full);
+    }
+  }
+
+  walk(baseDir);
+  return out;
+}
+
 function discoverSessionDirs(config) {
   const dirs = [];
   const home = process.env.HOME;
@@ -48,6 +67,12 @@ function discoverSessionDirs(config) {
     }
   }
 
+  // Scan ~/.codex/sessions recursively (Codex CLI stores nested YYYY/MM/DD/*.jsonl)
+  const codexSessions = path.join(home, '.codex/sessions');
+  if (fs.existsSync(codexSessions) && fs.statSync(codexSessions).isDirectory()) {
+    dirs.push({ path: codexSessions, agent: 'codex-cli', recursive: true });
+  }
+
   if (!dirs.length) {
     // Fallback to hardcoded
     const fallback = path.join(home, '.openclaw/agents/main/sessions');
@@ -61,6 +86,28 @@ function isHeartbeat(text) {
   if (!text) return false;
   const lower = text.toLowerCase();
   return lower.includes('heartbeat') || lower.includes('heartbeat_ok');
+}
+
+function isBoilerplatePrompt(text) {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  return lower.includes('<permissions instructions>')
+    || lower.includes('filesystem sandboxing defines which files can be read or written')
+    || lower.includes('# agents.md instructions for ');
+}
+
+function isSummaryCandidate(text) {
+  if (!text || text.trim().length <= 10) return false;
+  if (isHeartbeat(text)) return false;
+  if (isBoilerplatePrompt(text)) return false;
+  return true;
+}
+
+function stripLeadingDatetimePrefix(text) {
+  if (!text) return text;
+  return text
+    .replace(/^\[(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}[^\]]*\]\s*/i, '')
+    .trim();
 }
 
 function extractContent(msg) {
@@ -94,17 +141,60 @@ function extractToolResult(msg) {
   return null;
 }
 
+function extractCodexMessageText(content) {
+  if (!content) return '';
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+
+  return content
+    .map((part) => {
+      if (!part || typeof part !== 'object') return '';
+      if (typeof part.text === 'string') return part.text;
+      if (typeof part.output_text === 'string') return part.output_text;
+      if (typeof part.input_text === 'string') return part.input_text;
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
 function extractFilePaths(toolName, toolArgs) {
   const paths = [];
   if (!toolArgs) return paths;
+
+  const maybePath = (value) => {
+    if (typeof value !== 'string') return;
+    if (value.startsWith('/') || value.startsWith('~/') || value.startsWith('./') || value.startsWith('../')) {
+      paths.push(value);
+      return;
+    }
+    if (value.includes('/') || value.includes('\\')) paths.push(value);
+  };
+
+  const visit = (obj) => {
+    if (!obj || typeof obj !== 'object') return;
+    if (Array.isArray(obj)) {
+      for (const item of obj) visit(item);
+      return;
+    }
+
+    for (const [key, value] of Object.entries(obj)) {
+      if (typeof value === 'string') {
+        if (['path', 'file_path', 'filePath', 'file', 'filename', 'cwd', 'workdir', 'directory', 'dir'].includes(key)) {
+          maybePath(value);
+        }
+      } else if (value && typeof value === 'object') {
+        visit(value);
+      }
+    }
+  };
+
   try {
     const args = typeof toolArgs === 'string' ? JSON.parse(toolArgs) : toolArgs;
-    // Common field names for file paths
-    for (const key of ['path', 'file_path', 'filePath', 'file', 'filename']) {
-      if (args[key] && typeof args[key] === 'string') paths.push(args[key]);
-    }
+    visit(args);
   } catch {}
-  return paths;
+
+  return [...new Set(paths)];
 }
 
 function aliasProject(project, config) {
@@ -177,9 +267,20 @@ function indexFile(db, filePath, agentName, stmts, archiveMode, config) {
   let initialPrompt = null;
   let firstMessageId = null;
   let firstMessageTimestamp = null;
+  let codexProvider = null;
+  let codexSource = null;
+  let sawSnapshotRecord = false;
+  let sawNonSnapshotRecord = false;
 
-  const firstLine = JSON.parse(lines[0]);
+  let firstLine;
+  try {
+    firstLine = JSON.parse(lines[0]);
+  } catch {
+    return { skipped: true };
+  }
+
   let isClaudeCode = false;
+  let isCodexCli = false;
 
   if (firstLine.type === 'session') {
     // OpenClaw format
@@ -204,6 +305,20 @@ function indexFile(db, filePath, agentName, stmts, archiveMode, config) {
       sessionId = path.basename(filePath, '.jsonl');
       sessionStart = new Date(firstLine.timestamp || Date.now()).toISOString();
     }
+  } else if (firstLine.type === 'session_meta') {
+    // Codex CLI format
+    isCodexCli = true;
+    const meta = firstLine.payload || {};
+    sessionId = meta.id || path.basename(filePath, '.jsonl');
+    sessionStart = meta.timestamp || firstLine.timestamp || new Date().toISOString();
+    sessionType = 'codex-cli';
+    agent = 'codex-cli';
+    if (meta.model) {
+      model = meta.model;
+      modelsSet.add(meta.model);
+    }
+    codexProvider = meta.model_provider || null;
+    codexSource = meta.source || null;
   } else {
     return { skipped: true };
   }
@@ -214,14 +329,120 @@ function indexFile(db, filePath, agentName, stmts, archiveMode, config) {
   const projectCounts = new Map();
 
   // Seed project from session cwd when available (helps chat-only sessions)
-  if (firstLine && firstLine.cwd) {
-    const p = extractProjectFromPath(firstLine.cwd);
+  const sessionCwd = (firstLine && firstLine.cwd) || (firstLine && firstLine.payload && firstLine.payload.cwd);
+  if (sessionCwd) {
+    const p = extractProjectFromPath(sessionCwd, config);
     if (p) projectCounts.set(p, 1);
   }
 
   for (const line of lines) {
     let obj;
     try { obj = JSON.parse(line); } catch { continue; }
+
+    if (obj.type === 'file-history-snapshot') sawSnapshotRecord = true;
+    else sawNonSnapshotRecord = true;
+
+    if (isCodexCli) {
+      if (obj.type === 'session_meta') {
+        const meta = obj.payload || {};
+        if (meta.id) sessionId = meta.id;
+        if (meta.timestamp && !sessionStart) sessionStart = meta.timestamp;
+        if (meta.model) {
+          if (!model) model = meta.model;
+          modelsSet.add(meta.model);
+        }
+        if (meta.model_provider) codexProvider = meta.model_provider;
+        if (meta.source) codexSource = meta.source;
+        if (meta.model_provider && !model) model = meta.model_provider;
+        continue;
+      }
+
+      if (obj.type === 'turn_context' && obj.payload) {
+        const tc = obj.payload;
+        if (tc.model && typeof tc.model === 'string') {
+          if (!model || model === codexProvider) model = tc.model;
+          modelsSet.add(tc.model);
+        }
+        continue;
+      }
+
+      if (obj.type === 'response_item' && obj.payload) {
+        const p = obj.payload;
+        const ts = obj.timestamp || sessionStart;
+        const eventId = `evt-${obj.type}-${Date.parse(ts) || Math.random()}`;
+
+        if (p.type === 'function_call') {
+          const toolName = p.name || p.tool_name || '';
+          const toolArgs = typeof p.arguments === 'string' ? p.arguments : JSON.stringify(p.arguments || {});
+          const callBaseId = p.call_id || p.id || eventId;
+          pendingEvents.push([`${callBaseId}:call`, sessionId, ts, 'tool_call', 'assistant', null, toolName, toolArgs, null]);
+          toolCount++;
+
+          const fps = extractFilePaths(toolName, toolArgs);
+          for (const fp of fps) {
+            fileActivities.push([sessionId, fp, 'read', ts]);
+            const project = extractProjectFromPath(fp, config);
+            if (project) projectCounts.set(project, (projectCounts.get(project) || 0) + 1);
+          }
+          sessionEnd = ts;
+          continue;
+        }
+
+        if (p.type === 'function_call_output') {
+          const output = (typeof p.output === 'string' ? p.output : JSON.stringify(p.output || '')).slice(0, 10000);
+          const resultBaseId = p.call_id || p.id || eventId;
+          pendingEvents.push([`${resultBaseId}:result`, sessionId, ts, 'tool_result', 'tool', output, p.name || p.tool_name || '', null, output]);
+          sessionEnd = ts;
+          continue;
+        }
+
+        if (p.type === 'message') {
+          const rawRole = p.role || 'assistant';
+          const role = rawRole === 'assistant' ? 'assistant' : 'user';
+          const content = extractCodexMessageText(p.content);
+          if (content) {
+            pendingEvents.push([p.id || eventId, sessionId, ts, 'message', role, content, null, null, null]);
+            msgCount++;
+            if (!summary && role === 'user' && isSummaryCandidate(content)) summary = content.slice(0, 200);
+            if (!initialPrompt && role === 'user' && isSummaryCandidate(content)) {
+              initialPrompt = content.slice(0, 500);
+              firstMessageId = p.id || eventId;
+              firstMessageTimestamp = ts;
+            }
+          }
+          sessionEnd = ts;
+          continue;
+        }
+      }
+
+      if (obj.type === 'event_msg' && obj.payload) {
+        const p = obj.payload;
+        const ts = obj.timestamp || sessionStart;
+        const eventId = `evt-${p.type || 'event'}-${Date.parse(ts) || Math.random()}`;
+
+        if (p.type === 'agent_message' && p.message) {
+          pendingEvents.push([eventId, sessionId, ts, 'message', 'assistant', p.message, null, null, null]);
+          msgCount++;
+          sessionEnd = ts;
+          continue;
+        }
+
+        if (p.type === 'user_message' && p.message) {
+          pendingEvents.push([eventId, sessionId, ts, 'message', 'user', p.message, null, null, null]);
+          msgCount++;
+          if (!summary && isSummaryCandidate(p.message)) summary = p.message.slice(0, 200);
+          if (!initialPrompt && isSummaryCandidate(p.message)) {
+            initialPrompt = p.message.slice(0, 500);
+            firstMessageId = eventId;
+            firstMessageTimestamp = ts;
+          }
+          sessionEnd = ts;
+          continue;
+        }
+      }
+
+      continue;
+    }
 
     if (obj.type === 'session' || obj.type === 'model_change' || obj.type === 'thinking_level_change' || obj.type === 'custom' || obj.type === 'file-history-snapshot') {
       if (obj.type === 'model_change' && obj.modelId) {
@@ -289,12 +510,12 @@ function indexFile(db, filePath, agentName, stmts, archiveMode, config) {
       if (content) {
         pendingEvents.push([eventId, sessionId, ts, 'message', role, content, null, null, null]);
         msgCount++;
-        // Better summary: skip heartbeat messages
-        if (!summary && role === 'user' && !isHeartbeat(content)) {
+        // Better summary: skip heartbeat/boilerplate messages
+        if (!summary && role === 'user' && isSummaryCandidate(content)) {
           summary = content.slice(0, 200);
         }
         // Capture initial prompt from first substantial user message
-        if (!initialPrompt && role === 'user' && content.trim().length > 10 && !isHeartbeat(content)) {
+        if (!initialPrompt && role === 'user' && isSummaryCandidate(content)) {
           initialPrompt = content.slice(0, 500); // Limit to 500 chars
           firstMessageId = eventId;
           firstMessageTimestamp = ts;
@@ -321,9 +542,25 @@ function indexFile(db, filePath, agentName, stmts, archiveMode, config) {
     }
   }
 
-  // If no real summary found, check if it's a heartbeat session
+  // Classify snapshot-only Claude files explicitly (avoid heartbeat mislabel)
+  if (isClaudeCode && sawSnapshotRecord && !sawNonSnapshotRecord) {
+    sessionType = 'snapshot';
+    if (!summary) summary = 'Claude file snapshot';
+  }
+
+  // Normalize summary text
+  if (summary) summary = stripLeadingDatetimePrefix(summary);
+
+  // If no real summary found, set a sensible default
   if (!summary) {
-    summary = 'Heartbeat session';
+    if (isCodexCli) {
+      const parts = ['Codex CLI session'];
+      if (codexProvider) parts.push(`provider=${codexProvider}`);
+      if (codexSource) parts.push(`source=${codexSource}`);
+      summary = parts.join(' · ');
+    } else {
+      summary = 'Heartbeat session';
+    }
   }
 
   // Infer session type from first user message content
@@ -389,9 +626,8 @@ function run() {
 
   let allFiles = [];
   for (const dir of sessionDirs) {
-    const files = fs.readdirSync(dir.path)
-      .filter(f => f.endsWith('.jsonl'))
-      .map(f => ({ path: path.join(dir.path, f), agent: dir.agent }));
+    const files = listJsonlFiles(dir.path, !!dir.recursive)
+      .map(filePath => ({ path: filePath, agent: dir.agent }));
     allFiles.push(...files);
   }
 
@@ -418,8 +654,33 @@ function run() {
 
   if (WATCH) {
     console.log('\nWatching for changes...');
+    const rescanTimers = new Map();
+
     for (const dir of sessionDirs) {
       fs.watch(dir.path, { persistent: true }, (eventType, filename) => {
+        // Recursive sources (e.g. ~/.codex/sessions/YYYY/MM/DD/*.jsonl):
+        // fs.watch on Linux does not watch nested dirs recursively, so on any root event
+        // run a debounced full rescan of known JSONL files under this source.
+        if (dir.recursive) {
+          const key = dir.path;
+          if (rescanTimers.get(key)) clearTimeout(rescanTimers.get(key));
+          const t = setTimeout(() => {
+            try {
+              const files = listJsonlFiles(dir.path, true);
+              let changed = 0;
+              for (const filePath of files) {
+                const result = indexFile(db, filePath, dir.agent, stmts, archiveMode, config);
+                if (!result.skipped) changed++;
+              }
+              if (changed > 0) console.log(`Re-indexed ${changed} files (${dir.agent})`);
+            } catch (err) {
+              console.error(`Error rescanning ${dir.path}:`, err.message);
+            }
+          }, 500);
+          rescanTimers.set(key, t);
+          return;
+        }
+
         if (!filename || !filename.endsWith('.jsonl')) return;
         const filePath = path.join(dir.path, filename);
         if (!fs.existsSync(filePath)) return;
@@ -444,13 +705,13 @@ function indexAll(db, config) {
   const stmts = createStmts(db);
   let totalSessions = 0;
   for (const dir of sessionDirs) {
-    const files = fs.readdirSync(dir.path).filter(f => f.endsWith('.jsonl'));
-    for (const file of files) {
+    const files = listJsonlFiles(dir.path, !!dir.recursive);
+    for (const filePath of files) {
       try {
-        const result = indexFile(db, path.join(dir.path, file), dir.agent, stmts, archiveMode, config);
+        const result = indexFile(db, filePath, dir.agent, stmts, archiveMode, config);
         if (!result.skipped) totalSessions++;
       } catch (err) {
-        console.error(`Error indexing ${file}:`, err.message);
+        console.error(`Error indexing ${path.basename(filePath)}:`, err.message);
       }
     }
   }
