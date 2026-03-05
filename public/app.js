@@ -800,7 +800,7 @@ async function viewTimeline(date) {
 
     if (!append) {
       if (!data.events.length) {
-        el.innerHTML = '<div class="empty"><h2>No activity</h2><p>Nothing recorded on this day</p></div>';
+        el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"><div class="timeline-line"></div><div class="empty" id="timelineEmpty"><h2>No activity</h2><p>Nothing recorded on this day</p></div></div>`;
         return;
       }
       el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"><div class="timeline-line"></div>${data.events.map(renderTimelineEvent).join('')}</div>`;
@@ -829,21 +829,31 @@ async function viewTimeline(date) {
   const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
   if (window._timelineSse) { window._timelineSse.close(); window._timelineSse = null; }
   if (date === todayStr) {
-    const sse = new EventSource(`/api/timeline/stream?after=${encodeURIComponent(new Date().toISOString())}`);
+    const sse = new EventSource(`/api/timeline/stream?after=${encodeURIComponent(new Date().toISOString())}&afterId=`);
     window._timelineSse = sse;
     sse.onmessage = (evt) => {
       try {
         const rows = JSON.parse(evt.data);
-        const wrap = $('#timelineWrap');
-        if (wrap && rows.length) {
-          const html = rows.map(renderTimelineEvent).join('');
-          wrap.insertAdjacentHTML('afterbegin', html);
-          // Flash new events
-          rows.forEach(r => {
-            const el = wrap.querySelector(`[data-event-id="${r.id}"]`);
-            if (el) { el.classList.add('event-highlight'); setTimeout(() => el.classList.remove('event-highlight'), 2000); }
-          });
+        if (!rows.length) return;
+
+        let wrap = $('#timelineWrap');
+        if (!wrap) {
+          el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"><div class="timeline-line"></div></div>`;
+          wrap = $('#timelineWrap');
         }
+
+        const empty = $('#timelineEmpty');
+        if (empty) empty.remove();
+
+        const html = rows.map(renderTimelineEvent).join('');
+        wrap.insertAdjacentHTML('afterbegin', html);
+        state.offset += rows.length;
+
+        // Flash new events
+        rows.forEach(r => {
+          const rowEl = wrap.querySelector(`[data-event-id="${r.id}"]`);
+          if (rowEl) { rowEl.classList.add('event-highlight'); setTimeout(() => rowEl.classList.remove('event-highlight'), 2000); }
+        });
       } catch {}
     };
   }
