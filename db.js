@@ -54,6 +54,7 @@ function init(dbPath) {
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 
+    CREATE INDEX IF NOT EXISTS idx_sessions_start_time ON sessions(start_time DESC);
     CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
     CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
     CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);

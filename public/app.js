@@ -3,10 +3,31 @@ const $$ = (s, p = document) => [...p.querySelectorAll(s)];
 const content = $('#content');
 const API = '/api';
 
-async function api(path) {
+const THEME_KEY = 'agentacta-theme';
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', theme === 'light' ? '#f5f7fb' : '#0a0e1a');
+}
+
+function initTheme() {
+  const saved = localStorage.getItem(THEME_KEY);
+  const theme = saved === 'dark' || saved === 'light' ? saved : 'light';
+  applyTheme(theme);
+}
+
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+  const next = current === 'light' ? 'dark' : 'light';
+  localStorage.setItem(THEME_KEY, next);
+  applyTheme(next);
+}
+
+async function api(path, options = {}) {
   let res;
   try {
-    res = await fetch(API + path);
+    res = await fetch(API + path, options);
   } catch (err) {
     // Network error (server down, offline, etc.)
     return { _error: true, error: 'Network error' };
@@ -71,6 +92,26 @@ function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+function fmtToolName(name) {
+  if (!name) return '';
+  // MCP tools: mcp__provider__action → mcp_provider_action
+  const mcp = name.match(/^mcp__(.+?)__(.+)$/);
+  if (mcp) {
+    const provider = mcp[1].replace(/__/g, '_');
+    const action = mcp[2].replace(/__/g, '_');
+    return `mcp_${provider}_${action}`;
+  }
+  return name;
+}
+
+function fmtToolGroup(name) {
+  if (!name) return '';
+  // MCP tools: collapse to mcp_provider (no action)
+  const mcp = name.match(/^mcp__(.+?)__/);
+  if (mcp) return 'mcp_' + mcp[1].replace(/__/g, '_');
+  return name;
+}
+
 function truncate(s, n = 200) {
   if (!s) return '';
   return s.length > n ? s.slice(0, n) + '\u2026' : s;
@@ -93,6 +134,48 @@ function transitionView() {
   content.classList.remove('view-enter');
   void content.offsetWidth;
   content.classList.add('view-enter');
+}
+
+function skeletonLine(width = '100%', height = '12px') {
+  return `<div class="skeleton-line" style="width:${width};height:${height}"></div>`;
+}
+
+function skeletonRows(count = 6, kind = 'event') {
+  if (kind === 'session') {
+    return Array.from({ length: count }).map(() => `
+      <div class="session-item skeleton-card">
+        <div class="skeleton-line" style="width:58%;height:12px"></div>
+        <div class="skeleton-line" style="width:90%;height:14px"></div>
+        <div class="skeleton-line" style="width:72%;height:14px"></div>
+      </div>
+    `).join('');
+  }
+  if (kind === 'stats') {
+    return Array.from({ length: count }).map(() => `
+      <div class="stat-card skeleton-card">
+        <div class="skeleton-line" style="width:44%;height:10px"></div>
+        <div class="skeleton-line" style="width:66%;height:28px;margin-top:8px"></div>
+      </div>
+    `).join('');
+  }
+  if (kind === 'file') {
+    return Array.from({ length: count }).map(() => `
+      <div class="file-item skeleton-card">
+        <div class="skeleton-line" style="width:62%;height:13px"></div>
+        <div class="skeleton-line" style="width:86%;height:12px;margin-top:10px"></div>
+      </div>
+    `).join('');
+  }
+  return Array.from({ length: count }).map(() => `
+    <div class="event-item skeleton-row">
+      <div class="skeleton-line" style="width:72px;height:10px"></div>
+      <div class="skeleton-line" style="width:60px;height:16px"></div>
+      <div class="event-body">
+        <div class="skeleton-line" style="width:82%;height:12px"></div>
+        <div class="skeleton-line" style="width:66%;height:12px;margin-top:8px"></div>
+      </div>
+    </div>
+  `).join('');
 }
 
 // --- Hash routing ---
@@ -118,6 +201,7 @@ function updateNavActive(view) {
 function handleRoute() {
   const raw = (window.location.hash || '').slice(1) || 'search';
   if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
+  if (window._timelineScrollHandler) { window.removeEventListener('scroll', window._timelineScrollHandler); window._timelineScrollHandler = null; }
 
   if (raw.startsWith('session/')) {
     const id = decodeURIComponent(raw.slice('session/'.length));
@@ -144,7 +228,7 @@ function renderEvent(ev) {
   let body = '';
 
   if (ev.type === 'tool_call') {
-    body = `<span class="tool-name">${escHtml(ev.tool_name)}</span>`;
+    body = `<span class="tool-name">${escHtml(fmtToolName(ev.tool_name))}</span>`;
     if (ev.tool_args) {
       try {
         const args = JSON.parse(ev.tool_args);
@@ -154,7 +238,7 @@ function renderEvent(ev) {
       }
     }
   } else if (ev.type === 'tool_result') {
-    body = `<span class="tool-name">\u2192 ${escHtml(ev.tool_name)}</span>`;
+    body = `<span class="tool-name">\u2192 ${escHtml(fmtToolName(ev.tool_name))}</span>`;
     if (ev.content) {
       body += `<div class="tool-args">${escHtml(truncate(ev.content, 500))}</div>`;
     }
@@ -178,7 +262,7 @@ function renderTimelineEvent(ev) {
   let body = '';
 
   if (ev.type === 'tool_call') {
-    body = `<span class="tool-name">${escHtml(ev.tool_name)}</span>`;
+    body = `<span class="tool-name">${escHtml(fmtToolName(ev.tool_name))}</span>`;
     if (ev.tool_args) {
       try {
         const args = JSON.parse(ev.tool_args);
@@ -188,7 +272,7 @@ function renderTimelineEvent(ev) {
       }
     }
   } else if (ev.type === 'tool_result') {
-    body = `<span class="tool-name">\u2192 ${escHtml(ev.tool_name)}</span>`;
+    body = `<span class="tool-name">\u2192 ${escHtml(fmtToolName(ev.tool_name))}</span>`;
     if (ev.content) {
       body += `<div class="tool-args">${escHtml(truncate(ev.content, 500))}</div>`;
     }
@@ -296,7 +380,12 @@ async function viewSearch(query = '') {
       <span class="filter-chip ${roleFilter==='user'?'active':''}" data-filter="role" data-val="user">User</span>
       <span class="filter-chip ${roleFilter==='assistant'?'active':''}" data-filter="role" data-val="assistant">Assistant</span>
     </div>
-    <div id="results"></div>`;
+    <div id="results">
+      <div class="search-bar skeleton-card" style="margin-top:6px">
+        <div class="skeleton-line" style="height:16px;width:40%"></div>
+      </div>
+      ${skeletonRows(4, 'session')}
+    </div>`;
 
   content.innerHTML = html;
   transitionView();
@@ -325,7 +414,7 @@ async function viewSearch(query = '') {
 
 async function showSearchHome() {
   const el = $('#results');
-  el.innerHTML = '<div class="loading">Loading</div>';
+  el.innerHTML = `${skeletonRows(4, 'session')}`;
 
   const stats = await api('/stats');
   const sessions = await api('/sessions?limit=5');
@@ -376,7 +465,7 @@ async function doSearch(q) {
   const el = $('#results');
   if (!q.trim()) { el.innerHTML = '<div class="empty"><h2>Type to search</h2><p>Search across all sessions, messages, and tool calls</p></div>'; return; }
 
-  el.innerHTML = '<div class="loading">Searching</div>';
+  el.innerHTML = `${skeletonRows(6, 'event')}`;
 
   const type = window._searchType || '';
   const role = window._searchRole || '';
@@ -402,7 +491,7 @@ async function doSearch(q) {
       <div class="result-meta">
         <span class="event-badge ${badgeClass(r.type, r.role)}">${r.type === 'tool_call' ? 'tool' : r.role || r.type}</span>
         <span class="session-time">${fmtTime(r.timestamp)}</span>
-        ${r.tool_name ? `<span class="tool-name">${escHtml(r.tool_name)}</span>` : ''}
+        ${r.tool_name ? `<span class="tool-name">${escHtml(fmtToolName(r.tool_name))}</span>` : ''}
         <span class="session-link" data-session="${r.session_id}">view session \u2192</span>
       </div>
       <div class="result-content">${escHtml(truncate(r.content || r.tool_args || r.tool_result || '', 400))}</div>
@@ -420,7 +509,8 @@ async function doSearch(q) {
 
 async function viewSessions() {
   window._currentSessionId = null;
-  content.innerHTML = '<div class="loading">Loading</div>';
+  content.innerHTML = `<div class="page-title">Sessions</div>${skeletonRows(4, 'session')}`;
+  transitionView();
   const data = await api('/sessions?limit=200');
   if (data._error) {
     content.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
@@ -442,6 +532,12 @@ async function viewSession(id) {
   window._currentSessionId = id;
   setHash('session/' + encodeURIComponent(id));
   window.scrollTo(0, 0);
+  content.innerHTML = `
+    <div class="back-btn">← Back</div>
+    <div class="page-title">Session</div>
+    ${skeletonRows(8, 'event')}
+  `;
+  transitionView();
   const data = await api(`/sessions/${id}`);
 
   if (data._error || data.error) { content.innerHTML = `<div class="empty"><h2>${escHtml(data.error || 'Unable to load')}</h2></div>`; return; }
@@ -674,34 +770,93 @@ async function viewTimeline(date) {
     date = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
   }
   window._lastView = 'timeline';
+  window._timelineState = { date, limit: 100, offset: 0, hasMore: true, loading: false };
 
-  let html = `<div class="page-title">Timeline</div>
+  content.innerHTML = `<div class="page-title">Timeline</div>
     <input type="date" class="date-input" id="dateInput" value="${date}">
-    <div id="timelineContent"><div class="loading">Loading</div></div>`;
-  content.innerHTML = html;
+    <div id="timelineContent">${skeletonRows(8, 'event')}</div>
+    <div id="timelineLoadMore" class="loading-more" style="display:none">Loading more…</div>`;
   transitionView();
 
-  const data = await api(`/timeline?date=${date}`);
-  if (data._error) {
-    $('#timelineContent').innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
-    return;
-  }
   const el = $('#timelineContent');
+  const state = window._timelineState;
 
-  if (!data.events.length) {
-    el.innerHTML = '<div class="empty"><h2>No activity</h2><p>Nothing recorded on this day</p></div>';
-  } else {
-    el.innerHTML = `<div class="timeline-events-wrap">
-      <div class="timeline-line"></div>
-      ${data.events.map(renderTimelineEvent).join('')}
-    </div>`;
+  async function loadTimelinePage(append = false) {
+    if (state.loading || (!state.hasMore && append)) return;
+    state.loading = true;
+    if (append) $('#timelineLoadMore').style.display = 'block';
+
+    const data = await api(`/timeline?date=${state.date}&limit=${state.limit}&offset=${state.offset}`);
+    state.loading = false;
+    $('#timelineLoadMore').style.display = 'none';
+
+    if (data._error) {
+      if (!append) el.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
+      return;
+    }
+
+    state.hasMore = !!data.hasMore;
+    state.offset += (data.events || []).length;
+
+    if (!append) {
+      if (!data.events.length) {
+        el.innerHTML = '<div class="empty"><h2>No activity</h2><p>Nothing recorded on this day</p></div>';
+        return;
+      }
+      el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"><div class="timeline-line"></div>${data.events.map(renderTimelineEvent).join('')}</div>`;
+      return;
+    }
+
+    const wrap = $('#timelineWrap');
+    if (wrap) {
+      wrap.insertAdjacentHTML('beforeend', data.events.map(renderTimelineEvent).join(''));
+    }
   }
 
-  $('#dateInput').addEventListener('change', e => viewTimeline(e.target.value));
+  await loadTimelinePage(false);
+
+  if (window._timelineScrollHandler) window.removeEventListener('scroll', window._timelineScrollHandler);
+  window._timelineScrollHandler = () => {
+    const st = window._timelineState;
+    if (!st || st.loading || !st.hasMore) return;
+    const nearBottom = window.innerHeight + window.scrollY >= document.body.offsetHeight - 300;
+    if (nearBottom) loadTimelinePage(true);
+  };
+  window.addEventListener('scroll', window._timelineScrollHandler, { passive: true });
+
+  // Live updates via SSE (only for today)
+  const today = new Date();
+  const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+  if (window._timelineSse) { window._timelineSse.close(); window._timelineSse = null; }
+  if (date === todayStr) {
+    const sse = new EventSource(`/api/timeline/stream?after=${encodeURIComponent(new Date().toISOString())}`);
+    window._timelineSse = sse;
+    sse.onmessage = (evt) => {
+      try {
+        const rows = JSON.parse(evt.data);
+        const wrap = $('#timelineWrap');
+        if (wrap && rows.length) {
+          const html = rows.map(renderTimelineEvent).join('');
+          wrap.insertAdjacentHTML('afterbegin', html);
+          // Flash new events
+          rows.forEach(r => {
+            const el = wrap.querySelector(`[data-event-id="${r.id}"]`);
+            if (el) { el.classList.add('event-highlight'); setTimeout(() => el.classList.remove('event-highlight'), 2000); }
+          });
+        }
+      } catch {}
+    };
+  }
+
+  $('#dateInput').addEventListener('change', e => {
+    if (window._timelineSse) { window._timelineSse.close(); window._timelineSse = null; }
+    viewTimeline(e.target.value);
+  });
 }
 
 async function viewStats() {
-  content.innerHTML = '<div class="loading">Loading</div>';
+  content.innerHTML = `<div class="page-title">Stats</div><div class="stat-grid">${skeletonRows(5, 'stats')}</div>`;
+  transitionView();
   const data = await api('/stats');
   if (data._error) {
     content.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
@@ -713,14 +868,19 @@ async function viewStats() {
       <div class="stat-card accent-blue"><div class="label">Sessions</div><div class="value">${data.sessions}</div></div>
       <div class="stat-card accent-green"><div class="label">Messages</div><div class="value">${data.messages.toLocaleString()}</div></div>
       <div class="stat-card accent-amber"><div class="label">Tool Calls</div><div class="value">${data.toolCalls.toLocaleString()}</div></div>
-      <div class="stat-card accent-purple"><div class="label">Unique Tools</div><div class="value">${data.uniqueTools}</div></div>
+      <div class="stat-card accent-purple"><div class="label">Unique Tools</div><div class="value">${new Set((data.tools||[]).filter(t=>t).map(t=>fmtToolGroup(t))).size}</div></div>
       <div class="stat-card accent-teal"><div class="label">Total Tokens</div><div class="value">${(data.totalTokens || 0).toLocaleString()}</div></div>
     </div>
 
     <div class="section-label">Configuration</div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:var(--space-md);margin-bottom:var(--space-xl)">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:var(--space-md);margin-bottom:var(--space-md)">
       <div class="config-card"><div class="config-label">Storage Mode</div><div class="config-value">${escHtml(data.storageMode || 'reference')}</div></div>
-      <div class="config-card"><div class="config-label">DB Size</div><div class="config-value">${escHtml(data.dbSize?.display || 'N/A')}</div></div>
+      <div class="config-card"><div class="config-label">DB Size</div><div class="config-value" id="dbSizeValue">${escHtml(data.dbSize?.display || 'N/A')}</div></div>
+    </div>
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:var(--space-xl)">
+      <button class="export-btn" id="optimizeDbBtn">Optimize Database</button>
+      <span style="color:var(--text-tertiary);font-size:12px;line-height:1.5">Reclaims unused space and merges pending writes. Safe to run anytime, doesn't delete any data.</span>
+      <span id="optimizeDbStatus" style="color:var(--text-tertiary);font-size:12px"></span>
     </div>
 
     ${data.sessionDirs && data.sessionDirs.length ? (() => {
@@ -755,16 +915,35 @@ async function viewStats() {
     <div class="section-label">Date Range</div>
     <p style="color:var(--text-secondary);font-size:13px;margin-bottom:var(--space-xl)">${fmtDate(data.dateRange?.earliest)} \u2014 ${fmtDate(data.dateRange?.latest)}</p>
     <div class="section-label">Tools Used</div>
-    <div class="tools-grid">${(data.tools||[]).filter(t => t).sort().map(t => `<span class="tool-chip">${escHtml(t)}</span>`).join('')}</div>
+    <div class="tools-grid">${[...new Set((data.tools||[]).filter(t => t).map(t => fmtToolGroup(t)))].sort().map(t => `<span class="tool-chip">${escHtml(t)}</span>`).join('')}</div>
   `;
 
   content.innerHTML = html;
   transitionView();
+
+  const optimizeBtn = $('#optimizeDbBtn');
+  const optimizeStatus = $('#optimizeDbStatus');
+  if (optimizeBtn) {
+    optimizeBtn.addEventListener('click', async () => {
+      optimizeBtn.disabled = true;
+      optimizeStatus.textContent = 'Optimizing…';
+      const result = await api('/maintenance', { method: 'POST' });
+      if (result._error || !result.ok) {
+        optimizeStatus.textContent = `Failed: ${result.error || 'Unknown error'}`;
+      } else {
+        optimizeStatus.textContent = `${result.sizeBefore?.display || 'N/A'} → ${result.sizeAfter?.display || 'N/A'}`;
+        const dbSizeValue = $('#dbSizeValue');
+        if (dbSizeValue) dbSizeValue.textContent = result.sizeAfter?.display || 'N/A';
+      }
+      optimizeBtn.disabled = false;
+    });
+  }
 }
 
 async function viewFiles() {
   window._lastView = 'files';
-  content.innerHTML = '<div class="loading">Loading</div>';
+  content.innerHTML = `<div class="page-title">Files</div>${skeletonRows(6, 'file')}`;
+  transitionView();
   const data = await api('/files?limit=500');
   if (data._error) {
     content.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
@@ -964,6 +1143,8 @@ window._lastView = 'sessions';
 $$('.nav-item').forEach(item => {
   item.addEventListener('click', () => {
     if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
+    if (window._timelineScrollHandler) { window.removeEventListener('scroll', window._timelineScrollHandler); window._timelineScrollHandler = null; }
+    if (window._timelineSse) { window._timelineSse.close(); window._timelineSse = null; }
     const view = item.dataset.view;
     window._lastView = view;
     updateNavActive(view);
@@ -976,6 +1157,9 @@ $$('.nav-item').forEach(item => {
   });
 });
 
+initTheme();
+document.getElementById('theme-toggle')?.addEventListener('click', toggleTheme);
+document.getElementById('theme-toggle-mobile')?.addEventListener('click', toggleTheme);
 handleRoute();
 
 // Swipe right from left edge to go back

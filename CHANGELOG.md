@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.4.0] - 2026-03-04
+
+### Added
+- **Light theme** with toggle (sun/moon icons in sidebar header, mobile top-right button). Persisted via localStorage, defaults to light.
+- **Skeleton loading** across all views (search, sessions, timeline, stats, files, session detail). Shimmer placeholders render instantly while data loads.
+- **Timeline pagination** with infinite scroll (100 events per page, scroll to load more)
+- **Timeline live updates** via SSE stream (`/api/timeline/stream`). New events appear at the top in real time when viewing today's date.
+- **Database maintenance** endpoint (`POST /api/maintenance`): runs WAL checkpoint + VACUUM. Button in Stats view with inline helper copy and before/after size display.
+- **MCP tool name formatting**: event-level display shows `mcp_provider_action`, stats chips collapse all actions under one `mcp_provider` entry
+- Sessions sort index (`idx_sessions_start_time`) for faster session list queries
+
+### Changed
+- Timeline API now supports `limit` and `offset` query params (default 100, max 500)
+- Unique Tools count in stats reflects grouped MCP providers instead of individual actions
+- Main content area `max-width` removed on desktop (fills available space)
+- Search results show tool names with cleaned MCP formatting
+
+### Fixed
+- Timeline scroll handler cleanup on view navigation (prevented stale listeners)
+- Removed dead view-cache code that broke session click handlers
+
 ## [1.3.4] - 2026-03-02
 
 ### Added
@@ -78,12 +99,12 @@
 ## [1.2.1] - 2026-02-28
 
 ### Fixed
-- Timeline API used UTC for date bucketing — events after 6pm in western timezones showed on the wrong day
+- Timeline API used UTC for date bucketing. events after 6pm in western timezones showed on the wrong day
 
 ## [1.2.0] - 2026-02-28
 
 ### Changed
-- **Full UI redesign**: dark theme overhaul inspired by Linear/Raycast — refined palette, card-based layouts, better typography, micro-interactions
+- **Full UI redesign**: dark theme overhaul inspired by Linear/Raycast. refined palette, card-based layouts, better typography, micro-interactions
 - Mobile timeline: stacked vertical layout with compact badges, tighter spacing
 - Mobile container padding rebalanced for centered content
 - Timeline date defaults to local timezone instead of UTC
