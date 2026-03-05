@@ -199,7 +199,7 @@ function updateNavActive(view) {
 }
 
 function handleRoute() {
-  const raw = (window.location.hash || '').slice(1) || 'search';
+  const raw = (window.location.hash || '').slice(1) || 'overview';
   if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
   if (window._timelineScrollHandler) { window.removeEventListener('scroll', window._timelineScrollHandler); window._timelineScrollHandler = null; }
 
@@ -208,14 +208,15 @@ function handleRoute() {
     if (id) { viewSession(id); return; }
   }
 
-  const view = raw === 'sessions' || raw === 'timeline' || raw === 'files' || raw === 'stats' ? raw : 'search';
+  const normalized = raw === 'search' ? 'overview' : raw;
+  const view = normalized === 'overview' || normalized === 'sessions' || normalized === 'timeline' || normalized === 'files' || normalized === 'stats' ? normalized : 'overview';
   window._lastView = view;
   updateNavActive(view);
-  if (view === 'sessions') viewSessions();
+  if (view === 'overview') viewOverview();
+  else if (view === 'sessions') viewSessions();
   else if (view === 'files') viewFiles();
   else if (view === 'timeline') viewTimeline();
-  else if (view === 'stats') viewStats();
-  else viewSearch(window._lastSearchQuery || '');
+  else viewStats();
 }
 
 window.addEventListener('popstate', () => {
@@ -854,6 +855,34 @@ async function viewTimeline(date) {
   });
 }
 
+async function viewOverview() {
+  content.innerHTML = `<div class="page-title">Overview</div><div class="stat-grid">${skeletonRows(5, 'stats')}</div>`;
+  transitionView();
+  const data = await api('/stats');
+  const sessionsRes = await api('/sessions?limit=6');
+  if (data._error || sessionsRes._error) {
+    content.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
+    return;
+  }
+
+  const sessions = sessionsRes.sessions || [];
+  let html = `<div class="page-title">Overview</div>
+    <div class="stat-grid">
+      <div class="stat-card accent-blue"><div class="label">Sessions</div><div class="value">${data.sessions}</div></div>
+      <div class="stat-card accent-green"><div class="label">Messages</div><div class="value">${data.messages.toLocaleString()}</div></div>
+      <div class="stat-card accent-amber"><div class="label">Tool Calls</div><div class="value">${data.toolCalls.toLocaleString()}</div></div>
+      <div class="stat-card accent-purple"><div class="label">Unique Tools</div><div class="value">${new Set((data.tools||[]).filter(t=>t).map(t=>fmtToolGroup(t))).size}</div></div>
+      <div class="stat-card accent-teal"><div class="label">Total Tokens</div><div class="value">${fmtTokens(data.totalTokens || 0)}</div></div>
+    </div>
+    <div class="section-label">Recent Sessions</div>
+    ${sessions.map(renderSessionItem).join('')}
+  `;
+
+  content.innerHTML = html;
+  transitionView();
+  $$('.session-item').forEach(item => item.addEventListener('click', () => viewSession(item.dataset.id)));
+}
+
 async function viewStats() {
   content.innerHTML = `<div class="page-title">Stats</div><div class="stat-grid">${skeletonRows(5, 'stats')}</div>`;
   transitionView();
@@ -1138,7 +1167,7 @@ async function viewFileDetail(filePath) {
 // --- Navigation ---
 window._searchType = '';
 window._searchRole = '';
-window._lastView = 'sessions';
+window._lastView = 'overview';
 
 $$('.nav-item').forEach(item => {
   item.addEventListener('click', () => {
@@ -1149,7 +1178,7 @@ $$('.nav-item').forEach(item => {
     window._lastView = view;
     updateNavActive(view);
     setHash(view);
-    if (view === 'search') viewSearch();
+    if (view === 'overview') viewOverview();
     else if (view === 'sessions') viewSessions();
     else if (view === 'files') viewFiles();
     else if (view === 'timeline') viewTimeline();
@@ -1290,7 +1319,7 @@ async function loadCmdkHome() {
   const items = [
     { group: 'Go to', title: 'Sessions', sub: 'Browse all sessions', action: () => { setHash('sessions'); handleRoute(); } },
     { group: 'Go to', title: 'Timeline', sub: 'Today and historical events', action: () => { setHash('timeline'); handleRoute(); } },
-    { group: 'Go to', title: 'Search', sub: 'Full-text search', action: () => { setHash('search'); handleRoute(); } },
+    { group: 'Go to', title: 'Overview', sub: 'Dashboard summary', action: () => { setHash('overview'); handleRoute(); } },
     { group: 'Go to', title: 'Files', sub: 'Touched files explorer', action: () => { setHash('files'); handleRoute(); } },
     { group: 'Go to', title: 'Stats', sub: 'Dashboard overview', action: () => { setHash('stats'); handleRoute(); } },
   ];
