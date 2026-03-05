@@ -1,8 +1,9 @@
 # RELEASE.md
 
-## AgentActa Release Process (solo maintainer)
+## AgentActa Release Process (PR-first)
 
 This repo uses protected `main` with **PR required** and **0 required approvals**.
+Policy: do not release until code review has happened and review comments are resolved.
 
 ### 1) Prepare
 - Ensure branch is clean and tests pass:
@@ -13,12 +14,18 @@ This repo uses protected `main` with **PR required** and **0 required approvals*
   - minor = new user-visible features (default)
   - major = breaking behavior/API
 
-### 2) Open/merge PR
+### 2) Open PR
 - Push feature branch
 - Open PR to `main`
+- Request/perform code review (even if self-review)
+- Resolve review comments
+- Re-run tests after final review changes
+- Get explicit go-ahead before merge/release actions
+
+### 3) Merge PR
 - Merge PR (squash preferred)
 
-### 3) Cut release
+### 4) Cut release
 From local main:
 ```bash
 git checkout main
@@ -34,7 +41,7 @@ git tag -a vX.Y.Z -m "vX.Y.Z"
 git push origin vX.Y.Z
 ```
 
-### 4) Publish to npm
+### 5) Publish to npm
 From local main after merge/tag:
 ```bash
 npm whoami
@@ -46,12 +53,12 @@ Verify publication:
 npm view agentacta versions --json | python3 -c "import json,sys;v=json.load(sys.stdin);print(v[-5:])"
 ```
 
-### 5) GitHub release
+### 6) GitHub release
 ```bash
 gh release create vX.Y.Z --title "vX.Y.Z" --notes-file <(sed -n '/## \[X.Y.Z\]/,/## \[/p' CHANGELOG.md)
 ```
 
-### 6) Deploy/runtime check
+### 7) Deploy/runtime check
 - Restart service if needed:
   - `systemctl --user restart agentacta`
 - Verify:
