@@ -71,6 +71,47 @@
 
   /* Layout */
   --sidebar-width: 240px;
+  --input-scheme: dark;
+}
+
+[data-theme="light"] {
+  --bg-base: #f5f7fb;
+  --bg-surface: #ffffff;
+  --bg-elevated: #f8fafc;
+  --bg-hover: #eef2f7;
+  --bg-active: #e8edf6;
+
+  --border-subtle: rgba(15, 23, 42, 0.06);
+  --border-default: rgba(15, 23, 42, 0.1);
+  --border-hover: rgba(15, 23, 42, 0.16);
+  --border-focus: rgba(36, 89, 214, 0.45);
+
+  --text-primary: #111827;
+  --text-secondary: #5b6678;
+  --text-tertiary: #8793a7;
+  --text-inverse: #ffffff;
+
+  --accent: #2459d6;
+  --accent-soft: rgba(36, 89, 214, 0.12);
+  --accent-medium: rgba(36, 89, 214, 0.2);
+
+  --green: #158f69;
+  --green-soft: rgba(21, 143, 105, 0.12);
+
+  --purple: #7d62eb;
+  --purple-soft: rgba(125, 98, 235, 0.12);
+
+  --amber: #b7791f;
+  --amber-soft: rgba(183, 121, 31, 0.12);
+
+  --red: #c24141;
+  --red-soft: rgba(194, 65, 65, 0.12);
+
+  --teal: #0f9f9a;
+  --teal-soft: rgba(15, 159, 154, 0.12);
+
+  --shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+  --input-scheme: light;
 }
 
 /* ---- Reset ---- */
@@ -125,6 +166,10 @@ body {
 
 .sidebar-header {
   padding: var(--space-xl) var(--space-xl) var(--space-lg);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
 }
 
 .sidebar h1 {
@@ -139,6 +184,63 @@ body {
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+}
+
+.theme-toggle {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-default);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+}
+
+.theme-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.theme-toggle svg,
+.theme-toggle-mobile svg {
+  width: 16px;
+  height: 16px;
+}
+
+.theme-icon-moon { display: none; }
+[data-theme="light"] .theme-icon-sun { display: none; }
+[data-theme="light"] .theme-icon-moon { display: block; }
+
+.theme-toggle-mobile {
+  display: none;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  position: absolute;
+  top: calc(var(--space-xl) + env(safe-area-inset-top, 0px));
+  right: var(--space-lg);
+  z-index: 10;
+}
+
+.theme-toggle-mobile:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.theme-toggle-mobile svg {
+  width: 16px;
+  height: 16px;
 }
 
 .nav-section {
@@ -203,7 +305,7 @@ body {
   flex: 1;
   margin-left: var(--sidebar-width);
   padding: var(--space-2xl) var(--space-3xl);
-  max-width: 1000px;
+  max-width: none;
   min-height: 100vh;
 }
 
@@ -655,6 +757,40 @@ mark {
   font-weight: 500;
 }
 
+/* ---- Skeletons ---- */
+.skeleton-card,
+.skeleton-row {
+  border-color: var(--border-subtle);
+}
+
+.skeleton-line {
+  position: relative;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  overflow: hidden;
+}
+
+.skeleton-line::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--bg-hover), transparent);
+  animation: skeletonShimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes skeletonShimmer {
+  100% { transform: translateX(100%); }
+}
+
+.loading-more {
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  padding: var(--space-md) 0;
+}
+
 @keyframes pulse {
   0%, 100% { opacity: 0.4; }
   50% { opacity: 1; }
@@ -683,7 +819,7 @@ mark {
   outline: none;
   margin-bottom: var(--space-lg);
   transition: all var(--duration-normal) var(--ease-out);
-  color-scheme: dark;
+  color-scheme: var(--input-scheme);
 }
 
 .date-input:hover {
@@ -1229,6 +1365,10 @@ mark {
   }
 
   .sidebar-header { display: none; }
+
+  .theme-toggle-mobile {
+    display: flex;
+  }
 
   .nav-section {
     display: flex;

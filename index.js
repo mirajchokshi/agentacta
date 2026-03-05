@@ -428,13 +428,67 @@ const server = http.createServer((req, res) => {
       const date = query.date || (() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`; })();
       const from = new Date(date + 'T00:00:00').toISOString();
       const to = new Date(date + 'T23:59:59.999').toISOString();
+      const limit = Math.min(parseInt(query.limit || '100', 10) || 100, 500);
+      const offset = Math.max(parseInt(query.offset || '0', 10) || 0, 0);
       const events = db.prepare(
         `SELECT e.*, s.summary as session_summary FROM events e
          JOIN sessions s ON s.id = e.session_id
          WHERE e.timestamp >= ? AND e.timestamp <= ?
-         ORDER BY e.timestamp DESC`
-      ).all(from, to);
-      json(res, { date, events, total: events.length });
+         ORDER BY e.timestamp DESC
+         LIMIT ? OFFSET ?`
+      ).all(from, to, limit, offset);
+      const total = db.prepare(
+        `SELECT COUNT(*) as c FROM events e
+         WHERE e.timestamp >= ? AND e.timestamp <= ?`
+      ).get(from, to).c;
+      json(res, { date, events, total, limit, offset, hasMore: offset + events.length < total });
+    }
+    else if (pathname === '/api/timeline/stream') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no'
+      });
+      res.write(': connected\n\n');
+
+      let lastTs = query.after || new Date().toISOString();
+
+      const onUpdate = () => {
+        try {
+          const rows = db.prepare(
+            `SELECT e.*, s.summary as session_summary FROM events e
+             JOIN sessions s ON s.id = e.session_id
+             WHERE e.timestamp > ?
+             ORDER BY e.timestamp ASC`
+          ).all(lastTs);
+          if (rows.length) {
+            lastTs = rows[rows.length - 1].timestamp;
+            res.write(`id: ${lastTs}\ndata: ${JSON.stringify(rows)}\n\n`);
+          }
+        } catch (err) {
+          console.error('Timeline SSE error:', err.message);
+        }
+      };
+
+      sseEmitter.on('session-update', onUpdate);
+
+      const ping = setInterval(() => {
+        try { res.write(': ping\n\n'); } catch {}
+      }, 30000);
+
+      req.on('close', () => {
+        sseEmitter.off('session-update', onUpdate);
+        clearInterval(ping);
+      });
+    }
+    else if (pathname === '/api/maintenance') {
+      if (req.method !== 'POST') return json(res, { error: 'Method not allowed' }, 405);
+      const sizeBefore = getDbSize();
+      db.pragma('wal_checkpoint(TRUNCATE)');
+      db.exec('VACUUM');
+      const sizeAfter = getDbSize();
+      json(res, { ok: true, sizeBefore, sizeAfter });
     }
     else if (pathname === '/api/files') {
       const limit = parseInt(query.limit) || 100;
