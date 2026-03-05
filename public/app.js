@@ -1157,9 +1157,230 @@ $$('.nav-item').forEach(item => {
   });
 });
 
+// --- Command Palette (Cmd+K) ---
+window._cmdk = { open: false, index: 0, items: [], scrollY: 0 };
+
+function closeCmdk() {
+  const el = $('#cmdkOverlay');
+  if (el) el.remove();
+
+  document.documentElement.classList.remove('cmdk-open');
+  document.body.classList.remove('cmdk-open');
+
+  window._cmdk.open = false;
+}
+
+function execCmdkItem(i) {
+  const item = window._cmdk.items[i];
+  if (!item) return;
+  closeCmdk();
+  item.action();
+}
+
+function renderCmdkList() {
+  const list = $('#cmdkList');
+  if (!list) return;
+  const { items, index } = window._cmdk;
+  if (!items.length) {
+    list.innerHTML = '<div class="cmdk-empty"><h4>No results</h4>Try a different search term</div>';
+    return;
+  }
+
+  let html = '';
+  let lastGroup = '';
+  items.forEach((item, i) => {
+    if (item.group !== lastGroup) {
+      lastGroup = item.group;
+      html += `<div class="cmdk-group-label">${escHtml(lastGroup)}</div>`;
+    }
+    html += `<button type="button" class="cmdk-item ${i === index ? 'active' : ''}" data-i="${i}">
+      <div class="cmdk-item-body">
+        <div class="cmdk-item-title">${escHtml(item.title)}</div>
+        ${item.sub ? `<div class="cmdk-item-sub">${escHtml(item.sub)}</div>` : ''}
+      </div>
+      ${item.meta ? `<span class="cmdk-item-meta">${escHtml(item.meta)}</span>` : ''}
+    </button>`;
+  });
+  list.innerHTML = html;
+
+  if (!list.dataset.bound) {
+    list.addEventListener('click', (e) => {
+      const btn = e.target.closest('.cmdk-item');
+      if (!btn) return;
+      e.preventDefault();
+      const idx = Number(btn.dataset.i || -1);
+      if (idx >= 0) execCmdkItem(idx);
+    });
+
+    list.addEventListener('pointermove', (e) => {
+      if (e.pointerType && e.pointerType !== 'mouse') return;
+      const btn = e.target.closest('.cmdk-item');
+      if (!btn) return;
+      const idx = Number(btn.dataset.i || -1);
+      if (idx >= 0 && idx !== window._cmdk.index) {
+        window._cmdk.index = idx;
+        renderCmdkList();
+      }
+    });
+
+    list.dataset.bound = '1';
+  }
+
+  // scroll active into view
+  const active = list.querySelector('.cmdk-item.active');
+  if (active) active.scrollIntoView({ block: 'nearest' });
+}
+
+async function loadCmdkResults(query) {
+  const list = $('#cmdkList');
+  if (!list) return;
+  const q = (query || '').trim();
+  if (!q) { loadCmdkHome(); return; }
+
+  list.innerHTML = '<div class="cmdk-loading">Searching\u2026</div>';
+
+  const [searchRes, sessionsRes, filesRes] = await Promise.all([
+    api(`/search?q=${encodeURIComponent(q)}&limit=6`),
+    api('/sessions?limit=20'),
+    api('/files?limit=20')
+  ]);
+
+  const items = [];
+
+  (sessionsRes.sessions || [])
+    .filter(s => (s.summary || '').toLowerCase().includes(q.toLowerCase()))
+    .slice(0, 3)
+    .forEach(s => items.push({
+      group: 'Sessions',
+      title: truncate(s.summary || 'No summary', 64),
+      sub: shortSessionId(s.id),
+      meta: fmtTime(s.start_time),
+      action: () => viewSession(s.id)
+    }));
+
+  (filesRes.files || [])
+    .filter(f => f.file_path.toLowerCase().includes(q.toLowerCase()))
+    .slice(0, 2)
+    .forEach(f => items.push({
+      group: 'Files',
+      title: f.file_path.split('/').pop(),
+      sub: f.file_path,
+      meta: `${f.touch_count} touches`,
+      action: () => viewFileDetail(f.file_path)
+    }));
+
+  (searchRes.results || []).slice(0, 4).forEach(r => items.push({
+    group: 'Search Results',
+    title: truncate(r.content || r.tool_args || r.tool_result || '', 66),
+    sub: shortSessionId(r.session_id),
+    meta: fmtTime(r.timestamp),
+    action: () => viewSession(r.session_id)
+  }));
+
+  window._cmdk.items = items;
+  window._cmdk.index = 0;
+  renderCmdkList();
+}
+
+async function loadCmdkHome() {
+  const list = $('#cmdkList');
+  if (!list) return;
+  list.innerHTML = '<div class="cmdk-loading">Loading\u2026</div>';
+
+  const items = [
+    { group: 'Go to', title: 'Sessions', sub: 'Browse all sessions', action: () => { setHash('sessions'); handleRoute(); } },
+    { group: 'Go to', title: 'Timeline', sub: 'Today and historical events', action: () => { setHash('timeline'); handleRoute(); } },
+    { group: 'Go to', title: 'Search', sub: 'Full-text search', action: () => { setHash('search'); handleRoute(); } },
+    { group: 'Go to', title: 'Files', sub: 'Touched files explorer', action: () => { setHash('files'); handleRoute(); } },
+    { group: 'Go to', title: 'Stats', sub: 'Dashboard overview', action: () => { setHash('stats'); handleRoute(); } },
+  ];
+
+  const sessionsRes = await api('/sessions?limit=4');
+
+  (sessionsRes.sessions || []).forEach(s => items.push({
+    group: 'Recent Sessions',
+    title: truncate(s.summary || 'No summary', 64),
+    sub: shortSessionId(s.id),
+    meta: fmtTime(s.start_time),
+    action: () => viewSession(s.id)
+  }));
+
+  window._cmdk.items = items;
+  window._cmdk.index = 0;
+  renderCmdkList();
+}
+
+function openCmdk() {
+  if ($('#cmdkOverlay')) { $('#cmdkInput')?.focus(); return; }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'cmdk-overlay';
+  overlay.id = 'cmdkOverlay';
+  overlay.innerHTML = `<div class="cmdk-dialog" role="dialog" aria-modal="true">
+    <div class="cmdk-input-wrap">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <input id="cmdkInput" type="text" placeholder="Search sessions, files, or jump to a view\u2026" />
+      <kbd>ESC</kbd>
+    </div>
+    <div class="cmdk-list" id="cmdkList"></div>
+  </div>`;
+  document.body.appendChild(overlay);
+  window._cmdk.open = true;
+
+  const input = $('#cmdkInput');
+  const isMobile = window.matchMedia('(max-width: 768px)').matches;
+
+  document.documentElement.classList.add('cmdk-open');
+  document.body.classList.add('cmdk-open');
+
+  if (isMobile) {
+    // iOS keyboard requires focus in the same user gesture call stack.
+    try {
+      input.focus({ preventScroll: true });
+    } catch {
+      input.focus();
+    }
+    input.setSelectionRange(input.value.length, input.value.length);
+  } else {
+    input.focus();
+  }
+
+  let debounce;
+  input.addEventListener('input', () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => loadCmdkResults(input.value), 150);
+  });
+
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeCmdk(); });
+
+  overlay.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); closeCmdk(); return; }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      window._cmdk.index = Math.min(window._cmdk.index + 1, window._cmdk.items.length - 1);
+      renderCmdkList();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      window._cmdk.index = Math.max(window._cmdk.index - 1, 0);
+      renderCmdkList();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      execCmdkItem(window._cmdk.index);
+    }
+  });
+
+  loadCmdkHome();
+}
+
 initTheme();
 document.getElementById('theme-toggle')?.addEventListener('click', toggleTheme);
 document.getElementById('theme-toggle-mobile')?.addEventListener('click', toggleTheme);
+document.getElementById('cmdkBtn')?.addEventListener('click', () => openCmdk());
+document.getElementById('mobile-search-btn')?.addEventListener('click', () => openCmdk());
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openCmdk(); return; }
+  if (e.key === 'Escape' && window._cmdk.open) { e.preventDefault(); closeCmdk(); }
+});
 handleRoute();
 
 // Swipe right from left edge to go back
