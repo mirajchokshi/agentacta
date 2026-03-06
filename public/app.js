@@ -1586,7 +1586,7 @@ function openCmdk() {
   overlay.innerHTML = `<div class="cmdk-dialog" role="dialog" aria-modal="true">
     <div class="cmdk-input-wrap">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-      <input id="cmdkInput" type="text" placeholder="Search sessions, files, or jump to a view\u2026" />
+      <input id="cmdkInput" type="text" placeholder="Search sessions, files, or jump to a view" />
       <kbd>ESC</kbd>
     </div>
     <div class="cmdk-list" id="cmdkList"></div>
@@ -1645,7 +1645,12 @@ document.getElementById('theme-toggle-mobile')?.addEventListener('click', toggle
 document.getElementById('cmdkBtn')?.addEventListener('click', () => openCmdk());
 document.getElementById('mobile-search-btn')?.addEventListener('click', () => openCmdk());
 document.addEventListener('keydown', e => {
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openCmdk(); return; }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    if (window._cmdk.open) closeCmdk();
+    else openCmdk();
+    return;
+  }
   if (e.key === 'Escape' && window._cmdk.open) { e.preventDefault(); closeCmdk(); }
 });
 handleRoute();
