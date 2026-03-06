@@ -1386,12 +1386,21 @@ async function loadCmdkHome() {
     { group: 'Go to', title: 'Settings', sub: 'Configuration and maintenance', action: () => { setHash('stats'); handleRoute(); } },
   ];
 
-  const sessionsRes = await api('/sessions?limit=4');
+  const sessionsRes = await api('/sessions?limit=20');
 
   const sessionList = sessionsRes.sessions || [];
   const sessionMap = new Map(sessionList.map(s => [s.id, s]));
 
-  (window._recentSessionIds || []).forEach(id => {
+  const recentIds = window._recentSessionIds || [];
+  const missingIds = recentIds.filter(id => !sessionMap.has(id));
+  if (missingIds.length) {
+    const fetched = await Promise.all(missingIds.map(id => api(`/sessions/${id}`)));
+    fetched.forEach(r => {
+      if (r && !r._error && r.session) sessionMap.set(r.session.id, r.session);
+    });
+  }
+
+  recentIds.forEach(id => {
     const s = sessionMap.get(id);
     if (!s) return;
     items.push({
