@@ -9,10 +9,9 @@ Policy: do not release until code review has happened and review comments are re
 - Ensure branch is clean and tests pass:
   - `npm test`
 - Update `CHANGELOG.md` with a dated section.
-- Choose semver:
-  - patch = fixes only
-  - minor = new user-visible features (default)
-  - major = breaking behavior/API
+- Versioning policy: **CalVer**
+  - Normal: `YYYY.M.D` (example: `2026.3.5`)
+  - Multiple releases same day: `YYYY.M.D-rN` (example: `2026.3.5-r2`)
 
 ### 2) Open PR
 - Push feature branch
@@ -30,15 +29,25 @@ From local main:
 ```bash
 git checkout main
 git pull
-npm version <patch|minor|major> --no-git-tag-version
-# (optional) commit version bump if desired
+
+BASE="$(date +%Y.%-m.%-d)"
+if npm view "agentacta@${BASE}" version >/dev/null 2>&1; then
+  N=1
+  while npm view "agentacta@${BASE}-r${N}" version >/dev/null 2>&1; do N=$((N+1)); done
+  VER="${BASE}-r${N}"
+else
+  VER="$BASE"
+fi
+
+echo "Releasing $VER"
+npm version "$VER" --no-git-tag-version
 
 git add package.json package-lock.json CHANGELOG.md
-git commit -m "release: vX.Y.Z"
+git commit -m "release: v$VER"
 git push
 
-git tag -a vX.Y.Z -m "vX.Y.Z"
-git push origin vX.Y.Z
+git tag -a "v$VER" -m "v$VER"
+git push origin "v$VER"
 ```
 
 ### 5) Publish to npm
@@ -55,7 +64,7 @@ npm view agentacta versions --json | python3 -c "import json,sys;v=json.load(sys
 
 ### 6) GitHub release
 ```bash
-gh release create vX.Y.Z --title "vX.Y.Z" --notes-file <(sed -n '/## \[X.Y.Z\]/,/## \[/p' CHANGELOG.md)
+gh release create "v$VER" --title "v$VER" --notes-file <(sed -n "/## \[$VER\]/,/## \[/p" CHANGELOG.md)
 ```
 
 ### 7) Deploy/runtime check
