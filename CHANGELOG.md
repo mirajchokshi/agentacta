@@ -1,5 +1,31 @@
 # Changelog
 
+## [2026.3.5] - 2026-03-05
+
+### Added
+- Theme settings in **Settings → Appearance**:
+  - Theme Mode: System / Light / Dark
+  - Dark Variant: Default / True Black
+- True Black dark theme variant (`data-theme="oled"`)
+- Initial Prompt jump UX improvements for long sessions:
+  - subtle in-button pulse while jumping
+  - return-to-previous-position control
+
+### Changed
+- Cmd+K trigger copy simplified to **Search**
+- Cmd+K keyboard shortcut now toggles palette open/close when already open
+- Command palette input copy no longer uses ellipsis
+- Sidebar search trigger placement refined below logo
+
+### Fixed
+- Timeline live-update edge cases:
+  - empty-day timeline can receive first live event
+  - pagination offset stays correct after SSE prepends
+  - SSE cursor tie-breaker handles equal timestamps
+- Search/home async guard prevents stale responses from overwriting newer query UI state
+- Cmd+K Recently Opened now resolves sessions by id even when outside latest list
+- Theme preference reads/writes now safely handle localStorage failures
+
 ## [1.4.0] - 2026-03-04
 
 ### Added
