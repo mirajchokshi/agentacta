@@ -458,10 +458,12 @@ async function viewSearch(query = '') {
 
 async function showSearchHome() {
   const el = $('#results');
+  const reqId = (window._searchReqSeq = (window._searchReqSeq || 0) + 1);
   el.innerHTML = `${skeletonRows(4, 'session')}`;
 
   const stats = await api('/stats');
   const sessions = await api('/sessions?limit=5');
+  if (reqId !== window._searchReqSeq) return;
   if (stats._error || sessions._error) {
     el.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
     return;
@@ -469,6 +471,7 @@ async function showSearchHome() {
 
   let suggestions = [];
   try { const r = await fetch('/api/suggestions'); const d = await r.json(); suggestions = d.suggestions || []; } catch(e) { suggestions = []; }
+  if (reqId !== window._searchReqSeq) return;
 
   let html = `
     <div class="search-stats" style="margin-top:8px">
@@ -507,6 +510,7 @@ async function showSearchHome() {
 
 async function doSearch(q) {
   const el = $('#results');
+  const reqId = (window._searchReqSeq = (window._searchReqSeq || 0) + 1);
   if (!q.trim()) { el.innerHTML = '<div class="empty"><h2>Type to search</h2><p>Search across all sessions, messages, and tool calls</p></div>'; return; }
 
   el.innerHTML = `${skeletonRows(6, 'event')}`;
@@ -518,6 +522,7 @@ async function doSearch(q) {
   if (role) url += `&role=${role}`;
 
   const data = await api(url);
+  if (reqId !== window._searchReqSeq) return;
 
   if (data._error || data.error) { el.innerHTML = `<div class="empty"><p>${escHtml(data.error || 'Server error')}</p></div>`; return; }
   if (!data.results.length) { el.innerHTML = '<div class="empty"><h2>No results</h2><p>Try a different search term or adjust filters</p></div>'; return; }
