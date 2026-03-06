@@ -199,7 +199,7 @@ function updateNavActive(view) {
 }
 
 function handleRoute() {
-  const raw = (window.location.hash || '').slice(1) || 'search';
+  const raw = (window.location.hash || '').slice(1) || 'overview';
   if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
   if (window._timelineScrollHandler) { window.removeEventListener('scroll', window._timelineScrollHandler); window._timelineScrollHandler = null; }
 
@@ -208,14 +208,15 @@ function handleRoute() {
     if (id) { viewSession(id); return; }
   }
 
-  const view = raw === 'sessions' || raw === 'timeline' || raw === 'files' || raw === 'stats' ? raw : 'search';
+  const normalized = raw === 'search' ? 'overview' : raw;
+  const view = normalized === 'overview' || normalized === 'sessions' || normalized === 'timeline' || normalized === 'files' || normalized === 'stats' ? normalized : 'overview';
   window._lastView = view;
   updateNavActive(view);
-  if (view === 'sessions') viewSessions();
+  if (view === 'overview') viewOverview();
+  else if (view === 'sessions') viewSessions();
   else if (view === 'files') viewFiles();
   else if (view === 'timeline') viewTimeline();
-  else if (view === 'stats') viewStats();
-  else viewSearch(window._lastSearchQuery || '');
+  else viewStats();
 }
 
 window.addEventListener('popstate', () => {
@@ -310,6 +311,49 @@ function normalizeAgentLabel(a) {
   return a;
 }
 
+function cleanSessionSummary(text, fallbackText = '') {
+  const pick = (input) => {
+    const raw = (input || '').trim();
+    if (!raw) return '';
+
+    const jsonFence = /```json[\s\S]*?```/gi;
+    const fences = [...raw.matchAll(jsonFence)];
+    if (fences.length >= 2) {
+      const second = fences[1];
+      const after = raw.slice(second.index + second[0].length).trim();
+      if (after) {
+        const line = after.split(/\r?\n/).map(l => l.trim()).find(Boolean);
+        if (line) return line;
+      }
+    }
+
+    const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const skip = [
+      /^conversation info/i,
+      /^sender/i,
+      /^```/,
+      /^\{/, /^\}/,
+      /^"(message_id|sender_id|sender|timestamp|label|id|name)"/i,
+      /^untrusted metadata/i
+    ];
+
+    let candidate = lines.find(l => !skip.some(rx => rx.test(l)));
+    if (candidate) {
+      candidate = candidate
+        .replace(/^\[cron:[^\]]+\]\s*/i, '')
+        .replace(/^\[heartbeat:[^\]]+\]\s*/i, '')
+        .trim();
+    }
+    if (!candidate || skip.some(rx => rx.test(candidate))) {
+      if (/heartbeat session/i.test(raw)) return 'Heartbeat session';
+      return '';
+    }
+    return candidate;
+  };
+
+  return pick(text) || pick(fallbackText) || 'Session activity';
+}
+
 function isInternalProjectTag(tag) {
   if (!tag) return true;
   if (tag.startsWith('agent:')) return true;
@@ -352,7 +396,7 @@ function renderSessionItem(s) {
           ${renderModelTags(s)}
         </span>
       </div>
-      <div class="session-summary">${escHtml(truncate(s.summary || 'No summary', 120))}</div>
+      <div class="session-summary">${escHtml(truncate(cleanSessionSummary(s.summary, s.initial_prompt), 120))}</div>
       <div class="session-meta">
         <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> ${s.message_count}</span>
         <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> ${s.tool_count}</span>
@@ -414,10 +458,12 @@ async function viewSearch(query = '') {
 
 async function showSearchHome() {
   const el = $('#results');
+  const reqId = (window._searchReqSeq = (window._searchReqSeq || 0) + 1);
   el.innerHTML = `${skeletonRows(4, 'session')}`;
 
   const stats = await api('/stats');
   const sessions = await api('/sessions?limit=5');
+  if (reqId !== window._searchReqSeq) return;
   if (stats._error || sessions._error) {
     el.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
     return;
@@ -425,6 +471,7 @@ async function showSearchHome() {
 
   let suggestions = [];
   try { const r = await fetch('/api/suggestions'); const d = await r.json(); suggestions = d.suggestions || []; } catch(e) { suggestions = []; }
+  if (reqId !== window._searchReqSeq) return;
 
   let html = `
     <div class="search-stats" style="margin-top:8px">
@@ -463,6 +510,7 @@ async function showSearchHome() {
 
 async function doSearch(q) {
   const el = $('#results');
+  const reqId = (window._searchReqSeq = (window._searchReqSeq || 0) + 1);
   if (!q.trim()) { el.innerHTML = '<div class="empty"><h2>Type to search</h2><p>Search across all sessions, messages, and tool calls</p></div>'; return; }
 
   el.innerHTML = `${skeletonRows(6, 'event')}`;
@@ -474,6 +522,7 @@ async function doSearch(q) {
   if (role) url += `&role=${role}`;
 
   const data = await api(url);
+  if (reqId !== window._searchReqSeq) return;
 
   if (data._error || data.error) { el.innerHTML = `<div class="empty"><p>${escHtml(data.error || 'Server error')}</p></div>`; return; }
   if (!data.results.length) { el.innerHTML = '<div class="empty"><h2>No results</h2><p>Try a different search term or adjust filters</p></div>'; return; }
@@ -528,6 +577,7 @@ async function viewSessions() {
 }
 
 async function viewSession(id) {
+  window._recentSessionIds = [id, ...(window._recentSessionIds || []).filter(x => x !== id)].slice(0, 5);
   if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
   window._currentSessionId = id;
   setHash('session/' + encodeURIComponent(id));
@@ -854,8 +904,55 @@ async function viewTimeline(date) {
   });
 }
 
+async function viewOverview() {
+  content.innerHTML = `<div class="page-title">Overview</div><div class="stat-grid">${skeletonRows(5, 'stats')}</div>`;
+  transitionView();
+  const data = await api('/stats');
+  const sessionsRes = await api('/sessions?limit=30');
+  if (data._error || sessionsRes._error) {
+    content.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
+    return;
+  }
+
+  const sessions = sessionsRes.sessions || [];
+  const nowMs = Date.now();
+  const ACTIVE_WINDOW_MIN = 15;
+  const activeNow = sessions
+    .filter(s => {
+      const t = s.end_time || s.start_time;
+      if (!t) return false;
+      const ageMin = (nowMs - new Date(t).getTime()) / 60000;
+      return ageMin >= 0 && ageMin <= ACTIVE_WINDOW_MIN;
+    })
+    .slice(0, 4);
+  const activeIds = new Set(activeNow.map(s => s.id));
+  const recentSessions = sessions.filter(s => !activeIds.has(s.id)).slice(0, 6);
+  const uniqueTools = new Set((data.tools || []).filter(t => t).map(t => fmtToolGroup(t)));
+
+  let html = `<div class="page-title">Overview</div>
+
+    <div class="section-label">Key Metrics</div>
+    <div class="stat-grid">
+      <div class="stat-card accent-blue"><div class="label">Sessions</div><div class="value">${data.sessions}</div></div>
+      <div class="stat-card accent-green"><div class="label">Messages</div><div class="value">${data.messages.toLocaleString()}</div></div>
+      <div class="stat-card accent-amber"><div class="label">Tool Calls</div><div class="value">${data.toolCalls.toLocaleString()}</div></div>
+      <div class="stat-card accent-teal"><div class="label">Total Tokens</div><div class="value">${(data.totalTokens || 0).toLocaleString()}</div></div>
+    </div>
+
+    <div class="section-label">Active Now (${activeNow.length})</div>
+    ${activeNow.length ? activeNow.map(renderSessionItem).join('') : `<div class="empty" style="margin-bottom:var(--space-xl)"><p>No active sessions right now</p></div>`}
+
+    <div class="section-label">Recent Sessions</div>
+    ${recentSessions.map(renderSessionItem).join('')}
+  `;
+
+  content.innerHTML = html;
+  transitionView();
+  $$('.session-item').forEach(item => item.addEventListener('click', () => viewSession(item.dataset.id)));
+}
+
 async function viewStats() {
-  content.innerHTML = `<div class="page-title">Stats</div><div class="stat-grid">${skeletonRows(5, 'stats')}</div>`;
+  content.innerHTML = `<div class="page-title">Settings</div>${skeletonRows(4, 'session')}`;
   transitionView();
   const data = await api('/stats');
   if (data._error) {
@@ -863,25 +960,21 @@ async function viewStats() {
     return;
   }
 
-  let html = `<div class="page-title">Stats</div>
-    <div class="stat-grid">
-      <div class="stat-card accent-blue"><div class="label">Sessions</div><div class="value">${data.sessions}</div></div>
-      <div class="stat-card accent-green"><div class="label">Messages</div><div class="value">${data.messages.toLocaleString()}</div></div>
-      <div class="stat-card accent-amber"><div class="label">Tool Calls</div><div class="value">${data.toolCalls.toLocaleString()}</div></div>
-      <div class="stat-card accent-purple"><div class="label">Unique Tools</div><div class="value">${new Set((data.tools||[]).filter(t=>t).map(t=>fmtToolGroup(t))).size}</div></div>
-      <div class="stat-card accent-teal"><div class="label">Total Tokens</div><div class="value">${(data.totalTokens || 0).toLocaleString()}</div></div>
-    </div>
+  const uniqueTools = new Set((data.tools||[]).filter(t=>t).map(t=>fmtToolGroup(t)));
+  let html = `<div class="settings-page">
+    <div class="page-title">Settings</div>
 
-    <div class="section-label">Configuration</div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:var(--space-md);margin-bottom:var(--space-md)">
+    <div class="section-label">System</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:var(--space-md);margin-bottom:var(--space-md)">
       <div class="config-card"><div class="config-label">Storage Mode</div><div class="config-value">${escHtml(data.storageMode || 'reference')}</div></div>
       <div class="config-card"><div class="config-label">DB Size</div><div class="config-value" id="dbSizeValue">${escHtml(data.dbSize?.display || 'N/A')}</div></div>
     </div>
-    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:var(--space-xl)">
+    <p class="settings-help" style="margin-bottom:var(--space-sm)">Date range: ${fmtDate(data.dateRange?.earliest)} — ${fmtDate(data.dateRange?.latest)}</p>
+    <div class="settings-maintenance">
       <button class="export-btn" id="optimizeDbBtn">Optimize Database</button>
-      <span style="color:var(--text-tertiary);font-size:12px;line-height:1.5">Reclaims unused space and merges pending writes. Safe to run anytime, doesn't delete any data.</span>
-      <span id="optimizeDbStatus" style="color:var(--text-tertiary);font-size:12px"></span>
+      <span id="optimizeDbStatus" class="settings-maintenance-status"></span>
     </div>
+    <p class="settings-help">Reclaims unused space and merges pending writes. Safe to run anytime, doesn't delete any data.</p>
 
     ${data.sessionDirs && data.sessionDirs.length ? (() => {
       const dirs = data.sessionDirs || [];
@@ -912,11 +1005,9 @@ async function viewStats() {
     })() : ''}
 
     ${data.agents && data.agents.length > 1 ? `<div class="section-label">Agents</div><div class="filters" style="margin-bottom:var(--space-xl)">${data.agents.map(a => `<span class="filter-chip">${escHtml(a)}</span>`).join('')}</div>` : ''}
-    <div class="section-label">Date Range</div>
-    <p style="color:var(--text-secondary);font-size:13px;margin-bottom:var(--space-xl)">${fmtDate(data.dateRange?.earliest)} \u2014 ${fmtDate(data.dateRange?.latest)}</p>
     <div class="section-label">Tools Used</div>
     <div class="tools-grid">${[...new Set((data.tools||[]).filter(t => t).map(t => fmtToolGroup(t)))].sort().map(t => `<span class="tool-chip">${escHtml(t)}</span>`).join('')}</div>
-  `;
+  </div>`;
 
   content.innerHTML = html;
   transitionView();
@@ -1138,7 +1229,7 @@ async function viewFileDetail(filePath) {
 // --- Navigation ---
 window._searchType = '';
 window._searchRole = '';
-window._lastView = 'sessions';
+window._lastView = 'overview';
 
 $$('.nav-item').forEach(item => {
   item.addEventListener('click', () => {
@@ -1149,7 +1240,7 @@ $$('.nav-item').forEach(item => {
     window._lastView = view;
     updateNavActive(view);
     setHash(view);
-    if (view === 'search') viewSearch();
+    if (view === 'overview') viewOverview();
     else if (view === 'sessions') viewSessions();
     else if (view === 'files') viewFiles();
     else if (view === 'timeline') viewTimeline();
@@ -1248,11 +1339,11 @@ async function loadCmdkResults(query) {
   const items = [];
 
   (sessionsRes.sessions || [])
-    .filter(s => (s.summary || '').toLowerCase().includes(q.toLowerCase()))
+    .filter(s => cleanSessionSummary(s.summary, s.initial_prompt).toLowerCase().includes(q.toLowerCase()))
     .slice(0, 3)
     .forEach(s => items.push({
       group: 'Sessions',
-      title: truncate(s.summary || 'No summary', 64),
+      title: truncate(cleanSessionSummary(s.summary, s.initial_prompt), 64),
       sub: shortSessionId(s.id),
       meta: fmtTime(s.start_time),
       action: () => viewSession(s.id)
@@ -1290,16 +1381,40 @@ async function loadCmdkHome() {
   const items = [
     { group: 'Go to', title: 'Sessions', sub: 'Browse all sessions', action: () => { setHash('sessions'); handleRoute(); } },
     { group: 'Go to', title: 'Timeline', sub: 'Today and historical events', action: () => { setHash('timeline'); handleRoute(); } },
-    { group: 'Go to', title: 'Search', sub: 'Full-text search', action: () => { setHash('search'); handleRoute(); } },
+    { group: 'Go to', title: 'Overview', sub: 'Dashboard summary', action: () => { setHash('overview'); handleRoute(); } },
     { group: 'Go to', title: 'Files', sub: 'Touched files explorer', action: () => { setHash('files'); handleRoute(); } },
-    { group: 'Go to', title: 'Stats', sub: 'Dashboard overview', action: () => { setHash('stats'); handleRoute(); } },
+    { group: 'Go to', title: 'Settings', sub: 'Configuration and maintenance', action: () => { setHash('stats'); handleRoute(); } },
   ];
 
-  const sessionsRes = await api('/sessions?limit=4');
+  const sessionsRes = await api('/sessions?limit=20');
 
-  (sessionsRes.sessions || []).forEach(s => items.push({
+  const sessionList = sessionsRes.sessions || [];
+  const sessionMap = new Map(sessionList.map(s => [s.id, s]));
+
+  const recentIds = window._recentSessionIds || [];
+  const missingIds = recentIds.filter(id => !sessionMap.has(id));
+  if (missingIds.length) {
+    const fetched = await Promise.all(missingIds.map(id => api(`/sessions/${id}`)));
+    fetched.forEach(r => {
+      if (r && !r._error && r.session) sessionMap.set(r.session.id, r.session);
+    });
+  }
+
+  recentIds.forEach(id => {
+    const s = sessionMap.get(id);
+    if (!s) return;
+    items.push({
+      group: 'Recently Opened',
+      title: truncate(cleanSessionSummary(s.summary, s.initial_prompt), 64),
+      sub: shortSessionId(s.id),
+      meta: fmtTime(s.start_time),
+      action: () => viewSession(s.id)
+    });
+  });
+
+  sessionList.forEach(s => items.push({
     group: 'Recent Sessions',
-    title: truncate(s.summary || 'No summary', 64),
+    title: truncate(cleanSessionSummary(s.summary, s.initial_prompt), 64),
     sub: shortSessionId(s.id),
     meta: fmtTime(s.start_time),
     action: () => viewSession(s.id)
