@@ -3,25 +3,68 @@ const $$ = (s, p = document) => [...p.querySelectorAll(s)];
 const content = $('#content');
 const API = '/api';
 
-const THEME_KEY = 'agentacta-theme';
+const THEME_KEY = 'agentacta-theme'; // legacy
+const THEME_MODE_KEY = 'agentacta-theme-mode'; // system | light | dark
+const THEME_DARK_VARIANT_KEY = 'agentacta-dark-variant'; // default | trueblack
+
+function lsGet(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function lsSet(key, value) {
+  try { localStorage.setItem(key, value); } catch {}
+}
+
+function resolveTheme(mode, darkVariant) {
+  if (mode === 'light') return 'light';
+  if (mode === 'dark') return darkVariant === 'trueblack' ? 'oled' : 'dark';
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  return prefersDark ? (darkVariant === 'trueblack' ? 'oled' : 'dark') : 'light';
+}
 
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute('content', theme === 'light' ? '#f5f7fb' : '#0a0e1a');
+  if (meta) {
+    const color = theme === 'light' ? '#f5f7fb' : (theme === 'oled' ? '#000000' : '#0a0e1a');
+    meta.setAttribute('content', color);
+  }
+}
+
+function applyThemeFromPrefs() {
+  const mode = lsGet(THEME_MODE_KEY) || 'light';
+  const darkVariant = lsGet(THEME_DARK_VARIANT_KEY) || 'default';
+  window._themeMode = mode;
+  window._themeDarkVariant = darkVariant;
+  applyTheme(resolveTheme(mode, darkVariant));
 }
 
 function initTheme() {
-  const saved = localStorage.getItem(THEME_KEY);
-  const theme = saved === 'dark' || saved === 'light' ? saved : 'light';
-  applyTheme(theme);
+  // Migrate legacy key if present.
+  const legacy = lsGet(THEME_KEY);
+  if (!lsGet(THEME_MODE_KEY) && (legacy === 'light' || legacy === 'dark')) {
+    lsSet(THEME_MODE_KEY, legacy);
+  }
+  if (!lsGet(THEME_DARK_VARIANT_KEY)) {
+    lsSet(THEME_DARK_VARIANT_KEY, 'default');
+  }
+  applyThemeFromPrefs();
+
+  if (!window._themeMediaBound) {
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    media.addEventListener?.('change', () => {
+      if ((lsGet(THEME_MODE_KEY) || 'light') === 'system') applyThemeFromPrefs();
+    });
+    window._themeMediaBound = true;
+  }
 }
 
 function toggleTheme() {
-  const current = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
-  const next = current === 'light' ? 'dark' : 'light';
-  localStorage.setItem(THEME_KEY, next);
-  applyTheme(next);
+  const currentApplied = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+  const nextMode = currentApplied === 'light' ? 'dark' : 'light';
+  lsSet(THEME_MODE_KEY, nextMode);
+  window._themeMode = nextMode;
+  applyThemeFromPrefs();
 }
 
 async function api(path, options = {}) {
@@ -1037,6 +1080,9 @@ async function viewStats() {
   }
 
   const uniqueTools = new Set((data.tools||[]).filter(t=>t).map(t=>fmtToolGroup(t)));
+  const themeMode = lsGet(THEME_MODE_KEY) || 'light';
+  const darkVariant = lsGet(THEME_DARK_VARIANT_KEY) || 'default';
+
   let html = `<div class="settings-page">
     <div class="page-title">Settings</div>
 
@@ -1051,6 +1097,25 @@ async function viewStats() {
       <span id="optimizeDbStatus" class="settings-maintenance-status"></span>
     </div>
     <p class="settings-help">Reclaims unused space and merges pending writes. Safe to run anytime, doesn't delete any data.</p>
+
+    <div class="section-label">Appearance</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:var(--space-md);margin-bottom:var(--space-xl)">
+      <div class="config-card">
+        <div class="config-label">Theme Mode</div>
+        <select id="themeModeSelect" class="settings-select">
+          <option value="system" ${themeMode==='system'?'selected':''}>System</option>
+          <option value="light" ${themeMode==='light'?'selected':''}>Light</option>
+          <option value="dark" ${themeMode==='dark'?'selected':''}>Dark</option>
+        </select>
+      </div>
+      <div class="config-card">
+        <div class="config-label">Dark Variant</div>
+        <select id="darkVariantSelect" class="settings-select">
+          <option value="default" ${darkVariant==='default'?'selected':''}>Default</option>
+          <option value="trueblack" ${darkVariant==='trueblack'?'selected':''}>True Black</option>
+        </select>
+      </div>
+    </div>
 
     ${data.sessionDirs && data.sessionDirs.length ? (() => {
       const dirs = data.sessionDirs || [];
@@ -1087,6 +1152,23 @@ async function viewStats() {
 
   content.innerHTML = html;
   transitionView();
+
+  const themeModeSelect = $('#themeModeSelect');
+  const darkVariantSelect = $('#darkVariantSelect');
+  if (themeModeSelect) {
+    themeModeSelect.addEventListener('change', () => {
+      lsSet(THEME_MODE_KEY, themeModeSelect.value);
+      window._themeMode = themeModeSelect.value;
+      applyThemeFromPrefs();
+    });
+  }
+  if (darkVariantSelect) {
+    darkVariantSelect.addEventListener('change', () => {
+      lsSet(THEME_DARK_VARIANT_KEY, darkVariantSelect.value);
+      window._themeDarkVariant = darkVariantSelect.value;
+      applyThemeFromPrefs();
+    });
+  }
 
   const optimizeBtn = $('#optimizeDbBtn');
   const optimizeStatus = $('#optimizeDbStatus');
@@ -1512,7 +1594,7 @@ function openCmdk() {
   overlay.innerHTML = `<div class="cmdk-dialog" role="dialog" aria-modal="true">
     <div class="cmdk-input-wrap">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-      <input id="cmdkInput" type="text" placeholder="Search sessions, files, or jump to a view\u2026" />
+      <input id="cmdkInput" type="text" placeholder="Search sessions, files, or jump to a view" />
       <kbd>ESC</kbd>
     </div>
     <div class="cmdk-list" id="cmdkList"></div>
@@ -1571,7 +1653,12 @@ document.getElementById('theme-toggle-mobile')?.addEventListener('click', toggle
 document.getElementById('cmdkBtn')?.addEventListener('click', () => openCmdk());
 document.getElementById('mobile-search-btn')?.addEventListener('click', () => openCmdk());
 document.addEventListener('keydown', e => {
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openCmdk(); return; }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    if (window._cmdk.open) closeCmdk();
+    else openCmdk();
+    return;
+  }
   if (e.key === 'Escape' && window._cmdk.open) { e.preventDefault(); closeCmdk(); }
 });
 handleRoute();
