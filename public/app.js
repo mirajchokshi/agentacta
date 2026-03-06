@@ -879,7 +879,7 @@ async function viewTimeline(date) {
     date = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
   }
   window._lastView = 'timeline';
-  window._timelineState = { date, limit: 100, offset: 0, hasMore: true, loading: false };
+  window._timelineState = { date, limit: 100, offset: 0, hasMore: true, loading: false, seenEventIds: new Set() };
 
   content.innerHTML = `<div class="page-title">Timeline</div>
     <input type="date" class="date-input" id="dateInput" value="${date}">
@@ -906,6 +906,7 @@ async function viewTimeline(date) {
 
     state.hasMore = !!data.hasMore;
     state.offset += (data.events || []).length;
+    (data.events || []).forEach(ev => state.seenEventIds.add(ev.id));
 
     if (!append) {
       if (!data.events.length) {
@@ -945,6 +946,10 @@ async function viewTimeline(date) {
         const rows = JSON.parse(evt.data);
         if (!rows.length) return;
 
+        const fresh = rows.filter(r => !state.seenEventIds.has(r.id));
+        if (!fresh.length) return;
+        fresh.forEach(r => state.seenEventIds.add(r.id));
+
         let wrap = $('#timelineWrap');
         if (!wrap) {
           el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"><div class="timeline-line"></div></div>`;
@@ -954,12 +959,12 @@ async function viewTimeline(date) {
         const empty = $('#timelineEmpty');
         if (empty) empty.remove();
 
-        const html = rows.map(renderTimelineEvent).join('');
+        const html = fresh.map(renderTimelineEvent).join('');
         wrap.insertAdjacentHTML('afterbegin', html);
-        state.offset += rows.length;
+        state.offset += fresh.length;
 
         // Flash new events
-        rows.forEach(r => {
+        fresh.forEach(r => {
           const rowEl = wrap.querySelector(`[data-event-id="${r.id}"]`);
           if (rowEl) { rowEl.classList.add('event-highlight'); setTimeout(() => rowEl.classList.remove('event-highlight'), 2000); }
         });
