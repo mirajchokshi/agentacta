@@ -7,6 +7,14 @@ const THEME_KEY = 'agentacta-theme'; // legacy
 const THEME_MODE_KEY = 'agentacta-theme-mode'; // system | light | dark
 const THEME_DARK_VARIANT_KEY = 'agentacta-dark-variant'; // default | trueblack
 
+function lsGet(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function lsSet(key, value) {
+  try { localStorage.setItem(key, value); } catch {}
+}
+
 function resolveTheme(mode, darkVariant) {
   if (mode === 'light') return 'light';
   if (mode === 'dark') return darkVariant === 'trueblack' ? 'oled' : 'dark';
@@ -24,8 +32,8 @@ function applyTheme(theme) {
 }
 
 function applyThemeFromPrefs() {
-  const mode = localStorage.getItem(THEME_MODE_KEY) || 'light';
-  const darkVariant = localStorage.getItem(THEME_DARK_VARIANT_KEY) || 'default';
+  const mode = lsGet(THEME_MODE_KEY) || 'light';
+  const darkVariant = lsGet(THEME_DARK_VARIANT_KEY) || 'default';
   window._themeMode = mode;
   window._themeDarkVariant = darkVariant;
   applyTheme(resolveTheme(mode, darkVariant));
@@ -33,19 +41,19 @@ function applyThemeFromPrefs() {
 
 function initTheme() {
   // Migrate legacy key if present.
-  const legacy = localStorage.getItem(THEME_KEY);
-  if (!localStorage.getItem(THEME_MODE_KEY) && (legacy === 'light' || legacy === 'dark')) {
-    localStorage.setItem(THEME_MODE_KEY, legacy);
+  const legacy = lsGet(THEME_KEY);
+  if (!lsGet(THEME_MODE_KEY) && (legacy === 'light' || legacy === 'dark')) {
+    lsSet(THEME_MODE_KEY, legacy);
   }
-  if (!localStorage.getItem(THEME_DARK_VARIANT_KEY)) {
-    localStorage.setItem(THEME_DARK_VARIANT_KEY, 'default');
+  if (!lsGet(THEME_DARK_VARIANT_KEY)) {
+    lsSet(THEME_DARK_VARIANT_KEY, 'default');
   }
   applyThemeFromPrefs();
 
   if (!window._themeMediaBound) {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     media.addEventListener?.('change', () => {
-      if ((localStorage.getItem(THEME_MODE_KEY) || 'light') === 'system') applyThemeFromPrefs();
+      if ((lsGet(THEME_MODE_KEY) || 'light') === 'system') applyThemeFromPrefs();
     });
     window._themeMediaBound = true;
   }
@@ -54,7 +62,7 @@ function initTheme() {
 function toggleTheme() {
   const currentApplied = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
   const nextMode = currentApplied === 'light' ? 'dark' : 'light';
-  localStorage.setItem(THEME_MODE_KEY, nextMode);
+  lsSet(THEME_MODE_KEY, nextMode);
   window._themeMode = nextMode;
   applyThemeFromPrefs();
 }
@@ -1072,8 +1080,8 @@ async function viewStats() {
   }
 
   const uniqueTools = new Set((data.tools||[]).filter(t=>t).map(t=>fmtToolGroup(t)));
-  const themeMode = localStorage.getItem(THEME_MODE_KEY) || 'light';
-  const darkVariant = localStorage.getItem(THEME_DARK_VARIANT_KEY) || 'default';
+  const themeMode = lsGet(THEME_MODE_KEY) || 'light';
+  const darkVariant = lsGet(THEME_DARK_VARIANT_KEY) || 'default';
 
   let html = `<div class="settings-page">
     <div class="page-title">Settings</div>
@@ -1149,14 +1157,14 @@ async function viewStats() {
   const darkVariantSelect = $('#darkVariantSelect');
   if (themeModeSelect) {
     themeModeSelect.addEventListener('change', () => {
-      localStorage.setItem(THEME_MODE_KEY, themeModeSelect.value);
+      lsSet(THEME_MODE_KEY, themeModeSelect.value);
       window._themeMode = themeModeSelect.value;
       applyThemeFromPrefs();
     });
   }
   if (darkVariantSelect) {
     darkVariantSelect.addEventListener('change', () => {
-      localStorage.setItem(THEME_DARK_VARIANT_KEY, darkVariantSelect.value);
+      lsSet(THEME_DARK_VARIANT_KEY, darkVariantSelect.value);
       window._themeDarkVariant = darkVariantSelect.value;
       applyThemeFromPrefs();
     });
