@@ -83,25 +83,46 @@ function startServer() {
 let frameCount = 0;
 let capturing = false;
 let captureInterval = null;
+let captureInFlight = false;
+let pendingCapture = Promise.resolve();
+let droppedCaptureTicks = 0;
 
 function startCapture(page) {
   capturing = true;
+  captureInFlight = false;
+  droppedCaptureTicks = 0;
+  pendingCapture = Promise.resolve();
   const ms = Math.round(1000 / CAPTURE_FPS);
-  captureInterval = setInterval(async () => {
+
+  captureInterval = setInterval(() => {
     if (!capturing) return;
+    // Backpressure: if a capture is still running, skip this tick.
+    if (captureInFlight) {
+      droppedCaptureTicks++;
+      return;
+    }
+
     const num = String(frameCount++).padStart(5, '0');
-    try {
-      await page.screenshot({
-        path: path.join(FRAMES_DIR, `frame-${num}.png`),
-        type: 'png'
+    captureInFlight = true;
+
+    pendingCapture = page.screenshot({
+      path: path.join(FRAMES_DIR, `frame-${num}.png`),
+      type: 'png'
+    })
+      .catch((err) => {
+        console.warn(`  ⚠️ Screenshot failed for frame ${num}: ${err.message}`);
+      })
+      .finally(() => {
+        captureInFlight = false;
       });
-    } catch {}
   }, ms);
 }
 
-function stopCapture() {
+async function stopCapture() {
   capturing = false;
   if (captureInterval) clearInterval(captureInterval);
+  // Ensure last in-flight frame is fully written before post-processing starts.
+  await pendingCapture;
 }
 
 // ── Interaction script ─────────────────────────────────────────────
@@ -179,8 +200,11 @@ async function runWalkthrough(page) {
   await page.evaluate(() => document.querySelector('[data-view="overview"]').click());
   await sleep(1500);
 
-  stopCapture();
+  await stopCapture();
   console.log(`\n  📸 Captured ${frameCount} frames`);
+  if (droppedCaptureTicks > 0) {
+    console.log(`  ℹ️ Dropped ${droppedCaptureTicks} capture ticks due to backpressure`);
+  }
 }
 
 // ── FFmpeg post-processing ─────────────────────────────────────────
