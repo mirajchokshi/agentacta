@@ -32,7 +32,7 @@ git pull
 
 BASE="$(date +%Y.%-m.%-d)"
 if npm view "agentacta@${BASE}" version >/dev/null 2>&1; then
-  N=1
+  N=2
   while npm view "agentacta@${BASE}-r${N}" version >/dev/null 2>&1; do N=$((N+1)); done
   VER="${BASE}-r${N}"
 else
