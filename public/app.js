@@ -199,6 +199,7 @@ function updateNavActive(view) {
 }
 
 function handleRoute() {
+  clearJumpUi();
   const raw = (window.location.hash || '').slice(1) || 'overview';
   if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
   if (window._timelineScrollHandler) { window.removeEventListener('scroll', window._timelineScrollHandler); window._timelineScrollHandler = null; }
@@ -311,6 +312,13 @@ function normalizeAgentLabel(a) {
   return a;
 }
 
+function clearJumpUi() {
+  const indicator = document.getElementById('jumpIndicator');
+  if (indicator) indicator.remove();
+  const returnBtn = document.getElementById('returnJumpBtn');
+  if (returnBtn) returnBtn.remove();
+}
+
 function cleanSessionSummary(text, fallbackText = '') {
   const pick = (input) => {
     const raw = (input || '').trim();
@@ -408,6 +416,7 @@ function renderSessionItem(s) {
 // --- Views ---
 
 async function viewSearch(query = '') {
+  clearJumpUi();
   const typeFilter = window._searchType || '';
   const roleFilter = window._searchRole || '';
 
@@ -557,6 +566,7 @@ async function doSearch(q) {
 }
 
 async function viewSessions() {
+  clearJumpUi();
   window._currentSessionId = null;
   content.innerHTML = `<div class="page-title">Sessions</div>${skeletonRows(4, 'session')}`;
   transitionView();
@@ -577,6 +587,7 @@ async function viewSessions() {
 }
 
 async function viewSession(id) {
+  clearJumpUi();
   window._recentSessionIds = [id, ...(window._recentSessionIds || []).filter(x => x !== id)].slice(0, 5);
   if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
   window._currentSessionId = id;
@@ -671,6 +682,7 @@ async function viewSession(id) {
   }
 
   $('#backBtn').addEventListener('click', () => {
+    clearJumpUi();
     if (window._navDepth > 0) {
       history.back();
     } else {
@@ -721,19 +733,65 @@ async function viewSession(id) {
 
   const jumpBtn = $('#jumpToStartBtn');
   if (jumpBtn) {
-    jumpBtn.addEventListener('click', () => {
-      // Load all remaining events to find the first message
+    jumpBtn.addEventListener('click', async () => {
+      const fromY = window.scrollY || window.pageYOffset || 0;
+
+      jumpBtn.classList.add('jumping');
+      jumpBtn.disabled = true;
+
+      // Let button state paint before heavy DOM work.
+      await new Promise(requestAnimationFrame);
+
+      // Load remaining events in chunks so UI stays responsive.
+      let loops = 0;
       while (rendered < allEvents.length) {
         renderBatch();
+        loops += 1;
+        if (loops % 2 === 0) await new Promise(requestAnimationFrame);
       }
+
       const firstMessage = document.querySelector(`[data-event-id="${s.first_message_id}"]`);
-      if (firstMessage) {
-        firstMessage.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        firstMessage.classList.add('event-highlight');
-        setTimeout(() => {
-          firstMessage.classList.remove('event-highlight');
-        }, 2000);
+      if (!firstMessage) {
+        jumpBtn.classList.remove('jumping');
+        jumpBtn.disabled = false;
+        return;
       }
+
+      const targetY = Math.max(0, firstMessage.getBoundingClientRect().top + fromY - (window.innerHeight * 0.35));
+      const distance = Math.abs(targetY - fromY);
+      const useSmooth = distance < 1800;
+
+      window.scrollTo({ top: targetY, behavior: useSmooth ? 'smooth' : 'auto' });
+
+      const doneDelay = useSmooth ? 500 : 120;
+      setTimeout(() => {
+        firstMessage.classList.add('event-highlight');
+        setTimeout(() => firstMessage.classList.remove('event-highlight'), 2000);
+
+        jumpBtn.classList.remove('jumping');
+        jumpBtn.disabled = false;
+
+        let returnBtn = document.getElementById('returnJumpBtn');
+        if (!returnBtn) {
+          returnBtn = document.createElement('button');
+          returnBtn.id = 'returnJumpBtn';
+          returnBtn.className = 'return-jump-btn';
+          returnBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"></path><polyline points="5 12 12 5 19 12"></polyline></svg>`;
+          returnBtn.setAttribute('aria-label', 'Back to previous spot');
+          returnBtn.title = 'Back to previous spot';
+          document.body.appendChild(returnBtn);
+        }
+        returnBtn.classList.add('show');
+
+        returnBtn.onclick = () => {
+          window.scrollTo({ top: fromY, behavior: 'smooth' });
+          returnBtn.classList.remove('show');
+        };
+
+        setTimeout(() => {
+          if (returnBtn) returnBtn.classList.remove('show');
+        }, 9000);
+      }, doneDelay);
     });
   }
 
@@ -815,12 +873,13 @@ async function viewSession(id) {
 }
 
 async function viewTimeline(date) {
+  clearJumpUi();
   if (!date) {
     const now = new Date();
     date = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
   }
   window._lastView = 'timeline';
-  window._timelineState = { date, limit: 100, offset: 0, hasMore: true, loading: false };
+  window._timelineState = { date, limit: 100, offset: 0, hasMore: true, loading: false, seenEventIds: new Set() };
 
   content.innerHTML = `<div class="page-title">Timeline</div>
     <input type="date" class="date-input" id="dateInput" value="${date}">
@@ -847,10 +906,11 @@ async function viewTimeline(date) {
 
     state.hasMore = !!data.hasMore;
     state.offset += (data.events || []).length;
+    (data.events || []).forEach(ev => state.seenEventIds.add(ev.id));
 
     if (!append) {
       if (!data.events.length) {
-        el.innerHTML = '<div class="empty"><h2>No activity</h2><p>Nothing recorded on this day</p></div>';
+        el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"><div class="timeline-line"></div><div class="empty" id="timelineEmpty"><h2>No activity</h2><p>Nothing recorded on this day</p></div></div>`;
         return;
       }
       el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"><div class="timeline-line"></div>${data.events.map(renderTimelineEvent).join('')}</div>`;
@@ -879,21 +939,35 @@ async function viewTimeline(date) {
   const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
   if (window._timelineSse) { window._timelineSse.close(); window._timelineSse = null; }
   if (date === todayStr) {
-    const sse = new EventSource(`/api/timeline/stream?after=${encodeURIComponent(new Date().toISOString())}`);
+    const sse = new EventSource(`/api/timeline/stream?after=${encodeURIComponent(new Date().toISOString())}&afterId=`);
     window._timelineSse = sse;
     sse.onmessage = (evt) => {
       try {
         const rows = JSON.parse(evt.data);
-        const wrap = $('#timelineWrap');
-        if (wrap && rows.length) {
-          const html = rows.map(renderTimelineEvent).join('');
-          wrap.insertAdjacentHTML('afterbegin', html);
-          // Flash new events
-          rows.forEach(r => {
-            const el = wrap.querySelector(`[data-event-id="${r.id}"]`);
-            if (el) { el.classList.add('event-highlight'); setTimeout(() => el.classList.remove('event-highlight'), 2000); }
-          });
+        if (!rows.length) return;
+
+        const fresh = rows.filter(r => !state.seenEventIds.has(r.id));
+        if (!fresh.length) return;
+        fresh.forEach(r => state.seenEventIds.add(r.id));
+
+        let wrap = $('#timelineWrap');
+        if (!wrap) {
+          el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"><div class="timeline-line"></div></div>`;
+          wrap = $('#timelineWrap');
         }
+
+        const empty = $('#timelineEmpty');
+        if (empty) empty.remove();
+
+        const html = fresh.map(renderTimelineEvent).join('');
+        wrap.insertAdjacentHTML('afterbegin', html);
+        state.offset += fresh.length;
+
+        // Flash new events
+        fresh.forEach(r => {
+          const rowEl = wrap.querySelector(`[data-event-id="${r.id}"]`);
+          if (rowEl) { rowEl.classList.add('event-highlight'); setTimeout(() => rowEl.classList.remove('event-highlight'), 2000); }
+        });
       } catch {}
     };
   }
@@ -905,6 +979,7 @@ async function viewTimeline(date) {
 }
 
 async function viewOverview() {
+  clearJumpUi();
   content.innerHTML = `<div class="page-title">Overview</div><div class="stat-grid">${skeletonRows(5, 'stats')}</div>`;
   transitionView();
   const data = await api('/stats');
@@ -952,6 +1027,7 @@ async function viewOverview() {
 }
 
 async function viewStats() {
+  clearJumpUi();
   content.innerHTML = `<div class="page-title">Settings</div>${skeletonRows(4, 'session')}`;
   transitionView();
   const data = await api('/stats');
@@ -1032,6 +1108,7 @@ async function viewStats() {
 }
 
 async function viewFiles() {
+  clearJumpUi();
   window._lastView = 'files';
   content.innerHTML = `<div class="page-title">Files</div>${skeletonRows(6, 'file')}`;
   transitionView();
@@ -1203,6 +1280,7 @@ function renderFileItem(f) {
 }
 
 async function viewFileDetail(filePath) {
+  clearJumpUi();
   content.innerHTML = '<div class="loading">Loading</div>';
   const data = await api(`/files/sessions?path=${encodeURIComponent(filePath)}`);
   if (data._error) {

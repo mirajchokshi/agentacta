@@ -937,6 +937,28 @@ mark {
   border-color: rgba(52, 211, 153, 0.3);
 }
 
+.jump-to-start-btn.jumping {
+  position: relative;
+  color: #b8f7dd;
+  background: rgba(52, 211, 153, 0.22);
+}
+
+.jump-to-start-btn.jumping::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  margin-left: 6px;
+  display: inline-block;
+  animation: jumpPulse 1s ease-in-out infinite;
+}
+
+@keyframes jumpPulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+
 /* ---- Session ID ---- */
 .session-id-row {
   display: flex;
@@ -1285,7 +1307,60 @@ mark {
 
 .new-events-indicator:hover {
   background: #4a7ae8;
-  transform: translateX(-50%) scale(1.05);
+}
+
+.jump-indicator {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-10px);
+  background: color-mix(in oklab, var(--accent) 88%, #000);
+  color: #fff;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  z-index: 110;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s var(--ease-out), transform 0.2s var(--ease-out);
+}
+
+.jump-indicator.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.return-jump-btn {
+  position: fixed;
+  right: 16px;
+  bottom: calc(92px + env(safe-area-inset-bottom, 0px));
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 999px;
+  z-index: 110;
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+  transition: opacity 0.2s var(--ease-out), transform 0.2s var(--ease-out);
+}
+
+.return-jump-btn.show {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.return-jump-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-hover);
 }
 
 @keyframes slideDown {

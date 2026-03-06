@@ -453,18 +453,21 @@ const server = http.createServer((req, res) => {
       res.write(': connected\n\n');
 
       let lastTs = query.after || new Date().toISOString();
+      let lastId = query.afterId || '';
 
       const onUpdate = () => {
         try {
           const rows = db.prepare(
             `SELECT e.*, s.summary as session_summary FROM events e
              JOIN sessions s ON s.id = e.session_id
-             WHERE e.timestamp > ?
-             ORDER BY e.timestamp ASC`
-          ).all(lastTs);
+             WHERE (e.timestamp > ?) OR (e.timestamp = ? AND e.id > ?)
+             ORDER BY e.timestamp ASC, e.id ASC`
+          ).all(lastTs, lastTs, lastId);
           if (rows.length) {
-            lastTs = rows[rows.length - 1].timestamp;
-            res.write(`id: ${lastTs}\ndata: ${JSON.stringify(rows)}\n\n`);
+            const tail = rows[rows.length - 1];
+            lastTs = tail.timestamp || lastTs;
+            lastId = tail.id || lastId;
+            res.write(`id: ${lastTs}:${lastId}\ndata: ${JSON.stringify(rows)}\n\n`);
           }
         } catch (err) {
           console.error('Timeline SSE error:', err.message);
