@@ -40,19 +40,6 @@ AgentActa gives you one place to inspect the full trail.
 - 📱 Mobile-friendly UI
 - 💡 Search suggestions based on real data
 
-## Demo
-
-https://github.com/mirajchokshi/agentacta/raw/main/screenshots/demo-final.mp4
-
-## Screenshots
-
-![Search](screenshots/search.png)
-![Sessions](screenshots/sessions.png)
-![Session Detail](screenshots/session-detail.png)
-![Timeline](screenshots/timeline.png)
-![Files](screenshots/files.png)
-![Stats](screenshots/stats.png)
-![Search Results](screenshots/search-results.png)
 
 ## Quick start
 
