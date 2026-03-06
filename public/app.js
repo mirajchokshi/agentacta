@@ -3,25 +3,60 @@ const $$ = (s, p = document) => [...p.querySelectorAll(s)];
 const content = $('#content');
 const API = '/api';
 
-const THEME_KEY = 'agentacta-theme';
+const THEME_KEY = 'agentacta-theme'; // legacy
+const THEME_MODE_KEY = 'agentacta-theme-mode'; // system | light | dark
+const THEME_DARK_VARIANT_KEY = 'agentacta-dark-variant'; // default | trueblack
+
+function resolveTheme(mode, darkVariant) {
+  if (mode === 'light') return 'light';
+  if (mode === 'dark') return darkVariant === 'trueblack' ? 'oled' : 'dark';
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  return prefersDark ? (darkVariant === 'trueblack' ? 'oled' : 'dark') : 'light';
+}
 
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute('content', theme === 'light' ? '#f5f7fb' : '#0a0e1a');
+  if (meta) {
+    const color = theme === 'light' ? '#f5f7fb' : (theme === 'oled' ? '#000000' : '#0a0e1a');
+    meta.setAttribute('content', color);
+  }
+}
+
+function applyThemeFromPrefs() {
+  const mode = localStorage.getItem(THEME_MODE_KEY) || 'light';
+  const darkVariant = localStorage.getItem(THEME_DARK_VARIANT_KEY) || 'default';
+  window._themeMode = mode;
+  window._themeDarkVariant = darkVariant;
+  applyTheme(resolveTheme(mode, darkVariant));
 }
 
 function initTheme() {
-  const saved = localStorage.getItem(THEME_KEY);
-  const theme = saved === 'dark' || saved === 'light' ? saved : 'light';
-  applyTheme(theme);
+  // Migrate legacy key if present.
+  const legacy = localStorage.getItem(THEME_KEY);
+  if (!localStorage.getItem(THEME_MODE_KEY) && (legacy === 'light' || legacy === 'dark')) {
+    localStorage.setItem(THEME_MODE_KEY, legacy);
+  }
+  if (!localStorage.getItem(THEME_DARK_VARIANT_KEY)) {
+    localStorage.setItem(THEME_DARK_VARIANT_KEY, 'default');
+  }
+  applyThemeFromPrefs();
+
+  if (!window._themeMediaBound) {
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    media.addEventListener?.('change', () => {
+      if ((localStorage.getItem(THEME_MODE_KEY) || 'light') === 'system') applyThemeFromPrefs();
+    });
+    window._themeMediaBound = true;
+  }
 }
 
 function toggleTheme() {
-  const current = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
-  const next = current === 'light' ? 'dark' : 'light';
-  localStorage.setItem(THEME_KEY, next);
-  applyTheme(next);
+  const currentApplied = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+  const nextMode = currentApplied === 'light' ? 'dark' : 'light';
+  localStorage.setItem(THEME_MODE_KEY, nextMode);
+  window._themeMode = nextMode;
+  applyThemeFromPrefs();
 }
 
 async function api(path, options = {}) {
@@ -1037,8 +1072,30 @@ async function viewStats() {
   }
 
   const uniqueTools = new Set((data.tools||[]).filter(t=>t).map(t=>fmtToolGroup(t)));
+  const themeMode = localStorage.getItem(THEME_MODE_KEY) || 'light';
+  const darkVariant = localStorage.getItem(THEME_DARK_VARIANT_KEY) || 'default';
+
   let html = `<div class="settings-page">
     <div class="page-title">Settings</div>
+
+    <div class="section-label">Appearance</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:var(--space-md);margin-bottom:var(--space-xl)">
+      <div class="config-card">
+        <div class="config-label">Theme Mode</div>
+        <select id="themeModeSelect" class="settings-select">
+          <option value="system" ${themeMode==='system'?'selected':''}>System</option>
+          <option value="light" ${themeMode==='light'?'selected':''}>Light</option>
+          <option value="dark" ${themeMode==='dark'?'selected':''}>Dark</option>
+        </select>
+      </div>
+      <div class="config-card">
+        <div class="config-label">Dark Variant</div>
+        <select id="darkVariantSelect" class="settings-select">
+          <option value="default" ${darkVariant==='default'?'selected':''}>Default</option>
+          <option value="trueblack" ${darkVariant==='trueblack'?'selected':''}>True Black</option>
+        </select>
+      </div>
+    </div>
 
     <div class="section-label">System</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:var(--space-md);margin-bottom:var(--space-md)">
@@ -1087,6 +1144,23 @@ async function viewStats() {
 
   content.innerHTML = html;
   transitionView();
+
+  const themeModeSelect = $('#themeModeSelect');
+  const darkVariantSelect = $('#darkVariantSelect');
+  if (themeModeSelect) {
+    themeModeSelect.addEventListener('change', () => {
+      localStorage.setItem(THEME_MODE_KEY, themeModeSelect.value);
+      window._themeMode = themeModeSelect.value;
+      applyThemeFromPrefs();
+    });
+  }
+  if (darkVariantSelect) {
+    darkVariantSelect.addEventListener('change', () => {
+      localStorage.setItem(THEME_DARK_VARIANT_KEY, darkVariantSelect.value);
+      window._themeDarkVariant = darkVariantSelect.value;
+      applyThemeFromPrefs();
+    });
+  }
 
   const optimizeBtn = $('#optimizeDbBtn');
   const optimizeStatus = $('#optimizeDbStatus');

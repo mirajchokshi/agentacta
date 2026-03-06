@@ -114,6 +114,28 @@
   --input-scheme: light;
 }
 
+[data-theme="oled"] {
+  --bg-base: #000000;
+  --bg-surface: #050505;
+  --bg-elevated: #0a0a0a;
+  --bg-hover: #111111;
+  --bg-active: #151515;
+
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-default: rgba(255, 255, 255, 0.12);
+  --border-hover: rgba(255, 255, 255, 0.18);
+  --border-focus: rgba(99, 144, 240, 0.58);
+
+  --text-primary: #f2f5f9;
+  --text-secondary: #9aa3b2;
+  --text-tertiary: #6f7785;
+  --text-inverse: #000000;
+
+  --accent-soft: rgba(99, 144, 240, 0.14);
+  --accent-medium: rgba(99, 144, 240, 0.22);
+  --input-scheme: dark;
+}
+
 /* ---- Reset ---- */
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -1275,6 +1297,22 @@ mark {
   font-weight: 600;
   color: var(--text-primary);
   font-family: var(--font-mono);
+}
+
+.settings-select {
+  width: 100%;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: var(--font-sans);
+  outline: none;
+}
+
+.settings-select:focus {
+  border-color: var(--border-focus);
 }
 
 /* ---- Highlight animation for jumped-to events ---- */
