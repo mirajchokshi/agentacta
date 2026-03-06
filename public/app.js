@@ -1078,6 +1078,18 @@ async function viewStats() {
   let html = `<div class="settings-page">
     <div class="page-title">Settings</div>
 
+    <div class="section-label">System</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:var(--space-md);margin-bottom:var(--space-md)">
+      <div class="config-card"><div class="config-label">Storage Mode</div><div class="config-value">${escHtml(data.storageMode || 'reference')}</div></div>
+      <div class="config-card"><div class="config-label">DB Size</div><div class="config-value" id="dbSizeValue">${escHtml(data.dbSize?.display || 'N/A')}</div></div>
+    </div>
+    <p class="settings-help" style="margin-bottom:var(--space-sm)">Date range: ${fmtDate(data.dateRange?.earliest)} — ${fmtDate(data.dateRange?.latest)}</p>
+    <div class="settings-maintenance">
+      <button class="export-btn" id="optimizeDbBtn">Optimize Database</button>
+      <span id="optimizeDbStatus" class="settings-maintenance-status"></span>
+    </div>
+    <p class="settings-help">Reclaims unused space and merges pending writes. Safe to run anytime, doesn't delete any data.</p>
+
     <div class="section-label">Appearance</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:var(--space-md);margin-bottom:var(--space-xl)">
       <div class="config-card">
@@ -1096,18 +1108,6 @@ async function viewStats() {
         </select>
       </div>
     </div>
-
-    <div class="section-label">System</div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:var(--space-md);margin-bottom:var(--space-md)">
-      <div class="config-card"><div class="config-label">Storage Mode</div><div class="config-value">${escHtml(data.storageMode || 'reference')}</div></div>
-      <div class="config-card"><div class="config-label">DB Size</div><div class="config-value" id="dbSizeValue">${escHtml(data.dbSize?.display || 'N/A')}</div></div>
-    </div>
-    <p class="settings-help" style="margin-bottom:var(--space-sm)">Date range: ${fmtDate(data.dateRange?.earliest)} — ${fmtDate(data.dateRange?.latest)}</p>
-    <div class="settings-maintenance">
-      <button class="export-btn" id="optimizeDbBtn">Optimize Database</button>
-      <span id="optimizeDbStatus" class="settings-maintenance-status"></span>
-    </div>
-    <p class="settings-help">Reclaims unused space and merges pending writes. Safe to run anytime, doesn't delete any data.</p>
 
     ${data.sessionDirs && data.sessionDirs.length ? (() => {
       const dirs = data.sessionDirs || [];
