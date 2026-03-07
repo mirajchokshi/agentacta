@@ -49,6 +49,8 @@ function loadConfig() {
     const dir = path.dirname(CONFIG_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(firstRunDefaults, null, 2) + '\n');
+    // Apply to in-memory config so this run also benefits
+    fileConfig = firstRunDefaults;
     console.log(`Created default config: ${CONFIG_FILE}`);
     if (detected) {
       console.log(`Auto-detected session directories:\n${detected.map(d => `  - ${d}`).join('\n')}`);

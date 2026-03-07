@@ -32,7 +32,10 @@ function discoverSessionDirs(config) {
   // Config sessionsPath or env var override
   const sessionsOverride = process.env.AGENTACTA_SESSIONS_PATH || (config && config.sessionsPath);
   if (sessionsOverride) {
-    for (const p of sessionsOverride.split(':')) {
+    const overridePaths = Array.isArray(sessionsOverride)
+      ? sessionsOverride
+      : sessionsOverride.split(':');
+    for (const p of overridePaths) {
       if (fs.existsSync(p)) dirs.push({ path: p, agent: path.basename(path.dirname(p)) });
     }
     if (dirs.length) return dirs;
