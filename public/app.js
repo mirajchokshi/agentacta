@@ -1148,6 +1148,14 @@ async function viewStats() {
     ${data.agents && data.agents.length > 1 ? `<div class="section-label">Agents</div><div class="filters" style="margin-bottom:var(--space-xl)">${data.agents.map(a => `<span class="filter-chip">${escHtml(a)}</span>`).join('')}</div>` : ''}
     <div class="section-label">Tools Used</div>
     <div class="tools-grid">${[...new Set((data.tools||[]).filter(t => t).map(t => fmtToolGroup(t)))].sort().map(t => `<span class="tool-chip">${escHtml(t)}</span>`).join('')}</div>
+
+    <div class="section-label">System Info</div>
+    <div id="systemInfoContainer" style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:var(--space-md);margin-bottom:var(--space-md)">
+      <div class="config-card"><div class="config-label">Version</div><div class="config-value" id="sysVersion">…</div></div>
+      <div class="config-card"><div class="config-label">Uptime</div><div class="config-value" id="sysUptime">…</div></div>
+      <div class="config-card"><div class="config-label">Indexed Sessions</div><div class="config-value" id="sysSessions">…</div></div>
+      <div class="config-card"><div class="config-label">Node.js</div><div class="config-value" id="sysNode">…</div></div>
+    </div>
   </div>`;
 
   content.innerHTML = html;
@@ -1187,6 +1195,31 @@ async function viewStats() {
       optimizeBtn.disabled = false;
     });
   }
+
+  // Fetch system info
+  api('/health').then(h => {
+    if (h._error) return;
+    const fmtUptime = (s) => {
+      const d = Math.floor(s / 86400);
+      const hr = Math.floor((s % 86400) / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      if (d > 0) return `${d}d ${hr}h`;
+      if (hr > 0) return `${hr}h ${m}m`;
+      return `${m}m`;
+    };
+    const fmtBytes = (b) => {
+      if (b >= 1024 * 1024) return `${(b / (1024 * 1024)).toFixed(1)} MB`;
+      return `${(b / 1024).toFixed(1)} KB`;
+    };
+    const v = $('#sysVersion');
+    const u = $('#sysUptime');
+    const sc = $('#sysSessions');
+    const n = $('#sysNode');
+    if (v) v.textContent = `v${h.version}`;
+    if (u) u.textContent = fmtUptime(h.uptime);
+    if (sc) sc.textContent = String(h.sessions);
+    if (n) n.textContent = h.node;
+  });
 }
 
 async function viewFiles() {

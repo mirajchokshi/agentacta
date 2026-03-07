@@ -4,6 +4,13 @@ const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
 
+// --version / -v flag: print version and exit
+if (process.argv.includes('--version') || process.argv.includes('-v')) {
+  const pkg = require('./package.json');
+  console.log(`${pkg.name} v${pkg.version}`);
+  process.exit(0);
+}
+
 // --demo flag: use demo session data (must run before config load)
 if (process.argv.includes('--demo')) {
   const demoDir = path.join(__dirname, 'demo');
@@ -191,6 +198,20 @@ const server = http.createServer((req, res) => {
       const { indexAll } = require('./indexer');
       const result = indexAll(db, config);
       return json(res, { ok: true, sessions: result.sessions, events: result.events });
+    }
+
+    else if (pathname === '/api/health') {
+      const pkg = require('./package.json');
+      const sessions = db.prepare('SELECT COUNT(*) as c FROM sessions').get().c;
+      const dbSize = getDbSize();
+      return json(res, {
+        status: 'ok',
+        version: pkg.version,
+        uptime: Math.round(process.uptime()),
+        sessions,
+        dbSizeBytes: dbSize.bytes,
+        node: process.version
+      });
     }
 
     else if (pathname === '/api/config') {

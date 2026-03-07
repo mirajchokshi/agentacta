@@ -85,6 +85,18 @@ describe('api', () => {
         if (!session) return json({ error: 'Not found' }, 404);
         const events = db.prepare('SELECT * FROM events WHERE session_id = ?').all(id);
         json({ session, events });
+      } else if (p === '/api/health') {
+        const sessions = db.prepare('SELECT COUNT(*) as c FROM sessions').get().c;
+        let dbSizeBytes = 0;
+        try { dbSizeBytes = fs.statSync(TEST_DB).size; } catch {}
+        json({
+          status: 'ok',
+          version: require('../package.json').version,
+          uptime: Math.round(process.uptime()),
+          sessions,
+          dbSizeBytes,
+          node: process.version
+        });
       } else if (p === '/api/search') {
         const q = url.searchParams.get('q') || '';
         if (!q) return json({ results: [], total: 0 });
@@ -136,6 +148,18 @@ describe('api', () => {
     const { status, data } = await fetch(`http://127.0.0.1:${port}/api/search?q=test`);
     assert.strictEqual(status, 200);
     assert.ok(data.results.length >= 1);
+  });
+
+  it('GET /api/health returns status and fields', async () => {
+    const { status, data } = await fetch(`http://127.0.0.1:${port}/api/health`);
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.status, 'ok');
+    assert.ok(typeof data.version === 'string');
+    assert.ok(typeof data.uptime === 'number');
+    assert.ok(typeof data.sessions === 'number');
+    assert.ok(typeof data.dbSizeBytes === 'number');
+    assert.ok(typeof data.node === 'string');
+    assert.ok(data.node.startsWith('v'));
   });
 
   it('GET /api/search with empty query returns empty', async () => {
