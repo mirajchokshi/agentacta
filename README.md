@@ -39,6 +39,9 @@ AgentActa gives you one place to inspect the full trail.
 - ⚡ Live indexing via file watching
 - 📱 Mobile-friendly UI
 - 💡 Search suggestions based on real data
+- ⌨️ Command palette (⌘K / Ctrl+K) for quick navigation
+- 🎨 Theme settings (system, light, dark, OLED)
+- 🏥 Health endpoint for monitoring (`/api/health`)
 
 
 ## Quick start
@@ -157,6 +160,7 @@ Default config:
 | `GET /api/export/session/:id?format=md` | Export one session |
 | `GET /api/timeline/stream?after=<ts>` | SSE stream for live timeline updates |
 | `POST /api/maintenance` | VACUUM + WAL checkpoint (returns size before/after) |
+| `GET /api/health` | Server status, version, uptime, session count |
 | `GET /api/export/search?q=<query>&format=md` | Export search results |
 
 Agent integration example:
@@ -165,19 +169,6 @@ Agent integration example:
 const res = await fetch('http://localhost:4003/api/search?q=deployment+issue&limit=5');
 const data = await res.json();
 ```
-
-## Demo mode
-
-```bash
-# seed demo data + run
-npm run demo
-
-# or split steps
-node scripts/seed-demo.js
-node index.js --demo
-```
-
-Demo mode creates 7 realistic sessions (weather app build path: scaffolding, API, frontend, debugging, deployment, tests, sub-agent task).
 
 ## Security
 
