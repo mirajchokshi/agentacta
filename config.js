@@ -14,6 +14,12 @@ function resolveConfigFile() {
 
 const CONFIG_FILE = resolveConfigFile();
 
+const KNOWN_SESSION_DIRS = [
+  path.join(os.homedir(), '.claude', 'projects'),    // Claude Code
+  path.join(os.homedir(), '.codex', 'sessions'),     // Codex CLI
+  path.join(os.homedir(), '.openclaw', 'sessions'),  // OpenClaw
+];
+
 const DEFAULTS = {
   port: 4003,
   storage: 'reference',
@@ -21,6 +27,11 @@ const DEFAULTS = {
   dbPath: './agentacta.db',
   projectAliases: {}
 };
+
+function detectSessionDirs() {
+  const found = KNOWN_SESSION_DIRS.filter(d => fs.existsSync(d));
+  return found.length > 0 ? found : null;
+}
 
 function loadConfig() {
   let fileConfig = {};
@@ -32,11 +43,18 @@ function loadConfig() {
       console.error(`Warning: Could not parse ${CONFIG_FILE}:`, err.message);
     }
   } else {
-    // First-run: create default config in XDG location
+    // First-run: create default config with auto-detected session dirs
+    const detected = detectSessionDirs();
+    const firstRunDefaults = { ...DEFAULTS, sessionsPath: detected };
     const dir = path.dirname(CONFIG_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(DEFAULTS, null, 2) + '\n');
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(firstRunDefaults, null, 2) + '\n');
+    // Apply to in-memory config so this run also benefits
+    fileConfig = firstRunDefaults;
     console.log(`Created default config: ${CONFIG_FILE}`);
+    if (detected) {
+      console.log(`Auto-detected session directories:\n${detected.map(d => `  - ${d}`).join('\n')}`);
+    }
   }
 
   const config = { ...DEFAULTS, ...fileConfig };

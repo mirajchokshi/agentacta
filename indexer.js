@@ -29,16 +29,36 @@ function discoverSessionDirs(config) {
   const dirs = [];
   const home = process.env.HOME;
 
+  // Expand a single path into session dirs, handling Claude Code's per-project structure
+  function expandPath(p) {
+    if (!fs.existsSync(p)) return;
+    const stat = fs.statSync(p);
+    if (!stat.isDirectory()) return;
+    // Claude Code: ~/.claude/projects contains per-project subdirs with JSONL files
+    if (p.replace(/\/$/, '').endsWith('/.claude/projects')) {
+      for (const proj of fs.readdirSync(p)) {
+        const projDir = path.join(p, proj);
+        if (fs.statSync(projDir).isDirectory()) {
+          const hasJsonl = fs.readdirSync(projDir).some(f => f.endsWith('.jsonl'));
+          if (hasJsonl) dirs.push({ path: projDir, agent: 'claude-code' });
+        }
+      }
+    } else {
+      dirs.push({ path: p, agent: path.basename(path.dirname(p)) });
+    }
+  }
+
   // Config sessionsPath or env var override
   const sessionsOverride = process.env.AGENTACTA_SESSIONS_PATH || (config && config.sessionsPath);
   if (sessionsOverride) {
-    for (const p of sessionsOverride.split(':')) {
-      if (fs.existsSync(p)) dirs.push({ path: p, agent: path.basename(path.dirname(p)) });
-    }
+    const overridePaths = Array.isArray(sessionsOverride)
+      ? sessionsOverride
+      : sessionsOverride.split(':');
+    overridePaths.forEach(expandPath);
     if (dirs.length) return dirs;
   }
 
-  // Scan ~/.openclaw/agents/*/sessions/
+  // Auto-discover: ~/.openclaw/agents/*/sessions/
   const oclawAgents = path.join(home, '.openclaw/agents');
   if (fs.existsSync(oclawAgents)) {
     for (const agent of fs.readdirSync(oclawAgents)) {
@@ -49,23 +69,8 @@ function discoverSessionDirs(config) {
     }
   }
 
-  // Scan ~/.claude/projects/*/ (Claude Code stores JSONL directly in project dirs)
-  const claudeProjects = path.join(home, '.claude/projects');
-  if (fs.existsSync(claudeProjects)) {
-    for (const proj of fs.readdirSync(claudeProjects)) {
-      const projDir = path.join(claudeProjects, proj);
-      // Claude Code: JSONL files directly in project dir
-      if (fs.existsSync(projDir) && fs.statSync(projDir).isDirectory()) {
-        const hasJsonl = fs.readdirSync(projDir).some(f => f.endsWith('.jsonl'));
-        if (hasJsonl) dirs.push({ path: projDir, agent: 'claude-code' });
-      }
-      // Also check sessions/ subdirectory (future-proofing)
-      const sp = path.join(projDir, 'sessions');
-      if (fs.existsSync(sp) && fs.statSync(sp).isDirectory()) {
-        dirs.push({ path: sp, agent: 'claude-code' });
-      }
-    }
-  }
+  // Auto-discover: ~/.claude/projects/
+  expandPath(path.join(home, '.claude/projects'));
 
   // Scan ~/.codex/sessions recursively (Codex CLI stores nested YYYY/MM/DD/*.jsonl)
   const codexSessions = path.join(home, '.codex/sessions');
@@ -289,11 +294,16 @@ function indexFile(db, filePath, agentName, stmts, archiveMode, config) {
     if (firstLine.agent) agent = firstLine.agent;
     if (firstLine.sessionType) sessionType = firstLine.sessionType;
     if (sessionId.includes('subagent')) sessionType = 'subagent';
-  } else if (firstLine.type === 'user' || firstLine.type === 'assistant' || firstLine.type === 'file-history-snapshot') {
-    // Claude Code format — no session header, extract from first message line
+  } else if (firstLine.type === 'user' || firstLine.type === 'assistant' || firstLine.type === 'file-history-snapshot' || firstLine.type === 'queue-operation') {
+    // Claude Code format — no session header, extract from first message or queue-operation line
     isClaudeCode = true;
     for (const line of lines) {
       let obj; try { obj = JSON.parse(line); } catch { continue; }
+      if (obj.sessionId && obj.timestamp) {
+        sessionId = obj.sessionId;
+        sessionStart = obj.timestamp;
+        break;
+      }
       if ((obj.type === 'user' || obj.type === 'assistant') && obj.sessionId) {
         sessionId = obj.sessionId;
         sessionStart = obj.timestamp;
