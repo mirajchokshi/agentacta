@@ -118,17 +118,19 @@ On first run, AgentActa creates:
 - `~/.config/agentacta/config.json`
 - or `agentacta.config.json` in current directory (if present)
 
-Default config:
+Default config (auto-generated on first run — session directories are detected automatically):
 
 ```json
 {
   "port": 4003,
   "storage": "reference",
-  "sessionsPath": null,
+  "sessionsPath": ["~/.claude/projects", "~/.openclaw/sessions"],
   "dbPath": "./agentacta.db",
   "projectAliases": {}
 }
 ```
+
+`sessionsPath` accepts a string, a colon-delimited string, or a JSON array.
 
 ### Storage modes
 

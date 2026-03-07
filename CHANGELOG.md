@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026.3.7] - 2026-03-07
+
+### Fixed
+- **Session auto-discovery on first run** — AgentActa now detects existing agent session directories (`~/.claude/projects`, `~/.codex/sessions`, `~/.openclaw/sessions`) when generating the default config. No manual configuration needed for new installs.
+- **Claude Code sessions not appearing** — Fixed indexer to correctly scan per-project subdirectories under `~/.claude/projects` when `sessionsPath` is set in config.
+- **Array `sessionsPath` config** — `sessionsPath` now accepts a JSON array in addition to a colon-delimited string, preventing a `TypeError` on startup for users with auto-detected configs.
+- **Claude Code `queue-operation` format** — JSONL files starting with `queue-operation` events (a Claude Code variant) are now correctly identified and indexed.
+- **In-memory config on first run** — Auto-detected session directories are now applied to the running process immediately, not just written to disk.
+
 ## [2026.3.5] - 2026-03-05
 
 ### Added
