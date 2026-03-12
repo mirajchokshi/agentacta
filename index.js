@@ -554,7 +554,7 @@ const server = http.createServer((req, res) => {
       for (const r of opsRows) operations[r.operation] = r.c;
 
       const relatedFiles = db.prepare(
-        `SELECT fa2.file_path, COUNT(*) as c
+        `SELECT fa2.file_path, COUNT(DISTINCT fa1.session_id) as c
          FROM file_activity fa1
          JOIN file_activity fa2 ON fa1.session_id = fa2.session_id
          WHERE fa1.file_path = ? AND fa2.file_path != ?
@@ -590,8 +590,8 @@ const server = http.createServer((req, res) => {
 
       // Find sessions matching the repo path via file_activity or initial_prompt
       const sessionIds = db.prepare(
-        `SELECT DISTINCT session_id FROM file_activity WHERE file_path LIKE ?`
-      ).all(repoPath + '%').map(r => r.session_id);
+        `SELECT DISTINCT session_id FROM file_activity WHERE file_path = ? OR file_path LIKE ?`
+      ).all(repoPath, repoPath + '/%').map(r => r.session_id);
 
       const promptSessions = db.prepare(
         `SELECT id FROM sessions WHERE initial_prompt LIKE ?`
@@ -654,9 +654,14 @@ const server = http.createServer((req, res) => {
       const name = query.name || '';
       if (!name) return json(res, { error: 'name parameter is required' }, 400);
 
-      const sessions = db.prepare(
+      // Try exact match first, then check all sessions with normalized label match
+      let sessions = db.prepare(
         'SELECT * FROM sessions WHERE agent = ?'
       ).all(name);
+      if (sessions.length === 0) {
+        sessions = db.prepare('SELECT * FROM sessions WHERE agent IS NOT NULL').all()
+          .filter(s => normalizeAgentLabel(s.agent) === name);
+      }
 
       if (sessions.length === 0) {
         return json(res, { agent: name, sessionCount: 0, totalCost: 0, avgDuration: 0, topTools: [], recentSessions: [], successRate: 0 });
