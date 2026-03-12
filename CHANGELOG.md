@@ -1,5 +1,20 @@
 # Changelog
 
+## [2026.3.12] - 2026-03-12
+
+### Added
+- **Context API** — three new endpoints that surface historical context from indexed sessions:
+  - `GET /api/context/file?path=<filepath>` — session count, recent changes, operations breakdown, related files, recent errors
+  - `GET /api/context/repo?path=<repo-path>` — aggregate cost/tokens, distinct agents, top files, recent sessions, common tools
+  - `GET /api/context/agent?name=<agent-name>` — session count, total cost, avg duration, top tools, recent sessions, success rate
+- **CLAUDE.md** — project context file for agents working on AgentActa
+- Context API documentation in README with usage examples
+
+### Fixed
+- Agent name normalization in context API (reverse-maps normalized labels like `openclaw-main` to raw DB values)
+- Repo path matching uses directory boundary (`path/`) to prevent prefix collisions
+- Related files query counts distinct sessions instead of multiplicative self-join
+
 ## [2026.3.7] - 2026-03-07
 
 ### Fixed
