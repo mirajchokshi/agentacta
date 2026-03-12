@@ -165,6 +165,76 @@ Default config (auto-generated on first run — session directories are detected
 | `GET /api/health` | Server status, version, uptime, session count |
 | `GET /api/export/search?q=<query>&format=md` | Export search results |
 
+### Context API
+
+The Context API gives agents historical context before they start working. Instead of exploring a codebase from scratch, an agent can query what's happened before.
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/context/file?path=<filepath>` | History for a specific file |
+| `GET /api/context/repo?path=<repo-path>` | Aggregates for a repo/project |
+| `GET /api/context/agent?name=<agent-name>` | Stats for a specific agent |
+
+**File context** — how many sessions touched this file, when it was last modified, recent change summaries, operation breakdown (reads vs edits), related files, and recent errors:
+
+```bash
+curl http://localhost:4003/api/context/file?path=/home/user/project/server.js
+```
+```json
+{
+  "file": "/home/user/project/server.js",
+  "sessionCount": 34,
+  "lastModified": "3h ago",
+  "recentChanges": ["Added OAuth state validation", "Fixed password masking"],
+  "operations": { "edit": 105, "read": 56 },
+  "relatedFiles": [{ "path": "public/app.js", "count": 28 }],
+  "recentErrors": []
+}
+```
+
+**Agent context** — total sessions, cost, average duration, most-used tools, recent work:
+
+```bash
+curl http://localhost:4003/api/context/agent?name=claude-code
+```
+```json
+{
+  "agent": "claude-code",
+  "sessionCount": 60,
+  "totalCost": 18.83,
+  "avgDuration": 288,
+  "topTools": [{ "tool": "edit", "count": 190 }, { "tool": "exec", "count": 560 }],
+  "recentSessions": [{ "id": "...", "summary": "Added context API...", "timestamp": "..." }],
+  "successRate": 100
+}
+```
+
+**Repo context** — aggregate cost, tokens, distinct agents, most-touched files, common tools:
+
+```bash
+curl http://localhost:4003/api/context/repo?path=agentacta
+```
+
+#### Using the Context API with agents
+
+Inject context into agent prompts so new sessions start informed:
+
+```bash
+# Fetch context before starting Claude Code
+CONTEXT=$(curl -s http://localhost:4003/api/context/file?path=$(pwd)/server.js)
+claude --print "Context from previous sessions: $CONTEXT
+
+Your task: refactor the auth module"
+```
+
+Or add it to a CLAUDE.md / AGENTS.md:
+
+```markdown
+## Project Context API
+Before modifying key files, query AgentActa for history:
+curl http://localhost:4003/api/context/file?path={filepath}
+```
+
 Agent integration example:
 
 ```javascript
