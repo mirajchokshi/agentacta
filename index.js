@@ -26,6 +26,7 @@ if (process.argv.includes('--demo')) {
 const { loadConfig } = require('./config');
 const { open, init, createStmts } = require('./db');
 const { discoverSessionDirs, indexFile } = require('./indexer');
+const { attributeSessionEvents } = require('./project-attribution');
 
 const config = loadConfig();
 const PORT = config.port;
@@ -293,7 +294,7 @@ const server = http.createServer((req, res) => {
 
     else if (pathname.match(/^\/api\/sessions\/[^/]+\/events$/)) {
       const id = pathname.split('/')[3];
-      const session = db.prepare('SELECT id FROM sessions WHERE id = ?').get(id);
+      const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id);
       if (!session) return json(res, { error: 'Not found' }, 404);
 
       const after = query.after || '1970-01-01T00:00:00.000Z';
@@ -306,7 +307,8 @@ const server = http.createServer((req, res) => {
          ORDER BY timestamp ASC, id ASC
          LIMIT ?`
       ).all(id, after, after, afterId, limit);
-      json(res, { events: rows, after, afterId, count: rows.length });
+      const attributed = attributeSessionEvents(session, rows);
+      json(res, { events: attributed.events, after, afterId, count: attributed.events.length });
     }
 
     else if (pathname.match(/^\/api\/sessions\/[^/]+\/stream$/)) {
@@ -356,8 +358,9 @@ const server = http.createServer((req, res) => {
       if (!session) { json(res, { error: 'Not found' }, 404); }
       else {
         const events = db.prepare('SELECT * FROM events WHERE session_id = ? ORDER BY timestamp DESC').all(id);
+        const attributed = attributeSessionEvents(session, events);
         const hasArchive = ARCHIVE_MODE && db.prepare('SELECT COUNT(*) as c FROM archive WHERE session_id = ?').get(id).c > 0;
-        json(res, { session, events, hasArchive });
+        json(res, { session, events: attributed.events, projectFilters: attributed.projectFilters, hasArchive });
       }
     }
     else if (pathname.match(/^\/api\/archive\/session\/[^/]+$/)) {

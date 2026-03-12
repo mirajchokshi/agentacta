@@ -647,7 +647,9 @@ async function viewSession(id) {
   if (data._error || data.error) { content.innerHTML = `<div class="empty"><h2>${escHtml(data.error || 'Unable to load')}</h2></div>`; return; }
 
   const s = data.session;
-  const cost = fmtCost(s.total_cost);
+  const projectFilters = Array.isArray(data.projectFilters)
+    ? data.projectFilters.filter(p => p && p.project && Number.isFinite(Number(p.eventCount)))
+    : [];
   let html = `
     <div class="back-btn" id="backBtn">\u2190 Back</div>
     <div class="page-title">Session</div>
@@ -679,15 +681,50 @@ async function viewSession(id) {
         ${s.output_tokens ? `<span><span class="detail-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/></svg></span> ${fmtTokens(s.output_tokens)} output</span><span><span class="detail-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></span> ${fmtTokens(s.input_tokens + s.cache_read_tokens)} input</span>` : s.total_tokens ? `<span><span class="detail-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg></span> ${fmtTokens(s.total_tokens)} tokens</span><span></span>` : '<span></span><span></span>'}
       </div>
     </div>
-    <div class="section-label">Events</div>
+    ${projectFilters.length ? `
+      <div class="section-label">Projects</div>
+      <div class="filters" id="sessionProjectFilters" style="margin-bottom:14px">
+        <span class="filter-chip active" data-project-filter="all">All</span>
+        ${projectFilters.map(p => `<span class="filter-chip" data-project-filter="${escHtml(p.project)}">${escHtml(p.project)} · ${p.eventCount}</span>`).join('')}
+      </div>
+    ` : ''}
+    <div class="section-label" id="sessionEventsLabel">Events</div>
+    <div id="eventsContainer"></div>
+    <div class="empty" id="sessionEventsEmpty" style="display:none"><h2>No events for this project</h2><p>Unattributed events remain visible only in All.</p></div>
   `;
 
   const PAGE_SIZE = 50;
-  const allEvents = data.events;
+  const allEvents = Array.isArray(data.events) ? [...data.events] : [];
+  let activeProjectFilter = 'all';
   let rendered = 0;
+  let onScroll = null;
+  let pendingNewCount = 0;
+
+  const getFilteredEvents = () => {
+    if (activeProjectFilter === 'all') return allEvents;
+    return allEvents.filter(ev => ev.project === activeProjectFilter);
+  };
+
+  const updateEventsLabel = () => {
+    const el = $('#sessionEventsLabel');
+    if (!el) return;
+    const count = getFilteredEvents().length;
+    if (activeProjectFilter === 'all') {
+      el.textContent = `Events (${count})`;
+      return;
+    }
+    el.textContent = `Events (${count}) · ${activeProjectFilter}`;
+  };
+
+  const updateEventsEmptyState = () => {
+    const empty = $('#sessionEventsEmpty');
+    if (!empty) return;
+    empty.style.display = getFilteredEvents().length ? 'none' : 'block';
+  };
 
   function renderBatch() {
-    const batch = allEvents.slice(rendered, rendered + PAGE_SIZE);
+    const filtered = getFilteredEvents();
+    const batch = filtered.slice(rendered, rendered + PAGE_SIZE);
     if (!batch.length) return;
     const frag = document.createElement('div');
     frag.innerHTML = batch.map(renderEvent).join('');
@@ -696,33 +733,67 @@ async function viewSession(id) {
       while (frag.firstChild) container.appendChild(frag.firstChild);
     }
     rendered += batch.length;
-
   }
 
-  html += '<div id="eventsContainer">' + allEvents.slice(0, PAGE_SIZE).map(renderEvent).join('') + '</div>';
-  rendered = Math.min(PAGE_SIZE, allEvents.length);
   content.innerHTML = html;
   transitionView();
 
-  let onScroll = null;
-  if (allEvents.length > PAGE_SIZE) {
+  const syncScrollHandler = () => {
+    const total = getFilteredEvents().length;
+    if (total <= rendered) {
+      if (onScroll) {
+        window.removeEventListener('scroll', onScroll);
+        onScroll = null;
+      }
+      return;
+    }
+
+    if (onScroll) return;
+
     let loading = false;
     onScroll = () => {
-      if (loading || rendered >= allEvents.length) return;
+      if (loading || rendered >= getFilteredEvents().length) return;
       const scrollBottom = window.innerHeight + window.scrollY;
       const threshold = document.body.offsetHeight - 300;
       if (scrollBottom >= threshold) {
         loading = true;
         renderBatch();
         loading = false;
-        if (rendered >= allEvents.length) {
+        if (rendered >= getFilteredEvents().length) {
           window.removeEventListener('scroll', onScroll);
           onScroll = null;
         }
       }
     };
     window.addEventListener('scroll', onScroll, { passive: true });
-  }
+  };
+
+  const resetRenderedEvents = () => {
+    const container = document.getElementById('eventsContainer');
+    if (!container) return;
+    container.innerHTML = '';
+    rendered = 0;
+    renderBatch();
+    syncScrollHandler();
+    updateEventsLabel();
+    updateEventsEmptyState();
+  };
+
+  resetRenderedEvents();
+
+  const filterChips = $$('#sessionProjectFilters .filter-chip');
+  filterChips.forEach(chip => {
+    chip.addEventListener('click', () => {
+      const nextFilter = chip.dataset.projectFilter || 'all';
+      if (nextFilter === activeProjectFilter) return;
+      activeProjectFilter = nextFilter;
+      filterChips.forEach(node => node.classList.toggle('active', node.dataset.projectFilter === activeProjectFilter));
+      pendingNewCount = 0;
+      const indicator = document.getElementById('newEventsIndicator');
+      if (indicator) indicator.remove();
+      resetRenderedEvents();
+    });
+  });
 
   $('#backBtn').addEventListener('click', () => {
     clearJumpUi();
@@ -787,7 +858,7 @@ async function viewSession(id) {
 
       // Load remaining events in chunks so UI stays responsive.
       let loops = 0;
-      while (rendered < allEvents.length) {
+      while (rendered < getFilteredEvents().length) {
         renderBatch();
         loops += 1;
         if (loops % 2 === 0) await new Promise(requestAnimationFrame);
@@ -838,9 +909,8 @@ async function viewSession(id) {
     });
   }
 
-    // --- Lightweight realtime updates (polling fallback first) ---
+  // --- Lightweight realtime updates (polling fallback first) ---
   const knownIds = new Set(allEvents.map(e => e.id));
-  let pendingNewCount = 0;
 
   const applyIncomingEvents = (incoming) => {
     const container = document.getElementById('eventsContainer');
@@ -850,8 +920,22 @@ async function viewSession(id) {
     if (!fresh.length) return;
     fresh.forEach(e => knownIds.add(e.id));
 
+    // Delta endpoint returns oldest -> newest, and view is newest-first.
+    for (const ev of fresh) allEvents.unshift(ev);
+
+    const visibleFresh = activeProjectFilter === 'all'
+      ? fresh
+      : fresh.filter(ev => ev.project === activeProjectFilter);
+
+    if (!visibleFresh.length) {
+      updateEventsLabel();
+      updateEventsEmptyState();
+      syncScrollHandler();
+      return;
+    }
+
     const isAtTop = window.scrollY < 100;
-    for (const ev of fresh) {
+    for (const ev of visibleFresh) {
       const div = document.createElement('div');
       div.innerHTML = renderEvent(ev);
       const el = div.firstElementChild;
@@ -859,9 +943,13 @@ async function viewSession(id) {
       container.insertBefore(el, container.firstChild);
       setTimeout(() => el.classList.remove('event-highlight'), 2000);
     }
+    rendered += visibleFresh.length;
+    updateEventsLabel();
+    updateEventsEmptyState();
+    syncScrollHandler();
 
     if (!isAtTop) {
-      pendingNewCount += fresh.length;
+      pendingNewCount += visibleFresh.length;
       let indicator = document.getElementById('newEventsIndicator');
       if (!indicator) {
         indicator = document.createElement('div');
