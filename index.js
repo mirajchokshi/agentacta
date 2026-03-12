@@ -105,6 +105,15 @@ function getDbSize() {
   }
 }
 
+function relativeTime(ts) {
+  if (!ts) return null;
+  const diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
 function normalizeAgentLabel(agent) {
   if (!agent) return agent;
   if (agent === 'main') return 'openclaw-main';
@@ -513,6 +522,182 @@ const server = http.createServer((req, res) => {
       db.exec('VACUUM');
       const sizeAfter = getDbSize();
       json(res, { ok: true, sizeBefore, sizeAfter });
+    }
+    // --- Context API ---
+    else if (pathname === '/api/context/file') {
+      const fp = query.path || '';
+      if (!fp) return json(res, { error: 'path parameter is required' }, 400);
+
+      const sessionCount = db.prepare(
+        'SELECT COUNT(DISTINCT session_id) as c FROM file_activity WHERE file_path = ?'
+      ).get(fp).c;
+
+      if (sessionCount === 0) {
+        return json(res, { file: fp, sessionCount: 0, lastModified: null, recentChanges: [], operations: {}, relatedFiles: [], recentErrors: [] });
+      }
+
+      const lastTouched = db.prepare(
+        'SELECT MAX(timestamp) as t FROM file_activity WHERE file_path = ?'
+      ).get(fp).t;
+
+      const recentChanges = db.prepare(
+        `SELECT DISTINCT s.summary FROM file_activity fa
+         JOIN sessions s ON s.id = fa.session_id
+         WHERE fa.file_path = ? AND s.summary IS NOT NULL
+         ORDER BY s.start_time DESC LIMIT 5`
+      ).all(fp).map(r => r.summary);
+
+      const opsRows = db.prepare(
+        'SELECT operation, COUNT(*) as c FROM file_activity WHERE file_path = ? GROUP BY operation'
+      ).all(fp);
+      const operations = {};
+      for (const r of opsRows) operations[r.operation] = r.c;
+
+      const relatedFiles = db.prepare(
+        `SELECT fa2.file_path, COUNT(DISTINCT fa1.session_id) as c
+         FROM file_activity fa1
+         JOIN file_activity fa2 ON fa1.session_id = fa2.session_id
+         WHERE fa1.file_path = ? AND fa2.file_path != ?
+         GROUP BY fa2.file_path
+         ORDER BY c DESC LIMIT 5`
+      ).all(fp, fp).map(r => ({ path: r.file_path, count: r.c }));
+
+      const sessionIds = db.prepare(
+        'SELECT DISTINCT session_id FROM file_activity WHERE file_path = ?'
+      ).all(fp).map(r => r.session_id);
+
+      let recentErrors = [];
+      if (sessionIds.length) {
+        const placeholders = sessionIds.map(() => '?').join(',');
+        recentErrors = db.prepare(
+          `SELECT tool_result FROM events
+           WHERE session_id IN (${placeholders})
+             AND tool_result IS NOT NULL
+             AND (tool_result LIKE '%error%' OR tool_result LIKE '%Error%' OR tool_result LIKE '%ERROR%')
+           ORDER BY timestamp DESC LIMIT 3`
+        ).all(...sessionIds).map(r => r.tool_result.slice(0, 200));
+      }
+
+      return json(res, {
+        file: fp, sessionCount,
+        lastModified: relativeTime(lastTouched),
+        recentChanges, operations, relatedFiles, recentErrors
+      });
+    }
+    else if (pathname === '/api/context/repo') {
+      const repoPath = query.path || '';
+      if (!repoPath) return json(res, { error: 'path parameter is required' }, 400);
+
+      // Find sessions matching the repo path via file_activity or initial_prompt
+      const sessionIds = db.prepare(
+        `SELECT DISTINCT session_id FROM file_activity WHERE file_path = ? OR file_path LIKE ?`
+      ).all(repoPath, repoPath + '/%').map(r => r.session_id);
+
+      const promptSessions = db.prepare(
+        `SELECT id FROM sessions WHERE initial_prompt LIKE ?`
+      ).all('%' + repoPath + '%').map(r => r.id);
+
+      const allIds = [...new Set([...sessionIds, ...promptSessions])];
+
+      if (allIds.length === 0) {
+        return json(res, { repo: repoPath, sessionCount: 0, totalCost: 0, totalTokens: 0, agents: [], topFiles: [], recentSessions: [], commonTools: [], commonErrors: [] });
+      }
+
+      const ph = allIds.map(() => '?').join(',');
+
+      const agg = db.prepare(
+        `SELECT COUNT(*) as c, SUM(total_cost) as cost, SUM(total_tokens) as tokens
+         FROM sessions WHERE id IN (${ph})`
+      ).get(...allIds);
+
+      const agents = [...new Set(
+        db.prepare(`SELECT DISTINCT agent FROM sessions WHERE id IN (${ph}) AND agent IS NOT NULL`).all(...allIds)
+          .map(r => normalizeAgentLabel(r.agent)).filter(Boolean)
+      )];
+
+      const topFiles = db.prepare(
+        `SELECT file_path, COUNT(*) as c FROM file_activity
+         WHERE session_id IN (${ph})
+         GROUP BY file_path ORDER BY c DESC LIMIT 10`
+      ).all(...allIds).map(r => ({ path: r.file_path, count: r.c }));
+
+      const recentSessions = db.prepare(
+        `SELECT id, summary, agent, start_time, end_time FROM sessions
+         WHERE id IN (${ph})
+         ORDER BY start_time DESC LIMIT 5`
+      ).all(...allIds).map(r => ({
+        id: r.id, summary: r.summary, agent: normalizeAgentLabel(r.agent),
+        timestamp: r.start_time, status: r.end_time ? 'completed' : 'in-progress'
+      }));
+
+      const commonTools = db.prepare(
+        `SELECT tool_name, COUNT(*) as c FROM events
+         WHERE session_id IN (${ph}) AND tool_name IS NOT NULL
+         GROUP BY tool_name ORDER BY c DESC LIMIT 10`
+      ).all(...allIds).map(r => ({ tool: r.tool_name, count: r.c }));
+
+      const commonErrors = db.prepare(
+        `SELECT DISTINCT SUBSTR(tool_result, 1, 200) as err FROM events
+         WHERE session_id IN (${ph})
+           AND tool_result IS NOT NULL
+           AND (tool_result LIKE '%error%' OR tool_result LIKE '%Error%' OR tool_result LIKE '%ERROR%')
+         ORDER BY timestamp DESC LIMIT 5`
+      ).all(...allIds).map(r => r.err);
+
+      return json(res, {
+        repo: repoPath, sessionCount: allIds.length,
+        totalCost: agg.cost || 0, totalTokens: agg.tokens || 0,
+        agents, topFiles, recentSessions, commonTools, commonErrors
+      });
+    }
+    else if (pathname === '/api/context/agent') {
+      const name = query.name || '';
+      if (!name) return json(res, { error: 'name parameter is required' }, 400);
+
+      // Try exact match first, then check all sessions with normalized label match
+      let sessions = db.prepare(
+        'SELECT * FROM sessions WHERE agent = ?'
+      ).all(name);
+      if (sessions.length === 0) {
+        sessions = db.prepare('SELECT * FROM sessions WHERE agent IS NOT NULL').all()
+          .filter(s => normalizeAgentLabel(s.agent) === name);
+      }
+
+      if (sessions.length === 0) {
+        return json(res, { agent: name, sessionCount: 0, totalCost: 0, avgDuration: 0, topTools: [], recentSessions: [], successRate: 0 });
+      }
+
+      const totalCost = sessions.reduce((s, r) => s + (r.total_cost || 0), 0);
+      let totalDuration = 0;
+      let durationCount = 0;
+      for (const s of sessions) {
+        if (s.start_time && s.end_time) {
+          totalDuration += (new Date(s.end_time) - new Date(s.start_time)) / 1000;
+          durationCount++;
+        }
+      }
+      const avgDuration = durationCount > 0 ? Math.round(totalDuration / durationCount) : 0;
+
+      const withSummary = sessions.filter(s => s.summary).length;
+      const successRate = Math.round((withSummary / sessions.length) * 100);
+
+      const ids = sessions.map(s => s.id);
+      const ph = ids.map(() => '?').join(',');
+      const topTools = db.prepare(
+        `SELECT tool_name, COUNT(*) as c FROM events
+         WHERE session_id IN (${ph}) AND tool_name IS NOT NULL
+         GROUP BY tool_name ORDER BY c DESC LIMIT 10`
+      ).all(...ids).map(r => ({ tool: r.tool_name, count: r.c }));
+
+      const recentSessions = sessions
+        .sort((a, b) => (b.start_time || '').localeCompare(a.start_time || ''))
+        .slice(0, 5)
+        .map(s => ({ id: s.id, summary: s.summary, timestamp: s.start_time }));
+
+      return json(res, {
+        agent: name, sessionCount: sessions.length,
+        totalCost, avgDuration, topTools, recentSessions, successRate
+      });
     }
     else if (pathname === '/api/files') {
       const limit = parseInt(query.limit) || 100;
