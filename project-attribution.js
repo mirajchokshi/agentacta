@@ -36,14 +36,38 @@ function normalizeProjectKey(value) {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-function looksLikePath(value) {
+function looksLikeFilesystemPath(value, options = {}) {
+  const { allowRelative = false } = options;
   if (typeof value !== 'string') return false;
-  return value.startsWith('/')
-    || value.startsWith('~/')
-    || value.startsWith('./')
-    || value.startsWith('../')
-    || value.includes('/')
-    || value.includes('\\');
+
+  const raw = value.trim();
+  if (!raw) return false;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) return false;
+  if (/^[\w.-]+@[\w.-]+:.+/.test(raw)) return false;
+  if (/^refs\/(heads|tags|remotes)\//i.test(raw)) return false;
+
+  const normalized = raw.replace(/\\/g, '/');
+  const isWindowsDriveAbs = /^[a-zA-Z]:\//.test(normalized);
+  const isUncAbs = normalized.startsWith('//');
+  if (
+    normalized.startsWith('/')
+    || normalized.startsWith('~/')
+    || normalized.startsWith('./')
+    || normalized.startsWith('../')
+    || isWindowsDriveAbs
+    || isUncAbs
+  ) {
+    return true;
+  }
+
+  if (!allowRelative || !normalized.includes('/')) return false;
+  if (/^(origin|remotes)\//i.test(normalized)) return false;
+
+  const parts = normalized.split('/').filter(Boolean);
+  if (!parts.length) return false;
+  if (parts.length === 2 && !parts[1].includes('.')) return false;
+
+  return parts.length >= 2;
 }
 
 function isInternalProjectTag(tag) {
@@ -60,10 +84,11 @@ function toDisplayProject(tag) {
 
 function extractProjectFromPath(filePath) {
   if (!filePath || typeof filePath !== 'string') return null;
-  const normalized = filePath.replace(/\\/g, '/');
+  const normalized = filePath.trim().replace(/\\/g, '/');
+  if (!looksLikeFilesystemPath(normalized, { allowRelative: true })) return null;
   const isWindowsDriveAbs = /^[a-zA-Z]:\//.test(normalized);
   const isUncAbs = normalized.startsWith('//');
-  if (!normalized.startsWith('/') && !normalized.startsWith('~') && !isWindowsDriveAbs && !isUncAbs) return 'workspace';
+  if (!normalized.startsWith('/') && !normalized.startsWith('~') && !isWindowsDriveAbs && !isUncAbs) return null;
 
   const rel = normalized
     .replace(/^[a-zA-Z]:\//, '')
@@ -127,7 +152,13 @@ function buildCandidateProjects(session, events) {
       if (typeof value !== 'string') return;
 
       const keyNorm = normalizeKey(key);
-      if (PATH_KEYS.has(keyNorm) || looksLikePath(value)) {
+      if (PATH_KEYS.has(keyNorm)) {
+        if (!looksLikeFilesystemPath(value, { allowRelative: true })) return;
+        addCandidate(candidateSet, extractProjectFromPath(value));
+        return;
+      }
+
+      if (looksLikeFilesystemPath(value)) {
         addCandidate(candidateSet, extractProjectFromPath(value));
       }
 
@@ -253,7 +284,7 @@ function scoreEvent(event, candidates, byNorm) {
         return;
       }
 
-      if (looksLikePath(value)) {
+      if (looksLikeFilesystemPath(value)) {
         const candidate = resolveCandidate(value, candidates, byNorm, { allowPath: true });
         if (!candidate) return;
         addScore(scores, candidate, 3);

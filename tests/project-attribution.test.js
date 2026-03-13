@@ -15,6 +15,12 @@ describe('project attribution', () => {
     assert.strictEqual(extractProjectFromPath('D:\\code\\beta-repo\\app.ts'), 'beta-repo');
   });
 
+  it('does not treat URL/repo refs as filesystem paths', () => {
+    assert.strictEqual(extractProjectFromPath('https://github.com/acme/proj-a'), null);
+    assert.strictEqual(extractProjectFromPath('refs/heads/feature/proj-a'), null);
+    assert.strictEqual(extractProjectFromPath('acme/proj-a'), null);
+  });
+
   it('attributes tool call and linked tool result from file path signals', () => {
     const session = { projects: JSON.stringify(['proj-a', 'proj-b']) };
     const events = [
@@ -119,5 +125,54 @@ describe('project attribution', () => {
     assert.strictEqual(events.length, 1);
     assert.strictEqual(events[0].id, 'call-3:result');
     assert.strictEqual(events[0].project, 'proj-a');
+  });
+
+  it('attributes delta message from prior context neighborhood', () => {
+    const session = { projects: JSON.stringify(['proj-a']) };
+    const context = [
+      {
+        id: 'call-4:call',
+        session_id: 'sess-5',
+        timestamp: '2026-03-12T10:00:00.000Z',
+        type: 'tool_call',
+        role: 'assistant',
+        tool_name: 'Read',
+        tool_args: JSON.stringify({ file_path: '/home/dev/Developer/proj-a/src/a.js' })
+      }
+    ];
+    const delta = [
+      {
+        id: 'msg-4',
+        session_id: 'sess-5',
+        timestamp: '2026-03-12T10:00:01.000Z',
+        type: 'message',
+        role: 'assistant',
+        content: 'continuing with the fix'
+      }
+    ];
+
+    const events = attributeEventDelta(session, delta, context);
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].id, 'msg-4');
+    assert.strictEqual(events[0].project, 'proj-a');
+  });
+
+  it('avoids false workspace attribution from slashy metadata', () => {
+    const session = { projects: null };
+    const events = [
+      {
+        id: 'call-5:call',
+        session_id: 'sess-6',
+        timestamp: '2026-03-12T10:30:00.000Z',
+        type: 'tool_call',
+        role: 'assistant',
+        tool_name: 'Bash',
+        tool_args: JSON.stringify({ note: 'acme/proj-a', ref: 'refs/heads/main' })
+      }
+    ];
+
+    const result = attributeSessionEvents(session, events);
+    assert.strictEqual(result.events[0].project, null);
+    assert.strictEqual(result.events[0].project_confidence, 0);
   });
 });
