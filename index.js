@@ -25,7 +25,9 @@ if (process.argv.includes('--demo')) {
 
 const { loadConfig } = require('./config');
 const { open, init, createStmts } = require('./db');
-const { discoverSessionDirs, indexFile } = require('./indexer');
+const { discoverSessionDirs, listJsonlFiles, indexFile } = require('./indexer');
+const { attributeSessionEvents, attributeEventDelta } = require('./project-attribution');
+const { loadDeltaAttributionContext } = require('./delta-attribution-context');
 
 const config = loadConfig();
 const PORT = config.port;
@@ -154,13 +156,13 @@ const sessionDirs = discoverSessionDirs(config);
 
 // Initial indexing pass
 for (const dir of sessionDirs) {
-  const files = fs.readdirSync(dir.path).filter(f => f.endsWith('.jsonl'));
-  for (const file of files) {
+  const files = listJsonlFiles(dir.path, !!dir.recursive);
+  for (const filePath of files) {
     try {
-      const result = indexFile(db, path.join(dir.path, file), dir.agent, stmts, ARCHIVE_MODE);
-      if (!result.skipped) console.log(`Indexed: ${file} (${dir.agent})`);
+      const result = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
+      if (!result.skipped) console.log(`Indexed: ${path.basename(filePath)} (${dir.agent})`);
     } catch (err) {
-      console.error(`Error indexing ${file}:`, err.message);
+      console.error(`Error indexing ${path.basename(filePath)}:`, err.message);
     }
   }
 }
@@ -170,10 +172,37 @@ console.log(`Watching ${sessionDirs.length} session directories`);
 // Debounce map: filePath -> timeout handle
 const _reindexTimers = new Map();
 const REINDEX_DEBOUNCE_MS = 2000;
+const RECURSIVE_RESCAN_MS = 15000;
+
+function reindexRecursiveDir(dir) {
+  try {
+    const files = listJsonlFiles(dir.path, true);
+    let changed = 0;
+    for (const filePath of files) {
+      const result = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
+      if (!result.skipped) {
+        changed++;
+        if (result.sessionId) sseEmitter.emit('session-update', result.sessionId);
+      }
+    }
+    if (changed > 0) console.log(`Live re-indexed ${changed} files (${dir.agent})`);
+  } catch (err) {
+    console.error(`Error rescanning ${dir.path}:`, err.message);
+  }
+}
 
 for (const dir of sessionDirs) {
   try {
     fs.watch(dir.path, { persistent: false }, (eventType, filename) => {
+      if (dir.recursive) {
+        if (_reindexTimers.has(dir.path)) clearTimeout(_reindexTimers.get(dir.path));
+        _reindexTimers.set(dir.path, setTimeout(() => {
+          _reindexTimers.delete(dir.path);
+          reindexRecursiveDir(dir);
+        }, REINDEX_DEBOUNCE_MS));
+        return;
+      }
+
       if (!filename || !filename.endsWith('.jsonl')) return;
       const filePath = path.join(dir.path, filename);
       if (!fs.existsSync(filePath)) return;
@@ -183,7 +212,7 @@ for (const dir of sessionDirs) {
       _reindexTimers.set(filePath, setTimeout(() => {
         _reindexTimers.delete(filePath);
         try {
-          const result = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE);
+          const result = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
           if (!result.skipped) {
             console.log(`Live re-indexed: ${filename} (${dir.agent})`);
             if (result.sessionId) sseEmitter.emit('session-update', result.sessionId);
@@ -194,6 +223,10 @@ for (const dir of sessionDirs) {
       }, REINDEX_DEBOUNCE_MS));
     });
     console.log(`  Watching: ${dir.path}`);
+    if (dir.recursive) {
+      const timer = setInterval(() => reindexRecursiveDir(dir), RECURSIVE_RESCAN_MS);
+      timer.unref?.();
+    }
   } catch (err) {
     console.error(`  Failed to watch ${dir.path}:`, err.message);
   }
@@ -293,7 +326,7 @@ const server = http.createServer((req, res) => {
 
     else if (pathname.match(/^\/api\/sessions\/[^/]+\/events$/)) {
       const id = pathname.split('/')[3];
-      const session = db.prepare('SELECT id FROM sessions WHERE id = ?').get(id);
+      const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id);
       if (!session) return json(res, { error: 'Not found' }, 404);
 
       const after = query.after || '1970-01-01T00:00:00.000Z';
@@ -306,12 +339,14 @@ const server = http.createServer((req, res) => {
          ORDER BY timestamp ASC, id ASC
          LIMIT ?`
       ).all(id, after, after, afterId, limit);
-      json(res, { events: rows, after, afterId, count: rows.length });
+      const contextRows = loadDeltaAttributionContext(db, id, rows);
+      const events = attributeEventDelta(session, rows, contextRows);
+      json(res, { events, after, afterId, count: events.length });
     }
 
     else if (pathname.match(/^\/api\/sessions\/[^/]+\/stream$/)) {
       const id = pathname.split('/')[3];
-      const session = db.prepare('SELECT id FROM sessions WHERE id = ?').get(id);
+      const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id);
       if (!session) return json(res, { error: 'Not found' }, 404);
 
       res.writeHead(200, {
@@ -331,8 +366,10 @@ const server = http.createServer((req, res) => {
             'SELECT * FROM events WHERE session_id = ? AND timestamp > ? ORDER BY timestamp ASC'
           ).all(id, lastTs);
           if (rows.length) {
+            const contextRows = loadDeltaAttributionContext(db, id, rows);
+            const attributedRows = attributeEventDelta(session, rows, contextRows);
             lastTs = rows[rows.length - 1].timestamp;
-            res.write(`id: ${lastTs}\ndata: ${JSON.stringify(rows)}\n\n`);
+            res.write(`id: ${lastTs}\ndata: ${JSON.stringify(attributedRows)}\n\n`);
           }
         } catch (err) {
           console.error('SSE query error:', err.message);
@@ -356,8 +393,9 @@ const server = http.createServer((req, res) => {
       if (!session) { json(res, { error: 'Not found' }, 404); }
       else {
         const events = db.prepare('SELECT * FROM events WHERE session_id = ? ORDER BY timestamp DESC').all(id);
+        const attributed = attributeSessionEvents(session, events);
         const hasArchive = ARCHIVE_MODE && db.prepare('SELECT COUNT(*) as c FROM archive WHERE session_id = ?').get(id).c > 0;
-        json(res, { session, events, hasArchive });
+        json(res, { session, events: attributed.events, projectFilters: attributed.projectFilters, hasArchive });
       }
     }
     else if (pathname.match(/^\/api\/archive\/session\/[^/]+$/)) {

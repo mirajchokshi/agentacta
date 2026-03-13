@@ -28,14 +28,26 @@ function listJsonlFiles(baseDir, recursive = false) {
 function discoverSessionDirs(config) {
   const dirs = [];
   const home = process.env.HOME;
+  const codexSessionsPath = path.join(home, '.codex/sessions');
+
+  function normalizedPath(p) {
+    return path.resolve(p).replace(/[\\\/]+$/, '');
+  }
+
+  function hasDir(targetPath) {
+    const wanted = normalizedPath(targetPath);
+    return dirs.some(d => normalizedPath(d.path) === wanted);
+  }
 
   // Expand a single path into session dirs, handling Claude Code's per-project structure
   function expandPath(p) {
     if (!fs.existsSync(p)) return;
     const stat = fs.statSync(p);
     if (!stat.isDirectory()) return;
+    const normalized = normalizedPath(p);
+    const normalizedCodex = normalizedPath(codexSessionsPath);
     // Claude Code: ~/.claude/projects contains per-project subdirs with JSONL files
-    if (p.replace(/\/$/, '').endsWith('/.claude/projects')) {
+    if (normalized.endsWith('/.claude/projects')) {
       for (const proj of fs.readdirSync(p)) {
         const projDir = path.join(p, proj);
         if (fs.statSync(projDir).isDirectory()) {
@@ -43,6 +55,9 @@ function discoverSessionDirs(config) {
           if (hasJsonl) dirs.push({ path: projDir, agent: 'claude-code' });
         }
       }
+    } else if (normalized === normalizedCodex) {
+      // Codex CLI stores nested YYYY/MM/DD directories and must be recursive.
+      dirs.push({ path: p, agent: 'codex-cli', recursive: true });
     } else {
       dirs.push({ path: p, agent: path.basename(path.dirname(p)) });
     }
@@ -55,6 +70,10 @@ function discoverSessionDirs(config) {
       ? sessionsOverride
       : sessionsOverride.split(':');
     overridePaths.forEach(expandPath);
+    // Keep direct Codex visibility even when custom overrides omit it.
+    if (fs.existsSync(codexSessionsPath) && fs.statSync(codexSessionsPath).isDirectory() && !hasDir(codexSessionsPath)) {
+      dirs.push({ path: codexSessionsPath, agent: 'codex-cli', recursive: true });
+    }
     if (dirs.length) return dirs;
   }
 
@@ -73,7 +92,7 @@ function discoverSessionDirs(config) {
   expandPath(path.join(home, '.claude/projects'));
 
   // Scan ~/.codex/sessions recursively (Codex CLI stores nested YYYY/MM/DD/*.jsonl)
-  const codexSessions = path.join(home, '.codex/sessions');
+  const codexSessions = codexSessionsPath;
   if (fs.existsSync(codexSessions) && fs.statSync(codexSessions).isDirectory()) {
     dirs.push({ path: codexSessions, agent: 'codex-cli', recursive: true });
   }
@@ -226,6 +245,8 @@ function extractProjectFromPath(filePath, config) {
 
   // Common repo location: ~/Developer/<repo>/...
   if (parts[0] === 'Developer' && parts[1]) return aliasProject(parts[1], config);
+  // Symphony worktrees: ~/symphony-workspaces/<issue>/...
+  if (parts[0] === 'symphony-workspaces' && parts[1]) return aliasProject(parts[1], config);
 
   // OpenClaw workspace and agent stores
   if (parts[0] === '.openclaw' && parts[1] === 'workspace') return aliasProject('workspace', config);
@@ -274,6 +295,7 @@ function indexFile(db, filePath, agentName, stmts, archiveMode, config) {
   let firstMessageTimestamp = null;
   let codexProvider = null;
   let codexSource = null;
+  let codexOriginator = null;
   let sawSnapshotRecord = false;
   let sawNonSnapshotRecord = false;
 
@@ -321,7 +343,7 @@ function indexFile(db, filePath, agentName, stmts, archiveMode, config) {
     const meta = firstLine.payload || {};
     sessionId = meta.id || path.basename(filePath, '.jsonl');
     sessionStart = meta.timestamp || firstLine.timestamp || new Date().toISOString();
-    sessionType = 'codex-cli';
+    sessionType = 'codex-direct';
     agent = 'codex-cli';
     if (meta.model) {
       model = meta.model;
@@ -329,6 +351,8 @@ function indexFile(db, filePath, agentName, stmts, archiveMode, config) {
     }
     codexProvider = meta.model_provider || null;
     codexSource = meta.source || null;
+    codexOriginator = meta.originator || null;
+    if (codexOriginator && codexOriginator.includes('symphony')) sessionType = 'codex-symphony';
   } else {
     return { skipped: true };
   }
@@ -363,6 +387,8 @@ function indexFile(db, filePath, agentName, stmts, archiveMode, config) {
         }
         if (meta.model_provider) codexProvider = meta.model_provider;
         if (meta.source) codexSource = meta.source;
+        if (meta.originator) codexOriginator = meta.originator;
+        if (codexOriginator && codexOriginator.includes('symphony')) sessionType = 'codex-symphony';
         if (meta.model_provider && !model) model = meta.model_provider;
         continue;
       }
@@ -567,6 +593,7 @@ function indexFile(db, filePath, agentName, stmts, archiveMode, config) {
       const parts = ['Codex CLI session'];
       if (codexProvider) parts.push(`provider=${codexProvider}`);
       if (codexSource) parts.push(`source=${codexSource}`);
+      if (codexOriginator) parts.push(`originator=${codexOriginator}`);
       summary = parts.join(' · ');
     } else {
       summary = 'Heartbeat session';
@@ -730,6 +757,6 @@ function indexAll(db, config) {
   return { sessions: stats.sessions, events: evStats.events, newSessions: totalSessions };
 }
 
-module.exports = { discoverSessionDirs, indexFile, indexAll };
+module.exports = { discoverSessionDirs, listJsonlFiles, indexFile, indexAll };
 
 if (require.main === module) run();
