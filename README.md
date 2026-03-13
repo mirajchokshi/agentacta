@@ -32,6 +32,8 @@ AgentActa gives you one place to inspect the full trail.
 
 - 🔍 Full-text search across messages, tool calls, and results
 - 📋 Session browser with summaries, token breakdowns, and model info
+- 🧭 Project-scoped session filtering with per-event attribution
+- 🤖 Clear Codex run visibility for direct and Symphony-origin sessions
 - 📅 Timeline view with live updates for today
 - 📁 File activity across all indexed sessions
 - 🌗 Light and dark themes
@@ -80,7 +82,9 @@ Suggestions come from your own dataset: top tools, common topics, frequently tou
 
 Browse indexed sessions with auto-generated summaries, token splits (input/output), and model details. Click into any session to see the full event history.
 
-Session types get tagged so noisy categories are easier to spot (cron, sub-agent, heartbeat).
+Session detail view supports project-scoped filtering, so mixed-project sessions can be narrowed down without losing the full underlying transcript. The Initial Prompt jump still resolves from full session context even when a project filter is active.
+
+Session types get tagged so noisy categories are easier to spot (cron, sub-agent, heartbeat). Codex-backed work is also distinguished more clearly, including direct Codex runs and Symphony-origin Codex sessions.
 
 ### Timeline
 

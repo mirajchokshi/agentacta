@@ -1,5 +1,23 @@
 # Changelog
 
+## [2026.3.12-r2] - 2026-03-12
+
+### Added
+- Project-scoped filtering in session detail view, backed by per-event project attribution.
+- Clearer Codex session classification in the UI for both direct Codex runs and Symphony-origin Codex sessions.
+- Delta attribution context loader to keep live project filtering accurate as new events stream in.
+
+### Changed
+- Session detail project filter now lives inside the session card instead of duplicating project tags in multiple places.
+- Initial Prompt jump resolves from full session context even when a project filter is active.
+- Codex session discovery is more reliable for nested `~/.codex/sessions/YYYY/MM/DD/*.jsonl` files.
+
+### Fixed
+- Missing direct Codex runs in AgentActa session lists when nested Codex session files were not re-indexed reliably.
+- Missing Symphony-origin Codex sessions in AgentActa visibility and attribution.
+- Live project-filtered views dropping some delta events because prior session context was too narrow.
+- False `workspace` attribution from Windows absolute paths and slash-containing non-path metadata.
+
 ## [2026.3.12] - 2026-03-12
 
 ### Added
