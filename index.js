@@ -25,7 +25,7 @@ if (process.argv.includes('--demo')) {
 
 const { loadConfig } = require('./config');
 const { open, init, createStmts } = require('./db');
-const { discoverSessionDirs, indexFile } = require('./indexer');
+const { discoverSessionDirs, listJsonlFiles, indexFile } = require('./indexer');
 const { attributeSessionEvents } = require('./project-attribution');
 
 const config = loadConfig();
@@ -155,13 +155,13 @@ const sessionDirs = discoverSessionDirs(config);
 
 // Initial indexing pass
 for (const dir of sessionDirs) {
-  const files = fs.readdirSync(dir.path).filter(f => f.endsWith('.jsonl'));
-  for (const file of files) {
+  const files = listJsonlFiles(dir.path, !!dir.recursive);
+  for (const filePath of files) {
     try {
-      const result = indexFile(db, path.join(dir.path, file), dir.agent, stmts, ARCHIVE_MODE);
-      if (!result.skipped) console.log(`Indexed: ${file} (${dir.agent})`);
+      const result = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
+      if (!result.skipped) console.log(`Indexed: ${path.basename(filePath)} (${dir.agent})`);
     } catch (err) {
-      console.error(`Error indexing ${file}:`, err.message);
+      console.error(`Error indexing ${path.basename(filePath)}:`, err.message);
     }
   }
 }
@@ -171,10 +171,37 @@ console.log(`Watching ${sessionDirs.length} session directories`);
 // Debounce map: filePath -> timeout handle
 const _reindexTimers = new Map();
 const REINDEX_DEBOUNCE_MS = 2000;
+const RECURSIVE_RESCAN_MS = 15000;
+
+function reindexRecursiveDir(dir) {
+  try {
+    const files = listJsonlFiles(dir.path, true);
+    let changed = 0;
+    for (const filePath of files) {
+      const result = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
+      if (!result.skipped) {
+        changed++;
+        if (result.sessionId) sseEmitter.emit('session-update', result.sessionId);
+      }
+    }
+    if (changed > 0) console.log(`Live re-indexed ${changed} files (${dir.agent})`);
+  } catch (err) {
+    console.error(`Error rescanning ${dir.path}:`, err.message);
+  }
+}
 
 for (const dir of sessionDirs) {
   try {
     fs.watch(dir.path, { persistent: false }, (eventType, filename) => {
+      if (dir.recursive) {
+        if (_reindexTimers.has(dir.path)) clearTimeout(_reindexTimers.get(dir.path));
+        _reindexTimers.set(dir.path, setTimeout(() => {
+          _reindexTimers.delete(dir.path);
+          reindexRecursiveDir(dir);
+        }, REINDEX_DEBOUNCE_MS));
+        return;
+      }
+
       if (!filename || !filename.endsWith('.jsonl')) return;
       const filePath = path.join(dir.path, filename);
       if (!fs.existsSync(filePath)) return;
@@ -184,7 +211,7 @@ for (const dir of sessionDirs) {
       _reindexTimers.set(filePath, setTimeout(() => {
         _reindexTimers.delete(filePath);
         try {
-          const result = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE);
+          const result = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
           if (!result.skipped) {
             console.log(`Live re-indexed: ${filename} (${dir.agent})`);
             if (result.sessionId) sseEmitter.emit('session-update', result.sessionId);
@@ -195,6 +222,10 @@ for (const dir of sessionDirs) {
       }, REINDEX_DEBOUNCE_MS));
     });
     console.log(`  Watching: ${dir.path}`);
+    if (dir.recursive) {
+      const timer = setInterval(() => reindexRecursiveDir(dir), RECURSIVE_RESCAN_MS);
+      timer.unref?.();
+    }
   } catch (err) {
     console.error(`  Failed to watch ${dir.path}:`, err.message);
   }

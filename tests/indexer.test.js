@@ -5,7 +5,7 @@ const path = require('path');
 const os = require('os');
 
 const { open, init, createStmts } = require('../db');
-const { indexFile } = require('../indexer');
+const { discoverSessionDirs, listJsonlFiles, indexFile } = require('../indexer');
 
 const TMP = path.join(os.tmpdir(), `agentacta-test-idx-${Date.now()}`);
 const TEST_DB = path.join(TMP, 'test.db');
@@ -123,5 +123,116 @@ describe('indexer', () => {
     indexFile(db, fp, 'test', stmts, false);
     const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('sess-hb');
     assert.strictEqual(sess.summary, 'Real question here');
+  });
+
+  it('indexes symphony-origin codex sessions with clear attribution', () => {
+    const fp = writeSession('codex-symphony.jsonl', [
+      {
+        type: 'session_meta',
+        timestamp: '2026-03-12T04:55:55.432Z',
+        payload: {
+          id: 'codex-symphony-1',
+          timestamp: '2026-03-12T04:55:54.828Z',
+          cwd: '/home/mirajrc/symphony-workspaces/HON-6',
+          originator: 'symphony-orchestrator',
+          source: 'vscode',
+          model_provider: 'openai'
+        }
+      }
+    ]);
+
+    const result = indexFile(db, fp, 'codex-cli', stmts, false);
+    assert.strictEqual(result.sessionId, 'codex-symphony-1');
+
+    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('codex-symphony-1');
+    assert.strictEqual(sess.agent, 'codex-cli');
+    assert.strictEqual(sess.session_type, 'codex-symphony');
+    assert.match(sess.summary, /originator=symphony-orchestrator/);
+    assert.match(sess.summary, /source=vscode/);
+
+    const projects = JSON.parse(sess.projects);
+    assert.ok(projects.includes('HON-6'));
+  });
+
+  it('indexes direct codex sessions with direct type and cwd project attribution', () => {
+    const fp = writeSession('codex-direct.jsonl', [
+      {
+        type: 'session_meta',
+        timestamp: '2026-03-12T04:55:55.432Z',
+        payload: {
+          id: 'codex-direct-1',
+          timestamp: '2026-03-12T04:55:54.828Z',
+          cwd: '/home/mirajrc/Developer/mosaic',
+          originator: 'codex_cli_rs',
+          source: 'cli',
+          model_provider: 'openai'
+        }
+      }
+    ]);
+
+    const result = indexFile(db, fp, 'codex-cli', stmts, false);
+    assert.strictEqual(result.sessionId, 'codex-direct-1');
+
+    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('codex-direct-1');
+    assert.strictEqual(sess.agent, 'codex-cli');
+    assert.strictEqual(sess.session_type, 'codex-direct');
+
+    const projects = JSON.parse(sess.projects);
+    assert.ok(projects.includes('mosaic'));
+  });
+
+  it('lists nested jsonl files only when recursive is enabled', () => {
+    const nested = path.join(TMP, 'nested', '2026', '03', '13');
+    fs.mkdirSync(nested, { recursive: true });
+    const rootFile = path.join(TMP, 'root.jsonl');
+    const nestedFile = path.join(nested, 'nested.jsonl');
+    fs.writeFileSync(rootFile, '{"type":"session","id":"r","timestamp":"2025-01-01T00:00:00Z"}\n');
+    fs.writeFileSync(nestedFile, '{"type":"session","id":"n","timestamp":"2025-01-01T00:00:00Z"}\n');
+
+    const flat = listJsonlFiles(TMP, false);
+    const recursive = listJsonlFiles(TMP, true);
+
+    assert.ok(flat.includes(rootFile));
+    assert.ok(!flat.includes(nestedFile));
+    assert.ok(recursive.includes(rootFile));
+    assert.ok(recursive.includes(nestedFile));
+  });
+
+  it('treats overridden codex sessions path as recursive codex-cli source', () => {
+    const originalHome = process.env.HOME;
+    const home = path.join(TMP, 'home-codex-override');
+    const codex = path.join(home, '.codex', 'sessions');
+    fs.mkdirSync(codex, { recursive: true });
+    process.env.HOME = home;
+
+    try {
+      const dirs = discoverSessionDirs({ sessionsPath: [codex] });
+      const codexDir = dirs.find(d => d.path === codex);
+      assert.ok(codexDir);
+      assert.strictEqual(codexDir.agent, 'codex-cli');
+      assert.strictEqual(codexDir.recursive, true);
+    } finally {
+      process.env.HOME = originalHome;
+    }
+  });
+
+  it('keeps codex discovery when override paths omit codex', () => {
+    const originalHome = process.env.HOME;
+    const home = path.join(TMP, 'home-codex-fallback');
+    const custom = path.join(home, '.openclaw', 'agents', 'main', 'sessions');
+    const codex = path.join(home, '.codex', 'sessions');
+    fs.mkdirSync(custom, { recursive: true });
+    fs.mkdirSync(codex, { recursive: true });
+    process.env.HOME = home;
+
+    try {
+      const dirs = discoverSessionDirs({ sessionsPath: [custom] });
+      const codexDir = dirs.find(d => d.path === codex);
+      assert.ok(codexDir);
+      assert.strictEqual(codexDir.agent, 'codex-cli');
+      assert.strictEqual(codexDir.recursive, true);
+    } finally {
+      process.env.HOME = originalHome;
+    }
   });
 });

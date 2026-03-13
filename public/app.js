@@ -669,7 +669,6 @@ async function viewSession(id) {
       <div class="session-header" style="margin-bottom:12px">
         <span class="session-time">${fmtDate(s.start_time)} \u00b7 ${fmtTimeShort(s.start_time)} \u2013 ${fmtTimeShort(s.end_time)}</span>
         <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-          ${renderProjectTags(s)}
           ${s.agent && s.agent !== 'main' ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
           ${s.session_type && s.session_type !== normalizeAgentLabel(s.agent || '') ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
           ${renderModelTags(s)}
@@ -680,17 +679,17 @@ async function viewSession(id) {
         <span><span class="detail-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></span> ${s.tool_count} tools</span>
         ${s.output_tokens ? `<span><span class="detail-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/></svg></span> ${fmtTokens(s.output_tokens)} output</span><span><span class="detail-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></span> ${fmtTokens(s.input_tokens + s.cache_read_tokens)} input</span>` : s.total_tokens ? `<span><span class="detail-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg></span> ${fmtTokens(s.total_tokens)} tokens</span><span></span>` : '<span></span><span></span>'}
       </div>
+      ${projectFilters.length ? `
+        <div class="section-label" style="margin-top:14px">Project Filter</div>
+        <div class="filters" id="sessionProjectFilters" style="margin-bottom:4px">
+          <span class="filter-chip active" data-project-filter="all">All</span>
+          ${projectFilters.map(p => `<span class="filter-chip" data-project-filter="${escHtml(p.project)}">${escHtml(p.project)} · ${p.eventCount}</span>`).join('')}
+        </div>
+      ` : ''}
     </div>
-    ${projectFilters.length ? `
-      <div class="section-label">Projects</div>
-      <div class="filters" id="sessionProjectFilters" style="margin-bottom:14px">
-        <span class="filter-chip active" data-project-filter="all">All</span>
-        ${projectFilters.map(p => `<span class="filter-chip" data-project-filter="${escHtml(p.project)}">${escHtml(p.project)} · ${p.eventCount}</span>`).join('')}
-      </div>
-    ` : ''}
     <div class="section-label" id="sessionEventsLabel">Events</div>
     <div id="eventsContainer"></div>
-    <div class="empty" id="sessionEventsEmpty" style="display:none"><h2>No events for this project</h2><p>Unattributed events remain visible only in All.</p></div>
+    <div class="empty" id="sessionEventsEmpty" style="display:none"><h2>No events</h2><p>This session has no events to display.</p></div>
   `;
 
   const PAGE_SIZE = 50;
@@ -720,6 +719,17 @@ async function viewSession(id) {
     const empty = $('#sessionEventsEmpty');
     if (!empty) return;
     empty.style.display = getFilteredEvents().length ? 'none' : 'block';
+  };
+
+  const setProjectFilter = (nextFilter) => {
+    if (nextFilter === activeProjectFilter) return;
+    activeProjectFilter = nextFilter;
+    const chips = $$('#sessionProjectFilters .filter-chip');
+    chips.forEach(node => node.classList.toggle('active', node.dataset.projectFilter === activeProjectFilter));
+    pendingNewCount = 0;
+    const indicator = document.getElementById('newEventsIndicator');
+    if (indicator) indicator.remove();
+    resetRenderedEvents();
   };
 
   function renderBatch() {
@@ -785,13 +795,7 @@ async function viewSession(id) {
   filterChips.forEach(chip => {
     chip.addEventListener('click', () => {
       const nextFilter = chip.dataset.projectFilter || 'all';
-      if (nextFilter === activeProjectFilter) return;
-      activeProjectFilter = nextFilter;
-      filterChips.forEach(node => node.classList.toggle('active', node.dataset.projectFilter === activeProjectFilter));
-      pendingNewCount = 0;
-      const indicator = document.getElementById('newEventsIndicator');
-      if (indicator) indicator.remove();
-      resetRenderedEvents();
+      setProjectFilter(nextFilter);
     });
   });
 
@@ -849,9 +853,22 @@ async function viewSession(id) {
   if (jumpBtn) {
     jumpBtn.addEventListener('click', async () => {
       const fromY = window.scrollY || window.pageYOffset || 0;
+      const firstMessageId = s.first_message_id;
 
       jumpBtn.classList.add('jumping');
       jumpBtn.disabled = true;
+
+      if (!firstMessageId) {
+        jumpBtn.classList.remove('jumping');
+        jumpBtn.disabled = false;
+        return;
+      }
+
+      // Resolve from full session context, not just project-filtered events.
+      const inCurrentFilter = getFilteredEvents().some(ev => ev.id === firstMessageId);
+      if (!inCurrentFilter && activeProjectFilter !== 'all') {
+        setProjectFilter('all');
+      }
 
       // Let button state paint before heavy DOM work.
       await new Promise(requestAnimationFrame);
@@ -864,7 +881,7 @@ async function viewSession(id) {
         if (loops % 2 === 0) await new Promise(requestAnimationFrame);
       }
 
-      const firstMessage = document.querySelector(`[data-event-id="${s.first_message_id}"]`);
+      const firstMessage = document.querySelector(`[data-event-id="${firstMessageId}"]`);
       if (!firstMessage) {
         jumpBtn.classList.remove('jumping');
         jumpBtn.disabled = false;
