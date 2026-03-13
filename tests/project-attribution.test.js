@@ -1,13 +1,18 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
 
-const { attributeSessionEvents, extractProjectFromPath } = require('../project-attribution');
+const { attributeSessionEvents, attributeEventDelta, extractProjectFromPath } = require('../project-attribution');
 
 describe('project attribution', () => {
   it('extracts repo names from common absolute paths', () => {
     assert.strictEqual(extractProjectFromPath('/home/dev/Developer/alpha-repo/src/index.js'), 'alpha-repo');
     assert.strictEqual(extractProjectFromPath('/Users/dev/code/beta-repo/app.ts'), 'beta-repo');
     assert.strictEqual(extractProjectFromPath('/tmp/something/random.txt'), null);
+  });
+
+  it('extracts repo names from Windows absolute paths', () => {
+    assert.strictEqual(extractProjectFromPath('C:\\Users\\dev\\Developer\\win-repo\\src\\index.ts'), 'win-repo');
+    assert.strictEqual(extractProjectFromPath('D:\\code\\beta-repo\\app.ts'), 'beta-repo');
   });
 
   it('attributes tool call and linked tool result from file path signals', () => {
@@ -83,5 +88,36 @@ describe('project attribution', () => {
     const result = attributeSessionEvents(session, events);
     assert.strictEqual(result.events[0].project, null);
     assert.deepStrictEqual(result.projectFilters, []);
+  });
+
+  it('attributes delta tool_result from prior context tool_call', () => {
+    const session = { projects: JSON.stringify(['proj-a']) };
+    const context = [
+      {
+        id: 'call-3:call',
+        session_id: 'sess-4',
+        timestamp: '2026-03-12T09:59:59.000Z',
+        type: 'tool_call',
+        role: 'assistant',
+        tool_name: 'Read',
+        tool_args: JSON.stringify({ file_path: '/home/dev/Developer/proj-a/src/a.js' })
+      }
+    ];
+    const delta = [
+      {
+        id: 'call-3:result',
+        session_id: 'sess-4',
+        timestamp: '2026-03-12T10:00:00.000Z',
+        type: 'tool_result',
+        role: 'tool',
+        content: 'ok',
+        tool_name: 'Read'
+      }
+    ];
+
+    const events = attributeEventDelta(session, delta, context);
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].id, 'call-3:result');
+    assert.strictEqual(events[0].project, 'proj-a');
   });
 });

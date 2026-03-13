@@ -61,11 +61,16 @@ function toDisplayProject(tag) {
 function extractProjectFromPath(filePath) {
   if (!filePath || typeof filePath !== 'string') return null;
   const normalized = filePath.replace(/\\/g, '/');
-  if (!normalized.startsWith('/') && !normalized.startsWith('~')) return 'workspace';
+  const isWindowsDriveAbs = /^[a-zA-Z]:\//.test(normalized);
+  const isUncAbs = normalized.startsWith('//');
+  if (!normalized.startsWith('/') && !normalized.startsWith('~') && !isWindowsDriveAbs && !isUncAbs) return 'workspace';
 
   const rel = normalized
+    .replace(/^[a-zA-Z]:\//, '')
+    .replace(/^\/\/[^/]+\/[^/]+\//, '')
     .replace(/^\/home\/[^/]+\//, '')
     .replace(/^\/Users\/[^/]+\//, '')
+    .replace(/^Users\/[^/]+\//, '')
     .replace(/^~\//, '');
 
   const parts = rel.split('/').filter(Boolean);
@@ -382,8 +387,26 @@ function attributeSessionEvents(session, events) {
   return { events: eventsOut, projectFilters };
 }
 
+function attributeEventDelta(session, deltaEvents, contextEvents = []) {
+  const delta = Array.isArray(deltaEvents) ? deltaEvents : [];
+  if (!delta.length) return [];
+
+  const context = Array.isArray(contextEvents) ? contextEvents : [];
+  const merged = [...context, ...delta];
+  const attributed = attributeSessionEvents(session, merged).events;
+
+  const byId = new Map();
+  for (const event of attributed) {
+    if (!event || !event.id) continue;
+    byId.set(event.id, event);
+  }
+
+  return delta.map(event => byId.get(event.id) || { ...event, project: null, project_confidence: 0 });
+}
+
 module.exports = {
   attributeSessionEvents,
+  attributeEventDelta,
   extractProjectFromPath,
   isInternalProjectTag
 };

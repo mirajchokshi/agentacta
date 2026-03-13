@@ -26,7 +26,7 @@ if (process.argv.includes('--demo')) {
 const { loadConfig } = require('./config');
 const { open, init, createStmts } = require('./db');
 const { discoverSessionDirs, listJsonlFiles, indexFile } = require('./indexer');
-const { attributeSessionEvents } = require('./project-attribution');
+const { attributeSessionEvents, attributeEventDelta } = require('./project-attribution');
 
 const config = loadConfig();
 const PORT = config.port;
@@ -138,6 +138,33 @@ function toFtsQuery(q) {
     .filter(Boolean)
     .map(t => `"${t}"`)
     .join(' AND ');
+}
+
+function extractCallBaseId(id) {
+  if (!id) return '';
+  return String(id).replace(/:(call|result)$/, '');
+}
+
+function loadDeltaAttributionContext(sessionId, rows) {
+  if (!Array.isArray(rows) || !rows.length) return [];
+
+  const callIds = [...new Set(
+    rows
+      .filter(row => row && row.type === 'tool_result')
+      .map(row => extractCallBaseId(row.id))
+      .filter(Boolean)
+      .map(base => `${base}:call`)
+  )];
+
+  if (!callIds.length) return [];
+
+  const placeholders = callIds.map(() => '?').join(',');
+  return db.prepare(
+    `SELECT * FROM events
+     WHERE session_id = ?
+       AND type = 'tool_call'
+       AND id IN (${placeholders})`
+  ).all(sessionId, ...callIds);
 }
 
 // Init DB and start watcher
@@ -338,13 +365,14 @@ const server = http.createServer((req, res) => {
          ORDER BY timestamp ASC, id ASC
          LIMIT ?`
       ).all(id, after, after, afterId, limit);
-      const attributed = attributeSessionEvents(session, rows);
-      json(res, { events: attributed.events, after, afterId, count: attributed.events.length });
+      const contextRows = loadDeltaAttributionContext(id, rows);
+      const events = attributeEventDelta(session, rows, contextRows);
+      json(res, { events, after, afterId, count: events.length });
     }
 
     else if (pathname.match(/^\/api\/sessions\/[^/]+\/stream$/)) {
       const id = pathname.split('/')[3];
-      const session = db.prepare('SELECT id FROM sessions WHERE id = ?').get(id);
+      const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id);
       if (!session) return json(res, { error: 'Not found' }, 404);
 
       res.writeHead(200, {
@@ -364,8 +392,10 @@ const server = http.createServer((req, res) => {
             'SELECT * FROM events WHERE session_id = ? AND timestamp > ? ORDER BY timestamp ASC'
           ).all(id, lastTs);
           if (rows.length) {
+            const contextRows = loadDeltaAttributionContext(id, rows);
+            const attributedRows = attributeEventDelta(session, rows, contextRows);
             lastTs = rows[rows.length - 1].timestamp;
-            res.write(`id: ${lastTs}\ndata: ${JSON.stringify(rows)}\n\n`);
+            res.write(`id: ${lastTs}\ndata: ${JSON.stringify(attributedRows)}\n\n`);
           }
         } catch (err) {
           console.error('SSE query error:', err.message);
