@@ -2,6 +2,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { EventEmitter } = require('events');
 
 // --version / -v flag: print version and exit
@@ -32,8 +33,61 @@ const { loadDeltaAttributionContext } = require('./delta-attribution-context');
 const config = loadConfig();
 const PORT = config.port;
 const ARCHIVE_MODE = config.storage === 'archive';
+const AUTH_ENABLED = config.auth !== 'off' && !!config.token;
 
 console.log(`AgentActa running in ${config.storage} mode`);
+if (AUTH_ENABLED) console.log('Auth: enabled');
+else console.log('Auth: disabled (AGENTACTA_AUTH=off or no token)');
+
+// --- Auth helpers ---
+
+function parseCookies(req) {
+  const header = req.headers.cookie || '';
+  const cookies = {};
+  for (const part of header.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx < 0) continue;
+    const key = part.slice(0, idx).trim();
+    const val = part.slice(idx + 1).trim();
+    cookies[key] = decodeURIComponent(val);
+  }
+  return cookies;
+}
+
+function safeEqual(a, b) {
+  try {
+    const ba = Buffer.from(a);
+    const bb = Buffer.from(b);
+    if (ba.length !== bb.length) {
+      // Still do a comparison to avoid timing leaks on length difference
+      crypto.timingSafeEqual(Buffer.alloc(ba.length), Buffer.alloc(ba.length));
+      return false;
+    }
+    return crypto.timingSafeEqual(ba, bb);
+  } catch {
+    return false;
+  }
+}
+
+function isAuthenticated(req, query) {
+  if (!AUTH_ENABLED) return true;
+  const token = config.token;
+  // 1. Authorization: Bearer <token>
+  const authHeader = req.headers['authorization'] || '';
+  if (authHeader.startsWith('Bearer ')) {
+    if (safeEqual(authHeader.slice(7).trim(), token)) return true;
+  }
+  // 2. Cookie
+  const cookies = parseCookies(req);
+  if (cookies['agentacta_token'] && safeEqual(cookies['agentacta_token'], token)) return true;
+  // 3. ?token= query param (convenience for localhost bookmarks)
+  if (query.token && safeEqual(query.token, token)) return true;
+  return false;
+}
+
+function isPublicRoute(pathname) {
+  return pathname === '/api/health' || pathname === '/login' || pathname === '/api/auth/login';
+}
 
 const PUBLIC = path.join(__dirname, 'public');
 const MIME = {
@@ -236,6 +290,42 @@ const server = http.createServer((req, res) => {
   const { pathname, query } = parseQuery(req.url);
 
   try {
+    // --- Auth gate ---
+    if (!isPublicRoute(pathname) && !isAuthenticated(req, query)) {
+      if (pathname.startsWith('/api/')) {
+        return json(res, { error: 'Unauthorized' }, 401);
+      }
+      const next = encodeURIComponent(req.url);
+      res.writeHead(302, { Location: `/login?next=${next}` });
+      return res.end();
+    }
+
+    // --- Login endpoint ---
+    if (pathname === '/api/auth/login' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        let token = '';
+        let next = '/';
+        try {
+          const params = new URLSearchParams(body);
+          token = params.get('token') || '';
+          next = params.get('next') || '/';
+          // Validate next to prevent open redirect
+          if (!next.startsWith('/')) next = '/';
+        } catch {}
+        if (safeEqual(token, config.token || '')) {
+          const cookie = `agentacta_token=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/`;
+          res.writeHead(302, { 'Set-Cookie': cookie, Location: next });
+          res.end();
+        } else {
+          res.writeHead(302, { Location: '/login?error=1' });
+          res.end();
+        }
+      });
+      return;
+    }
+
     if (pathname === '/api/reindex') {
       const { indexAll } = require('./indexer');
       const result = indexAll(db, config);

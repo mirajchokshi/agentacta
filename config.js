@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
 const CWD_CONFIG_FILE = path.join(process.cwd(), 'agentacta.config.json');
 const XDG_CONFIG_DIR = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'agentacta');
@@ -71,10 +72,38 @@ function loadConfig() {
       console.error('Warning: Could not parse AGENTACTA_PROJECT_ALIASES_JSON:', err.message);
     }
   }
+  if (process.env.AGENTACTA_TOKEN) config.token = process.env.AGENTACTA_TOKEN;
+  if (process.env.AGENTACTA_AUTH) config.auth = process.env.AGENTACTA_AUTH;
 
   // Resolve dbPath relative to cwd
   config.dbPath = path.resolve(config.dbPath);
   if (!config.projectAliases || typeof config.projectAliases !== 'object') config.projectAliases = {};
+
+  // Auth: generate token on first run if auth is not disabled
+  const authDisabled = config.auth === 'off';
+  if (!authDisabled && !config.token) {
+    config.token = crypto.randomBytes(32).toString('hex');
+    // Persist to config file so the token survives restarts
+    try {
+      const savedConfig = fs.existsSync(CONFIG_FILE)
+        ? JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))
+        : {};
+      savedConfig.token = config.token;
+      const dir = path.dirname(CONFIG_FILE);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(CONFIG_FILE, JSON.stringify(savedConfig, null, 2) + '\n');
+    } catch (err) {
+      console.error('Warning: Could not save auth token to config:', err.message);
+    }
+    const border = '='.repeat(60);
+    console.log(`\n${border}`);
+    console.log('  AgentActa — Auth Token (save this somewhere safe)');
+    console.log(border);
+    console.log(`  ${config.token}`);
+    console.log(`${border}\n`);
+    console.log('  Paste this token on the login page when prompted.');
+    console.log('  To disable auth: set AGENTACTA_AUTH=off\n');
+  }
 
   return config;
 }
