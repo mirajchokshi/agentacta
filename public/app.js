@@ -241,6 +241,12 @@ function updateNavActive(view) {
   if (navItem) navItem.classList.add('active');
 }
 
+function updateMobileNavActive(view) {
+  $$('.mobile-nav-btn').forEach(b => b.classList.remove('active'));
+  const btn = $(`.mobile-nav-btn[data-view="${view}"]`);
+  if (btn) btn.classList.add('active');
+}
+
 function handleRoute() {
   clearJumpUi();
   const raw = (window.location.hash || '').slice(1) || 'overview';
@@ -253,13 +259,15 @@ function handleRoute() {
   }
 
   const normalized = raw === 'search' ? 'overview' : raw;
-  const view = normalized === 'overview' || normalized === 'sessions' || normalized === 'timeline' || normalized === 'files' || normalized === 'stats' ? normalized : 'overview';
+  const view = normalized === 'overview' || normalized === 'sessions' || normalized === 'timeline' || normalized === 'files' || normalized === 'stats' || normalized === 'insights' ? normalized : 'overview';
   window._lastView = view;
   updateNavActive(view);
+  updateMobileNavActive(view);
   if (view === 'overview') viewOverview();
   else if (view === 'sessions') viewSessions();
   else if (view === 'files') viewFiles();
   else if (view === 'timeline') viewTimeline();
+  else if (view === 'insights') viewInsights();
   else viewStats();
 }
 
@@ -690,6 +698,7 @@ async function viewSession(id) {
     <div class="section-label" id="sessionEventsLabel">Events</div>
     <div id="eventsContainer"></div>
     <div class="empty" id="sessionEventsEmpty" style="display:none"><h2>No events</h2><p>This session has no events to display.</p></div>
+    <div id="sessionInsightsPanel" class="loading" style="margin-top:var(--space-xl)">Loading insights...</div>
   `;
 
   const PAGE_SIZE = 50;
@@ -1018,6 +1027,12 @@ async function viewSession(id) {
     const ind = document.getElementById('newEventsIndicator');
     if (ind) ind.remove();
   };
+
+  // Load insights panel
+  api(`/insights/session/${id}`).then(insights => {
+    const panel = document.getElementById('sessionInsightsPanel');
+    if (panel) panel.outerHTML = renderInsightsPanel(insights._error ? null : insights);
+  });
 }
 
 async function viewTimeline(date) {
@@ -1524,6 +1539,135 @@ async function viewFileDetail(filePath) {
   });
 }
 
+// --- Insights helpers ---
+const SIGNAL_LABELS = {
+  tool_retry_loop: 'Retry Loop',
+  session_bail: 'Bail',
+  high_error_rate: 'High Errors',
+  long_prompt_short_session: 'Under-specified',
+  no_completion: 'No Completion'
+};
+
+const SIGNAL_COLORS = {
+  tool_retry_loop: 'orange',
+  session_bail: 'red',
+  high_error_rate: 'red',
+  long_prompt_short_session: 'yellow',
+  no_completion: 'gray'
+};
+
+function renderSignalTag(sig) {
+  const label = SIGNAL_LABELS[sig.type] || sig.type;
+  const color = SIGNAL_COLORS[sig.type] || 'gray';
+  return `<span class="signal-tag signal-${color}">${escHtml(label)}</span>`;
+}
+
+function renderConfusionBadge(score) {
+  const cls = score >= 60 ? 'confusion-red' : score >= 30 ? 'confusion-yellow' : 'confusion-green';
+  return `<span class="confusion-badge ${cls}">${score}</span>`;
+}
+
+function renderInsightsPanel(insights) {
+  if (!insights || !insights.signals || !insights.signals.length) {
+    return `<div class="insights-panel insights-clean"><span style="color:var(--text-tertiary);font-size:13px">No issues detected</span></div>`;
+  }
+  return `<div class="insights-panel">
+    <div class="section-label" style="margin-top:0">Insights ${renderConfusionBadge(insights.confusion_score)}</div>
+    <div class="insights-signals">
+      ${insights.signals.map(sig => {
+        let detail = '';
+        if (sig.type === 'tool_retry_loop') detail = `${escHtml(sig.tool)} called ${sig.count}x consecutively`;
+        else if (sig.type === 'session_bail') detail = `${sig.tool_calls} tool calls with no file writes`;
+        else if (sig.type === 'high_error_rate') detail = `${sig.rate}% error rate (${sig.error_count}/${sig.total})`;
+        else if (sig.type === 'long_prompt_short_session') detail = `${sig.prompt_words} word prompt, ${sig.tool_calls} tool calls`;
+        else if (sig.type === 'no_completion') detail = `Ended on ${sig.last_event_type}${sig.last_tool ? ': ' + sig.last_tool : ''}`;
+        return `<div class="insight-callout">
+          ${renderSignalTag(sig)}
+          <span class="insight-detail">${detail}</span>
+        </div>`;
+      }).join('')}
+    </div>
+  </div>`;
+}
+
+async function viewInsights() {
+  clearJumpUi();
+  window._lastView = 'insights';
+  content.innerHTML = `<div class="page-title">Insights</div><div class="stat-grid">${skeletonRows(3, 'stats')}</div>`;
+  transitionView();
+
+  const data = await api('/insights');
+  if (data._error) {
+    content.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
+    return;
+  }
+
+  // Signal breakdown data
+  const signalTypes = Object.keys(SIGNAL_LABELS);
+  const maxSignalCount = Math.max(1, ...signalTypes.map(t => data.signal_counts[t] || 0));
+
+  // Most common signal
+  let mostCommon = 'None';
+  let mostCommonCount = 0;
+  for (const [type, count] of Object.entries(data.signal_counts || {})) {
+    if (count > mostCommonCount) {
+      mostCommon = SIGNAL_LABELS[type] || type;
+      mostCommonCount = count;
+    }
+  }
+
+  let html = `<div class="page-title">Insights</div>
+
+    <div class="stat-grid">
+      <div class="stat-card accent-red"><div class="label">Flagged Sessions</div><div class="value">${data.flagged_count} <span style="font-size:14px;font-weight:500;opacity:0.6">/ ${data.total_sessions}</span></div></div>
+      <div class="stat-card accent-amber"><div class="label">Most Common Signal</div><div class="value" style="font-size:20px">${escHtml(mostCommon)}</div></div>
+      <div class="stat-card accent-purple"><div class="label">Avg Confusion Score</div><div class="value">${data.avg_confusion_score}</div></div>
+    </div>
+
+    <div class="section-label">Signal Breakdown</div>
+    <div class="signal-chart">
+      ${signalTypes.map(type => {
+        const count = data.signal_counts[type] || 0;
+        const pct = Math.round((count / maxSignalCount) * 100);
+        const color = SIGNAL_COLORS[type] || 'gray';
+        return `<div class="signal-bar-row">
+          <span class="signal-bar-label">${SIGNAL_LABELS[type]}</span>
+          <div class="signal-bar-track"><div class="signal-bar-fill signal-bar-${color}" style="width:${pct}%"></div></div>
+          <span class="signal-bar-count">${count}</span>
+        </div>`;
+      }).join('')}
+    </div>
+
+    <div class="section-label">Flagged Sessions (${data.flagged_count})</div>
+    <div id="insightsList">
+      ${data.top_flagged.length ? data.top_flagged.map(s => {
+        const summary = cleanSessionSummary(s.summary, '');
+        return `<div class="session-item insight-row" data-id="${escHtml(s.session_id)}">
+          <div class="session-header">
+            <span class="session-time">${fmtTime(s.start_time)}</span>
+            <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+              ${renderConfusionBadge(s.confusion_score)}
+              ${s.signals.map(sig => renderSignalTag(sig)).join('')}
+            </span>
+          </div>
+          <div class="session-summary">${escHtml(truncate(summary, 120))}</div>
+          <div class="session-meta">
+            ${s.agent ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
+            ${s.model ? `<span class="session-model">${escHtml(s.model)}</span>` : ''}
+          </div>
+        </div>`;
+      }).join('') : '<div class="empty"><p>No flagged sessions found</p></div>'}
+    </div>
+  `;
+
+  content.innerHTML = html;
+  transitionView();
+
+  $$('.session-item', content).forEach(item => {
+    item.addEventListener('click', () => viewSession(item.dataset.id));
+  });
+}
+
 // --- Navigation ---
 window._searchType = '';
 window._searchRole = '';
@@ -1542,6 +1686,7 @@ $$('.nav-item').forEach(item => {
     else if (view === 'sessions') viewSessions();
     else if (view === 'files') viewFiles();
     else if (view === 'timeline') viewTimeline();
+    else if (view === 'insights') viewInsights();
     else if (view === 'stats') viewStats();
   });
 });
@@ -1787,9 +1932,36 @@ function openCmdk() {
 
 initTheme();
 document.getElementById('theme-toggle')?.addEventListener('click', toggleTheme);
-document.getElementById('theme-toggle-mobile')?.addEventListener('click', toggleTheme);
 document.getElementById('cmdkBtn')?.addEventListener('click', () => openCmdk());
-document.getElementById('mobile-search-btn')?.addEventListener('click', () => openCmdk());
+
+// Settings gear button
+document.getElementById('settings-gear')?.addEventListener('click', () => {
+  window._lastView = 'stats';
+  updateNavActive('stats');
+  updateMobileNavActive('stats');
+  setHash('stats');
+  viewStats();
+});
+
+// Mobile nav buttons
+$$('.mobile-nav-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
+    if (window._timelineScrollHandler) { window.removeEventListener('scroll', window._timelineScrollHandler); window._timelineScrollHandler = null; }
+    if (window._timelineSse) { window._timelineSse.close(); window._timelineSse = null; }
+    const view = btn.dataset.view;
+    window._lastView = view;
+    updateNavActive(view);
+    updateMobileNavActive(view);
+    setHash(view);
+    if (view === 'overview') viewOverview();
+    else if (view === 'sessions') viewSessions();
+    else if (view === 'files') viewFiles();
+    else if (view === 'timeline') viewTimeline();
+    else if (view === 'insights') viewInsights();
+    else if (view === 'stats') viewStats();
+  });
+});
 document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault();

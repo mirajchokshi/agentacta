@@ -103,6 +103,18 @@ function init(dbPath) {
     );
 
     CREATE INDEX IF NOT EXISTS idx_archive_session ON archive(session_id);
+
+    CREATE TABLE IF NOT EXISTS session_insights (
+      session_id TEXT PRIMARY KEY,
+      signals TEXT,
+      confusion_score INTEGER DEFAULT 0,
+      flagged INTEGER DEFAULT 0,
+      computed_at TEXT,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_insights_flagged ON session_insights(flagged);
+    CREATE INDEX IF NOT EXISTS idx_insights_score ON session_insights(confusion_score DESC);
   `);
 
   // Add columns if missing (migration)
