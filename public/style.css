@@ -2014,18 +2014,3 @@ mark {
 [data-theme="dark"] .confusion-yellow { background: #713f12; color: #fde68a; }
 [data-theme="dark"] .confusion-red    { background: #7f1d1d; color: #fca5a5; }
 
-.info-hint {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 15px;
-  height: 15px;
-  border-radius: 50%;
-  font-size: 10px;
-  font-weight: 700;
-  background: var(--accent-soft);
-  color: var(--accent);
-  cursor: help;
-  vertical-align: middle;
-  margin-left: 4px;
-}

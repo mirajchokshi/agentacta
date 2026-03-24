@@ -1625,8 +1625,8 @@ async function viewInsights() {
   let html = `<div class="page-title">Insights</div>
 
     <div class="stat-grid">
-      <div class="stat-card accent-amber"><div class="label">Issue Rate <span class="info-hint" title="Share of sessions with at least one detected issue">?</span></div><div class="value">${issueRate}%</div><div class="stat-desc">${data.flagged_count} of ${data.total_sessions} sessions had at least one detected issue</div></div>
-      <div class="stat-card accent-purple"><div class="label">Reliability Score <span class="info-hint" title="How reliably the agent completed tasks without errors. Higher is better (0 to 100).">?</span></div><div class="value">${reliabilityScore}</div><div class="stat-desc">How reliably the agent completed tasks without errors. Higher is better.</div></div>
+      <div class="stat-card accent-amber"><div class="label">Issue Rate</div><div class="value">${issueRate}%</div><div class="stat-desc">${data.flagged_count} of ${data.total_sessions} sessions had at least one detected issue</div></div>
+      <div class="stat-card accent-purple"><div class="label">Reliability Score</div><div class="value">${reliabilityScore}</div><div class="stat-desc">How reliably the agent completed tasks without issues. Weighted across signal severity, capped at 100. Higher is better.</div></div>
     </div>
 
     <div class="section-label">Issue Types</div>
