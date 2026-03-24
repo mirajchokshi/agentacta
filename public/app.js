@@ -1558,10 +1558,10 @@ const SIGNAL_DESCRIPTIONS = {
 
 const SIGNAL_COLORS = {
   tool_retry_loop: 'amber',
-  session_bail: 'red',
   high_error_rate: 'red',
-  long_prompt_short_session: 'amber',
-  no_completion: 'muted'
+  no_completion: 'purple',
+  session_bail: 'teal',
+  long_prompt_short_session: 'accent'
 };
 
 function renderSignalTag(sig) {
@@ -1636,7 +1636,7 @@ async function viewInsights() {
         const pct = Math.round((count / maxSignalCount) * 100);
         const color = SIGNAL_COLORS[type] || 'muted';
         const desc = SIGNAL_DESCRIPTIONS[type] || '';
-        const barColor = color === 'amber' ? 'var(--amber)' : color === 'red' ? 'var(--red)' : 'var(--text-tertiary)';
+        const barColor = color === 'muted' ? 'var(--text-tertiary)' : `var(--${color})`;
         return `<div class="signal-lollipop-row"${desc ? ` title="${escHtml(desc)}"` : ''}>
           <span class="signal-bar-label">${SIGNAL_LABELS[type]}</span>
           <div class="signal-lollipop-track">
