@@ -1934,34 +1934,9 @@ initTheme();
 document.getElementById('theme-toggle')?.addEventListener('click', toggleTheme);
 document.getElementById('cmdkBtn')?.addEventListener('click', () => openCmdk());
 
-// Settings gear button
-document.getElementById('settings-gear')?.addEventListener('click', () => {
-  window._lastView = 'stats';
-  updateNavActive('stats');
-  updateMobileNavActive('stats');
-  setHash('stats');
-  viewStats();
-});
 
-// Mobile nav buttons
-$$('.mobile-nav-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
-    if (window._timelineScrollHandler) { window.removeEventListener('scroll', window._timelineScrollHandler); window._timelineScrollHandler = null; }
-    if (window._timelineSse) { window._timelineSse.close(); window._timelineSse = null; }
-    const view = btn.dataset.view;
-    window._lastView = view;
-    updateNavActive(view);
-    updateMobileNavActive(view);
-    setHash(view);
-    if (view === 'overview') viewOverview();
-    else if (view === 'sessions') viewSessions();
-    else if (view === 'files') viewFiles();
-    else if (view === 'timeline') viewTimeline();
-    else if (view === 'insights') viewInsights();
-    else if (view === 'stats') viewStats();
-  });
-});
+
+
 document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault();
