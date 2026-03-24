@@ -1541,30 +1541,39 @@ async function viewFileDetail(filePath) {
 
 // --- Insights helpers ---
 const SIGNAL_LABELS = {
-  tool_retry_loop: 'Retry Loop',
-  session_bail: 'Bail',
-  high_error_rate: 'High Errors',
-  long_prompt_short_session: 'Under-specified',
-  no_completion: 'No Completion'
+  tool_retry_loop: 'Repeated Actions',
+  session_bail: 'No Output Produced',
+  high_error_rate: 'Frequent Errors',
+  long_prompt_short_session: 'Vague Instructions',
+  no_completion: 'Incomplete Session'
+};
+
+const SIGNAL_DESCRIPTIONS = {
+  tool_retry_loop: 'The agent called the same tool many times in a row — it may have been stuck in a loop',
+  session_bail: 'The agent ran many actions but never wrote or edited any files',
+  high_error_rate: 'More than 30% of tool calls returned errors',
+  long_prompt_short_session: 'A very short prompt led to a long session — the agent may have lacked enough context',
+  no_completion: 'The session ended mid-action instead of finishing with a response'
 };
 
 const SIGNAL_COLORS = {
-  tool_retry_loop: 'orange',
+  tool_retry_loop: 'amber',
   session_bail: 'red',
   high_error_rate: 'red',
-  long_prompt_short_session: 'yellow',
-  no_completion: 'gray'
+  long_prompt_short_session: 'amber',
+  no_completion: 'muted'
 };
 
 function renderSignalTag(sig) {
   const label = SIGNAL_LABELS[sig.type] || sig.type;
-  const color = SIGNAL_COLORS[sig.type] || 'gray';
-  return `<span class="signal-tag signal-${color}">${escHtml(label)}</span>`;
+  const color = SIGNAL_COLORS[sig.type] || 'muted';
+  const desc = SIGNAL_DESCRIPTIONS[sig.type] || '';
+  return `<span class="signal-tag signal-${color}"${desc ? ` title="${escHtml(desc)}"` : ''}>${escHtml(label)}</span>`;
 }
 
 function renderConfusionBadge(score) {
   const cls = score >= 60 ? 'confusion-red' : score >= 30 ? 'confusion-yellow' : 'confusion-green';
-  return `<span class="confusion-badge ${cls}">${score}</span>`;
+  return `<span class="confusion-badge ${cls}" title="Struggle score (0–100): higher means the agent had more difficulty completing the task">${score}</span>`;
 }
 
 function renderInsightsPanel(insights) {
@@ -1572,7 +1581,7 @@ function renderInsightsPanel(insights) {
     return `<div class="insights-panel insights-clean"><span style="color:var(--text-tertiary);font-size:13px">No issues detected</span></div>`;
   }
   return `<div class="insights-panel">
-    <div class="section-label" style="margin-top:0">Insights ${renderConfusionBadge(insights.confusion_score)}</div>
+    <div class="section-label" style="margin-top:0">Session Health ${renderConfusionBadge(insights.confusion_score)}</div>
     <div class="insights-signals">
       ${insights.signals.map(sig => {
         let detail = '';
@@ -1619,18 +1628,19 @@ async function viewInsights() {
   let html = `<div class="page-title">Insights</div>
 
     <div class="stat-grid">
-      <div class="stat-card accent-red"><div class="label">Flagged Sessions</div><div class="value">${data.flagged_count} <span style="font-size:14px;font-weight:500;opacity:0.6">/ ${data.total_sessions}</span></div></div>
-      <div class="stat-card accent-amber"><div class="label">Most Common Signal</div><div class="value" style="font-size:20px">${escHtml(mostCommon)}</div></div>
-      <div class="stat-card accent-purple"><div class="label">Avg Confusion Score</div><div class="value">${data.avg_confusion_score}</div></div>
+      <div class="stat-card accent-red"><div class="label">Sessions with Issues</div><div class="value">${data.flagged_count} <span style="font-size:14px;font-weight:500;opacity:0.6">/ ${data.total_sessions}</span></div></div>
+      <div class="stat-card accent-amber"><div class="label">Most Common Issue</div><div class="value" style="font-size:20px">${escHtml(mostCommon)}</div></div>
+      <div class="stat-card accent-purple"><div class="label">Avg Struggle Score <span class="info-hint" title="How much difficulty agents had on average (0–100). Higher means more problems like errors, retries, or incomplete work.">?</span></div><div class="value">${data.avg_confusion_score}</div></div>
     </div>
 
-    <div class="section-label">Signal Breakdown</div>
+    <div class="section-label">Issue Types</div>
     <div class="signal-chart">
       ${signalTypes.map(type => {
         const count = data.signal_counts[type] || 0;
         const pct = Math.round((count / maxSignalCount) * 100);
-        const color = SIGNAL_COLORS[type] || 'gray';
-        return `<div class="signal-bar-row">
+        const color = SIGNAL_COLORS[type] || 'muted';
+        const desc = SIGNAL_DESCRIPTIONS[type] || '';
+        return `<div class="signal-bar-row"${desc ? ` title="${escHtml(desc)}"` : ''}>
           <span class="signal-bar-label">${SIGNAL_LABELS[type]}</span>
           <div class="signal-bar-track"><div class="signal-bar-fill signal-bar-${color}" style="width:${pct}%"></div></div>
           <span class="signal-bar-count">${count}</span>
@@ -1638,7 +1648,7 @@ async function viewInsights() {
       }).join('')}
     </div>
 
-    <div class="section-label">Flagged Sessions (${data.flagged_count})</div>
+    <div class="section-label">Sessions with Issues (${data.flagged_count})</div>
     <div id="insightsList">
       ${data.top_flagged.length ? data.top_flagged.map(s => {
         const summary = cleanSessionSummary(s.summary, '');

@@ -1952,10 +1952,9 @@ mark {
   border-radius: 4px;
   transition: width 0.4s ease;
 }
-.signal-bar-orange { background: #f97316; }
-.signal-bar-red    { background: #ef4444; }
-.signal-bar-yellow { background: #eab308; }
-.signal-bar-gray   { background: #6b7280; }
+.signal-bar-amber  { background: var(--amber); }
+.signal-bar-red    { background: var(--red); }
+.signal-bar-muted  { background: var(--text-tertiary); }
 .signal-bar-count {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -1993,3 +1992,19 @@ mark {
 [data-theme="dark"] .confusion-green  { background: #14532d; color: #86efac; }
 [data-theme="dark"] .confusion-yellow { background: #713f12; color: #fde68a; }
 [data-theme="dark"] .confusion-red    { background: #7f1d1d; color: #fca5a5; }
+
+.info-hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+  background: var(--accent-soft);
+  color: var(--accent);
+  cursor: help;
+  vertical-align: middle;
+  margin-left: 4px;
+}
