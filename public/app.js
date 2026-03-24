@@ -1625,8 +1625,7 @@ async function viewInsights() {
   let html = `<div class="page-title">Insights</div>
 
     <div class="stat-grid">
-      <div class="stat-card accent-red"><div class="label">Sessions with Issues</div><div class="value">${data.flagged_count} <span style="font-size:14px;font-weight:500;opacity:0.6">/ ${data.total_sessions}</span></div></div>
-      <div class="stat-card accent-amber"><div class="label">Issue Rate <span class="info-hint" title="Share of sessions with at least one detected issue">?</span></div><div class="value">${issueRate}%</div><div class="stat-desc">Share of sessions with at least one detected issue</div></div>
+      <div class="stat-card accent-amber"><div class="label">Issue Rate <span class="info-hint" title="Share of sessions with at least one detected issue">?</span></div><div class="value">${issueRate}%</div><div class="stat-desc">${data.flagged_count} of ${data.total_sessions} sessions had at least one detected issue</div></div>
       <div class="stat-card accent-purple"><div class="label">Reliability Score <span class="info-hint" title="How reliably the agent completed tasks without errors. Higher is better (0 to 100).">?</span></div><div class="value">${reliabilityScore}</div><div class="stat-desc">How reliably the agent completed tasks without errors. Higher is better.</div></div>
     </div>
 
