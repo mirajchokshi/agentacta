@@ -1211,7 +1211,7 @@ async function viewStats() {
       <div class="config-card"><div class="config-label">Storage Mode</div><div class="config-value">${escHtml(data.storageMode || 'reference')}</div></div>
       <div class="config-card"><div class="config-label">DB Size</div><div class="config-value" id="dbSizeValue">${escHtml(data.dbSize?.display || 'N/A')}</div></div>
     </div>
-    <p class="settings-help" style="margin-bottom:var(--space-sm)">Date range: ${fmtDate(data.dateRange?.earliest)} — ${fmtDate(data.dateRange?.latest)}</p>
+    <p class="settings-help" style="margin-bottom:var(--space-sm)">Date range: ${fmtDate(data.dateRange?.earliest)} to ${fmtDate(data.dateRange?.latest)}</p>
     <div class="settings-maintenance">
       <button class="export-btn" id="optimizeDbBtn">Optimize Database</button>
       <span id="optimizeDbStatus" class="settings-maintenance-status"></span>
@@ -1549,10 +1549,10 @@ const SIGNAL_LABELS = {
 };
 
 const SIGNAL_DESCRIPTIONS = {
-  tool_retry_loop: 'The agent called the same tool many times in a row — it may have been stuck in a loop',
+  tool_retry_loop: 'The agent called the same tool many times in a row, suggesting it was stuck in a retry loop',
   session_bail: 'The agent ran many actions but never wrote or edited any files',
   high_error_rate: 'More than 30% of tool calls returned errors',
-  long_prompt_short_session: 'A very short prompt led to a long session — the agent may have lacked enough context',
+  long_prompt_short_session: 'A very short prompt led to a long session, suggesting the agent lacked sufficient context',
   no_completion: 'The session ended mid-action instead of finishing with a response'
 };
 
@@ -1572,8 +1572,9 @@ function renderSignalTag(sig) {
 }
 
 function renderConfusionBadge(score) {
+  const reliability = 100 - score;
   const cls = score >= 60 ? 'confusion-red' : score >= 30 ? 'confusion-yellow' : 'confusion-green';
-  return `<span class="confusion-badge ${cls}" title="Struggle score (0–100): higher means the agent had more difficulty completing the task">${score}</span>`;
+  return `<span class="confusion-badge ${cls}" title="Reliability score (0 to 100): higher means the agent completed tasks with fewer errors">${reliability}</span>`;
 }
 
 function renderInsightsPanel(insights) {
@@ -1611,26 +1612,22 @@ async function viewInsights() {
     return;
   }
 
-  // Signal breakdown data
-  const signalTypes = Object.keys(SIGNAL_LABELS);
+  // Signal breakdown data — sorted by count descending
+  const signalTypes = Object.keys(SIGNAL_LABELS).sort((a, b) => (data.signal_counts[b] || 0) - (data.signal_counts[a] || 0));
   const maxSignalCount = Math.max(1, ...signalTypes.map(t => data.signal_counts[t] || 0));
 
-  // Most common signal
-  let mostCommon = 'None';
-  let mostCommonCount = 0;
-  for (const [type, count] of Object.entries(data.signal_counts || {})) {
-    if (count > mostCommonCount) {
-      mostCommon = SIGNAL_LABELS[type] || type;
-      mostCommonCount = count;
-    }
-  }
+  // Issue rate
+  const issueRate = data.total_sessions > 0 ? Math.round((data.flagged_count / data.total_sessions) * 100) : 0;
+
+  // Reliability score (inverted struggle score)
+  const reliabilityScore = 100 - (data.avg_confusion_score || 0);
 
   let html = `<div class="page-title">Insights</div>
 
     <div class="stat-grid">
       <div class="stat-card accent-red"><div class="label">Sessions with Issues</div><div class="value">${data.flagged_count} <span style="font-size:14px;font-weight:500;opacity:0.6">/ ${data.total_sessions}</span></div></div>
-      <div class="stat-card accent-amber"><div class="label">Most Common Issue</div><div class="value" style="font-size:20px">${escHtml(mostCommon)}</div></div>
-      <div class="stat-card accent-purple"><div class="label">Avg Struggle Score <span class="info-hint" title="How much difficulty agents had on average (0–100). Higher means more problems like errors, retries, or incomplete work.">?</span></div><div class="value">${data.avg_confusion_score}</div></div>
+      <div class="stat-card accent-amber"><div class="label">Issue Rate <span class="info-hint" title="Share of sessions with at least one detected issue">?</span></div><div class="value">${issueRate}%</div><div class="stat-desc">Share of sessions with at least one detected issue</div></div>
+      <div class="stat-card accent-purple"><div class="label">Reliability Score <span class="info-hint" title="How reliably the agent completed tasks without errors. Higher is better (0 to 100).">?</span></div><div class="value">${reliabilityScore}</div><div class="stat-desc">How reliably the agent completed tasks without errors. Higher is better.</div></div>
     </div>
 
     <div class="section-label">Issue Types</div>
@@ -1640,9 +1637,15 @@ async function viewInsights() {
         const pct = Math.round((count / maxSignalCount) * 100);
         const color = SIGNAL_COLORS[type] || 'muted';
         const desc = SIGNAL_DESCRIPTIONS[type] || '';
-        return `<div class="signal-bar-row"${desc ? ` title="${escHtml(desc)}"` : ''}>
+        const barColor = color === 'amber' ? 'var(--amber)' : color === 'red' ? 'var(--red)' : 'var(--text-tertiary)';
+        return `<div class="signal-lollipop-row"${desc ? ` title="${escHtml(desc)}"` : ''}>
           <span class="signal-bar-label">${SIGNAL_LABELS[type]}</span>
-          <div class="signal-bar-track"><div class="signal-bar-fill signal-bar-${color}" style="width:${pct}%"></div></div>
+          <div class="signal-lollipop-track">
+            <svg width="100%" height="20" class="signal-lollipop-svg">
+              <line x1="0" y1="10" x2="${pct}%" y2="10" stroke="${barColor}" stroke-width="2"/>
+              <circle cx="${pct}%" cy="10" r="5" fill="${barColor}"/>
+            </svg>
+          </div>
           <span class="signal-bar-count">${count}</span>
         </div>`;
       }).join('')}

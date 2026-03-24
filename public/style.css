@@ -1928,7 +1928,7 @@ mark {
 .settings-gear svg { width: 16px; height: 16px; }
 .settings-gear:hover { color: var(--text-primary); background: var(--hover-bg); }
 
-.signal-bar-row {
+.signal-lollipop-row {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1940,21 +1940,14 @@ mark {
   width: 130px;
   flex-shrink: 0;
 }
-.signal-bar-track {
+.signal-lollipop-track {
   flex: 1;
-  height: 8px;
-  border-radius: 4px;
-  background: var(--border-color);
-  overflow: hidden;
+  height: 20px;
 }
-.signal-bar-fill {
-  height: 100%;
-  border-radius: 4px;
-  transition: width 0.4s ease;
+.signal-lollipop-svg {
+  display: block;
+  overflow: visible;
 }
-.signal-bar-amber  { background: var(--amber); }
-.signal-bar-red    { background: var(--red); }
-.signal-bar-muted  { background: var(--text-tertiary); }
 .signal-bar-count {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -1962,6 +1955,12 @@ mark {
   width: 36px;
   text-align: right;
   flex-shrink: 0;
+}
+.stat-desc {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 4px;
+  line-height: 1.3;
 }
 
 .insight-row { cursor: pointer; }
