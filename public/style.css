@@ -1911,3 +1911,85 @@ mark {
   .cmdk-item-sub { display: none; }
   .cmdk-item-meta { font-size: 10px; }
 }
+
+/* ── Insights ── */
+.settings-gear {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, background 0.15s;
+}
+.settings-gear svg { width: 16px; height: 16px; }
+.settings-gear:hover { color: var(--text-primary); background: var(--hover-bg); }
+
+.signal-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.signal-bar-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+  width: 130px;
+  flex-shrink: 0;
+}
+.signal-bar-track {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--border-color);
+  overflow: hidden;
+}
+.signal-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.4s ease;
+}
+.signal-bar-orange { background: #f97316; }
+.signal-bar-red    { background: #ef4444; }
+.signal-bar-yellow { background: #eab308; }
+.signal-bar-gray   { background: #6b7280; }
+.signal-bar-count {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  width: 36px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.insight-row { cursor: pointer; }
+.insight-row:hover { background: var(--hover-bg); }
+.insight-callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 13px;
+}
+.insight-callout:last-child { border-bottom: none; }
+.insight-detail { color: var(--text-secondary); }
+.insights-signals { margin-top: 8px; }
+
+.confusion-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.confusion-green  { background: #dcfce7; color: #166534; }
+.confusion-yellow { background: #fef9c3; color: #854d0e; }
+.confusion-red    { background: #fee2e2; color: #991b1b; }
+[data-theme="dark"] .confusion-green  { background: #14532d; color: #86efac; }
+[data-theme="dark"] .confusion-yellow { background: #713f12; color: #fde68a; }
+[data-theme="dark"] .confusion-red    { background: #7f1d1d; color: #fca5a5; }

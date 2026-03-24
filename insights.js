@@ -19,29 +19,33 @@ function analyzeSession(db, sessionId) {
   const signals = [];
 
   // 1. tool_retry_loop: Same tool called 3+ times consecutively
+  // Group by tool, keep highest streak count per tool
   const toolCalls = events.filter(e => e.type === 'tool_call');
   if (toolCalls.length >= 3) {
+    const worstStreakByTool = {};
     let consecutive = 1;
     for (let i = 1; i < toolCalls.length; i++) {
       if (toolCalls[i].tool_name === toolCalls[i - 1].tool_name) {
         consecutive++;
-        if (consecutive >= 3) {
-          signals.push({
-            type: 'tool_retry_loop',
-            tool: toolCalls[i].tool_name,
-            count: consecutive
-          });
-          // Continue counting but don't add duplicate signals for same streak
-          while (i + 1 < toolCalls.length && toolCalls[i + 1].tool_name === toolCalls[i].tool_name) {
-            consecutive++;
-            i++;
-            signals[signals.length - 1].count = consecutive;
-          }
-          consecutive = 1;
-        }
       } else {
+        if (consecutive >= 3) {
+          const tool = toolCalls[i - 1].tool_name;
+          if (!worstStreakByTool[tool] || consecutive > worstStreakByTool[tool]) {
+            worstStreakByTool[tool] = consecutive;
+          }
+        }
         consecutive = 1;
       }
+    }
+    // Check final streak
+    if (consecutive >= 3) {
+      const tool = toolCalls[toolCalls.length - 1].tool_name;
+      if (!worstStreakByTool[tool] || consecutive > worstStreakByTool[tool]) {
+        worstStreakByTool[tool] = consecutive;
+      }
+    }
+    for (const [tool, count] of Object.entries(worstStreakByTool)) {
+      signals.push({ type: 'tool_retry_loop', tool, count });
     }
   }
 
