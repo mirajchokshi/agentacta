@@ -1568,7 +1568,7 @@ function renderSignalTag(sig) {
   const label = SIGNAL_LABELS[sig.type] || sig.type;
   const color = SIGNAL_COLORS[sig.type] || 'muted';
   const desc = SIGNAL_DESCRIPTIONS[sig.type] || '';
-  return `<span class="signal-tag signal-${color}"${desc ? ` title="${escHtml(desc)}"` : ''}>${escHtml(label)}</span>`;
+  return `<span class="signal-tag signal-${color}"${desc ? ` title="${escHtml(desc)}"` : ''}><span class="signal-dot"></span>${escHtml(label)}</span>`;
 }
 
 function renderConfusionBadge(score) {

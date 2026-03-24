@@ -606,18 +606,26 @@ body.cmdk-open {
 }
 
 .signal-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 11px;
   font-weight: 500;
-  padding: 2px 10px;
-  border-radius: 10px;
+  color: var(--text-secondary);
   white-space: nowrap;
 }
-.signal-amber  { color: var(--amber);          background: var(--amber-soft); }
-.signal-red    { color: var(--red);            background: var(--red-soft); }
-.signal-purple { color: var(--purple);         background: var(--purple-soft); }
-.signal-teal   { color: var(--teal);           background: var(--teal-soft); }
-.signal-accent { color: var(--accent);         background: var(--accent-soft); }
-.signal-muted  { color: var(--text-secondary); background: var(--bg-elevated); }
+.signal-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.signal-amber  .signal-dot { background: var(--amber); }
+.signal-red    .signal-dot { background: var(--red); }
+.signal-purple .signal-dot { background: var(--purple); }
+.signal-teal   .signal-dot { background: var(--teal); }
+.signal-accent .signal-dot { background: var(--accent); }
+.signal-muted  .signal-dot { background: var(--text-tertiary); }
 
 .session-type {
   font-size: 11px;
