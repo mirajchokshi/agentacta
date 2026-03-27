@@ -57,6 +57,8 @@ function loadConfig() {
     }
   }
 
+  // In demo mode, ignore file-based sessionsPath so live data doesn't bleed in
+  if (process.env.AGENTACTA_DEMO_MODE) delete fileConfig.sessionsPath;
   const config = { ...DEFAULTS, ...fileConfig };
 
   // Env var overrides (highest priority)

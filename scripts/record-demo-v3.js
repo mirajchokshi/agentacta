@@ -14,7 +14,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-const BASE = 'http://localhost:4003';
+const BASE = 'http://localhost:4099';
 const REPO = path.join(__dirname, '..');
 const SCREENSHOTS_DIR = path.join(REPO, 'screenshots');
 const FRAMES_DIR = path.join(os.tmpdir(), 'agentacta-demo-frames');
@@ -39,7 +39,7 @@ function startServer() {
     const proc = spawn('node', ['index.js', '--demo'], {
       cwd: REPO,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, PORT: '4003' }
+      env: { ...process.env, PORT: '4099' }
     });
 
     let started = false;
@@ -49,7 +49,7 @@ function startServer() {
 
     const onData = (data) => {
       const line = data.toString();
-      if (!started && (line.includes('listening') || line.includes('4003') || line.includes('running'))) {
+      if (!started && (line.includes('listening') || line.includes('4099') || line.includes('running'))) {
         started = true;
         clearTimeout(timeout);
         resolve(proc);
@@ -65,7 +65,7 @@ function startServer() {
       try {
         const http = require('http');
         await new Promise((res, rej) => {
-          const req = http.get(BASE, () => { res(); });
+          const req = http.get('http://localhost:4099', () => { res(); });
           req.on('error', rej);
           req.setTimeout(500, () => { req.destroy(); rej(); });
         });
@@ -173,15 +173,28 @@ async function runWalkthrough(page) {
   await page.evaluate(() => window.scrollBy(0, 300));
   await sleep(1000);
 
-  // Scene 5: Timeline
-  console.log('  📍 Scene 5: Timeline');
+  // Scene 5: Insights
+  console.log('  📍 Scene 5: Insights');
+  await page.evaluate(() => document.querySelector('[data-view="insights"]').click());
+  await sleep(2000);
+  // Tap a lollipop row to reveal description
+  await page.evaluate(() => {
+    const row = document.querySelector('.signal-lollipop-expandable');
+    if (row) row.click();
+  });
+  await sleep(1200);
+  await page.evaluate(() => window.scrollBy(0, 300));
+  await sleep(1500);
+
+  // Scene 6: Timeline
+  console.log('  📍 Scene 6: Timeline');
   await page.evaluate(() => document.querySelector('[data-view="timeline"]').click());
   await sleep(2000);
   await page.evaluate(() => window.scrollBy(0, 250));
   await sleep(1500);
 
-  // Scene 6: Files
-  console.log('  📍 Scene 6: Files');
+  // Scene 7: Files
+  console.log('  📍 Scene 7: Files');
   await page.evaluate(() => document.querySelector('[data-view="files"]').click());
   await sleep(1500);
   await page.evaluate(() => {
@@ -189,11 +202,6 @@ async function runWalkthrough(page) {
     if (toggle) toggle.click();
   });
   await sleep(2000);
-
-  // Scene 7: Stats
-  console.log('  📍 Scene 7: Stats');
-  await page.evaluate(() => document.querySelector('[data-view="stats"]').click());
-  await sleep(2500);
 
   // Scene 8: Back to overview
   console.log('  📍 Scene 8: Back to overview');

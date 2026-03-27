@@ -20,6 +20,7 @@ if (process.argv.includes('--demo')) {
   }
   process.env.AGENTACTA_SESSIONS_PATH = demoDir;
   process.env.AGENTACTA_DB_PATH = path.join(demoDir, 'demo.db');
+  process.env.AGENTACTA_DEMO_MODE = '1'; // signal to config.js to skip file-based sessionsPath
   console.log(`Demo mode: using sessions from ${demoDir}`);
 }
 
