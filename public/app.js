@@ -1600,7 +1600,7 @@ function renderInsightsPanel(insights) {
         else if (sig.type === 'session_bail') detail = `${sig.tool_calls} tool calls with no file writes`;
         else if (sig.type === 'high_error_rate') detail = `${sig.rate}% error rate (${sig.error_count}/${sig.total})`;
         else if (sig.type === 'long_prompt_short_session') detail = `${sig.prompt_words} word prompt, ${sig.tool_calls} tool calls`;
-        else if (sig.type === 'no_completion') detail = `Ended on ${sig.last_event_type}${sig.last_tool ? ': ' + sig.last_tool : ''}`;
+        else if (sig.type === 'no_completion') detail = `Ended on ${escHtml(sig.last_event_type)}${sig.last_tool ? ': ' + escHtml(sig.last_tool) : ''}`;
         return `<div class="insight-callout">
           ${renderSignalTag(sig)}
           <span class="insight-detail">${detail}</span>

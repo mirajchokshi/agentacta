@@ -188,11 +188,18 @@ function reindexRecursiveDir(dir) {
   try {
     const files = listJsonlFiles(dir.path, true);
     let changed = 0;
+    const upsert = db.prepare('INSERT OR REPLACE INTO session_insights (session_id, signals, confusion_score, flagged, computed_at) VALUES (?, ?, ?, ?, ?)');
     for (const filePath of files) {
       const result = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
       if (!result.skipped) {
         changed++;
-        if (result.sessionId) sseEmitter.emit('session-update', result.sessionId);
+        if (result.sessionId) {
+          try {
+            const insight = analyzeSession(db, result.sessionId);
+            if (insight) upsert.run(insight.session_id, JSON.stringify(insight.signals), insight.confusion_score, insight.flagged ? 1 : 0, insight.computed_at);
+          } catch {}
+          sseEmitter.emit('session-update', result.sessionId);
+        }
       }
     }
     if (changed > 0) console.log(`Live re-indexed ${changed} files (${dir.agent})`);
@@ -252,6 +259,7 @@ const server = http.createServer((req, res) => {
     if (pathname === '/api/reindex') {
       const { indexAll } = require('./indexer');
       const result = indexAll(db, config);
+      try { analyzeAll(db); } catch (e) { console.error('Insights recompute error:', e.message); }
       return json(res, { ok: true, sessions: result.sessions, events: result.events });
     }
 
