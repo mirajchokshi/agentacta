@@ -1,6 +1,6 @@
 {
   "name": "agentacta",
-  "version": "2026.3.26",
+  "version": "2026.3.27",
   "description": "Audit trail and search engine for AI agent sessions",
   "main": "index.js",
   "bin": {
@@ -11,6 +11,9 @@
     "indexer.js",
     "db.js",
     "config.js",
+    "project-attribution.js",
+    "delta-attribution-context.js",
+    "insights.js",
     "public/",
     "LICENSE",
     "README.md"
