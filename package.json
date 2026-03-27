@@ -1,6 +1,6 @@
 {
   "name": "agentacta",
-  "version": "2026.3.12-r2",
+  "version": "2026.3.26",
   "description": "Audit trail and search engine for AI agent sessions",
   "main": "index.js",
   "bin": {

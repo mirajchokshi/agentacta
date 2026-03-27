@@ -1,5 +1,27 @@
 # Changelog
 
+## [2026.3.26] - 2026-03-26
+
+### Added
+- **Insights tab overhaul** — severity-scaled reliability scoring: each signal now contributes based on actual intensity (retry count, error rate, tool call volume) rather than a fixed weight
+- **Issue rate badge** — shows what % of possible issue types were detected in a session
+- **Tap-to-reveal signal descriptions** — mobile-friendly alternative to hover tooltips on the issue type chart
+- **Floating mobile nav** — bottom nav is now a floating pill with accent-colored active state
+- **Settings gear icon** — moved from sidebar nav to header (desktop) and mobile toolbar
+
+### Changed
+- Nav order: Overview → Sessions → Insights → Timeline → Files
+- Insights nav icon changed from lightbulb to pulse/activity line
+- Mobile search button now triggers the command palette (⌘K)
+- Session cards in Insights show issue rate + reliability as inline text, signal tags on their own row
+- Sessions sorted by issue rate descending (then reliability as tiebreaker)
+- `renderConfusionBadge` renamed to `renderReliabilityBadge` for clarity
+- README updated: Insights section, `/api/insights` in API table, mobile nav description
+
+### Fixed
+- Mobile search and theme toggle buttons were not wired to any handler
+- Settings page had no active highlight state
+
 ## [2026.3.12-r2] - 2026-03-12
 
 ### Added
