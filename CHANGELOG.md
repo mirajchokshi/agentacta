@@ -1,5 +1,10 @@
 # Changelog
 
+## [2026.3.27] - 2026-03-27
+
+### Fixed
+- **npm package completeness** — `project-attribution.js`, `delta-attribution-context.js`, and `insights.js` were required by `index.js` but missing from the `files` array in `package.json`. The published npm package was broken for `npx` installs; this release fixes that.
+
 ## [2026.3.26] - 2026-03-26
 
 ### Added
