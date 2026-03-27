@@ -239,6 +239,10 @@ function updateNavActive(view) {
   $$('.nav-item').forEach(i => i.classList.remove('active'));
   const navItem = $(`.nav-item[data-view="${view}"]`);
   if (navItem) navItem.classList.add('active');
+  // Settings gear buttons
+  const isSettings = view === 'stats';
+  document.getElementById('settings-btn')?.classList.toggle('active', isSettings);
+  document.getElementById('settings-btn-mobile')?.classList.toggle('active', isSettings);
 }
 
 function updateMobileNavActive(view) {
@@ -1571,10 +1575,16 @@ function renderSignalTag(sig) {
   return `<span class="signal-tag signal-${color}"${desc ? ` title="${escHtml(desc)}"` : ''}><span class="signal-dot"></span>${escHtml(label)}</span>`;
 }
 
-function renderConfusionBadge(score) {
+function renderReliabilityBadge(score) {
   const reliability = 100 - score;
-  const cls = score >= 60 ? 'confusion-red' : score >= 30 ? 'confusion-yellow' : 'confusion-green';
-  return `<span class="confusion-badge ${cls}" title="Reliability score (0 to 100): higher means the agent completed tasks with fewer errors">${reliability}</span>`;
+  return `<span class="insight-score-value" title="Reliability score: higher means fewer errors">${reliability}</span>`;
+}
+
+function renderIssueRateBadge(signals) {
+  const TOTAL_SIGNAL_TYPES = 5;
+  const uniqueTypes = new Set((signals || []).map(s => s.type)).size;
+  const rate = Math.round((uniqueTypes / TOTAL_SIGNAL_TYPES) * 100);
+  return `<span class="insight-score-value" title="${uniqueTypes} of ${TOTAL_SIGNAL_TYPES} issue types detected">${rate}%</span>`;
 }
 
 function renderInsightsPanel(insights) {
@@ -1582,7 +1592,7 @@ function renderInsightsPanel(insights) {
     return `<div class="insights-panel insights-clean"><span style="color:var(--text-tertiary);font-size:13px">No issues detected</span></div>`;
   }
   return `<div class="insights-panel">
-    <div class="section-label" style="margin-top:0">Session Health ${renderConfusionBadge(insights.confusion_score)}</div>
+    <div class="section-label" style="margin-top:0">Session Health ${renderReliabilityBadge(insights.confusion_score)}</div>
     <div class="insights-signals">
       ${insights.signals.map(sig => {
         let detail = '';
@@ -1626,7 +1636,7 @@ async function viewInsights() {
 
     <div class="stat-grid">
       <div class="stat-card accent-amber"><div class="label">Issue Rate</div><div class="value">${issueRate}%</div><div class="stat-desc">${data.flagged_count} of ${data.total_sessions} sessions had at least one detected issue</div></div>
-      <div class="stat-card accent-purple"><div class="label">Reliability Score</div><div class="value">${reliabilityScore}</div><div class="stat-desc">How reliably the agent completed tasks without issues. Weighted across signal severity, capped at 100. Higher is better.</div></div>
+      <div class="stat-card accent-purple"><div class="label">Reliability Score</div><div class="value">${reliabilityScore}</div><div class="stat-desc">How often the agent completed tasks cleanly, out of 100</div></div>
     </div>
 
     <div class="section-label">Issue Types</div>
@@ -1637,35 +1647,42 @@ async function viewInsights() {
         const color = SIGNAL_COLORS[type] || 'muted';
         const desc = SIGNAL_DESCRIPTIONS[type] || '';
         const barColor = color === 'muted' ? 'var(--text-tertiary)' : `var(--${color})`;
-        return `<div class="signal-lollipop-row"${desc ? ` title="${escHtml(desc)}"` : ''}>
-          <span class="signal-bar-label">${SIGNAL_LABELS[type]}</span>
-          <div class="signal-lollipop-track">
-            <svg width="100%" height="20" class="signal-lollipop-svg">
-              <line x1="0" y1="10" x2="${pct}%" y2="10" stroke="${barColor}" stroke-width="2"/>
-              <circle cx="${pct}%" cy="10" r="5" fill="${barColor}"/>
-            </svg>
+        return `<div class="signal-lollipop-row${desc ? ' signal-lollipop-expandable' : ''}" data-desc="${escHtml(desc)}">
+          <div class="signal-lollipop-main">
+            <span class="signal-bar-label">${SIGNAL_LABELS[type]}</span>
+            <div class="signal-lollipop-track">
+              <svg width="100%" height="20" class="signal-lollipop-svg">
+                <line x1="0" y1="10" x2="${pct}%" y2="10" stroke="${barColor}" stroke-width="2"/>
+                <circle cx="${pct}%" cy="10" r="5" fill="${barColor}"/>
+              </svg>
+            </div>
+            <span class="signal-bar-count">${count}</span>
           </div>
-          <span class="signal-bar-count">${count}</span>
+          ${desc ? `<div class="signal-lollipop-desc">${escHtml(desc)}</div>` : ''}
         </div>`;
       }).join('')}
     </div>
 
     <div class="section-label">Sessions with Issues (${data.flagged_count})</div>
     <div id="insightsList">
-      ${data.top_flagged.length ? data.top_flagged.map(s => {
+      ${data.top_flagged.length ? [...data.top_flagged].sort((a, b) => {
+        const aRate = new Set((a.signals||[]).map(s=>s.type)).size;
+        const bRate = new Set((b.signals||[]).map(s=>s.type)).size;
+        return bRate - aRate || b.confusion_score - a.confusion_score;
+      }).map(s => {
         const summary = cleanSessionSummary(s.summary, '');
         return `<div class="session-item insight-row" data-id="${escHtml(s.session_id)}">
           <div class="session-header">
             <span class="session-time">${fmtTime(s.start_time)}</span>
-            <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-              ${renderConfusionBadge(s.confusion_score)}
-              ${s.signals.map(sig => renderSignalTag(sig)).join('')}
-            </span>
+            <span class="insight-scores">issue rate ${renderIssueRateBadge(s.signals)} · reliability ${renderReliabilityBadge(s.confusion_score)}</span>
           </div>
           <div class="session-summary">${escHtml(truncate(summary, 120))}</div>
           <div class="session-meta">
-            ${s.agent ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
-            ${s.model ? `<span class="session-model">${escHtml(s.model)}</span>` : ''}
+            <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+              ${s.agent ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
+              ${s.model ? `<span class="session-model">${escHtml(s.model)}</span>` : ''}
+            </span>
+            <span class="insight-signal-tags">${s.signals.map(sig => renderSignalTag(sig)).join('')}</span>
           </div>
         </div>`;
       }).join('') : '<div class="empty"><p>No flagged sessions found</p></div>'}
@@ -1677,6 +1694,12 @@ async function viewInsights() {
 
   $$('.session-item', content).forEach(item => {
     item.addEventListener('click', () => viewSession(item.dataset.id));
+  });
+
+  $$('.signal-lollipop-expandable', content).forEach(row => {
+    row.addEventListener('click', () => {
+      row.classList.toggle('signal-lollipop-open');
+    });
   });
 }
 
@@ -1944,6 +1967,10 @@ function openCmdk() {
 
 initTheme();
 document.getElementById('theme-toggle')?.addEventListener('click', toggleTheme);
+document.getElementById('theme-toggle-mobile')?.addEventListener('click', toggleTheme);
+document.getElementById('mobile-search-btn')?.addEventListener('click', () => openCmdk());
+document.getElementById('settings-btn')?.addEventListener('click', () => { window._lastView = 'stats'; updateNavActive('stats'); setHash('stats'); viewStats(); });
+document.getElementById('settings-btn-mobile')?.addEventListener('click', () => { window._lastView = 'stats'; updateNavActive('stats'); setHash('stats'); viewStats(); });
 document.getElementById('cmdkBtn')?.addEventListener('click', () => openCmdk());
 
 

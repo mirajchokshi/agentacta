@@ -1,5 +1,7 @@
 'use strict';
 
+// SIGNAL_WEIGHTS kept for reference — no longer used directly in scoring.
+// Scoring is now severity-scaled per signal (see analyzeSession).
 const SIGNAL_WEIGHTS = {
   tool_retry_loop: 30,
   session_bail: 25,
@@ -108,13 +110,36 @@ function analyzeSession(db, sessionId) {
     }
   }
 
-  // Compute confusion_score
+  // Compute confusion_score — severity-scaled per signal
+  function clamp(val, min, max) { return Math.max(min, Math.min(max, val)); }
+  function lerp(t, min, max) { return min + clamp(t, 0, 1) * (max - min); }
+
   const seenTypes = new Set();
   let confusionScore = 0;
   for (const sig of signals) {
-    if (!seenTypes.has(sig.type)) {
+    if (seenTypes.has(sig.type)) continue;
+    seenTypes.add(sig.type);
+
+    if (sig.type === 'tool_retry_loop') {
+      // streak 3 = base 20, streak 10+ = 40
+      const t = clamp((sig.count - 3) / 7, 0, 1);
+      confusionScore += Math.round(lerp(t, 20, 40));
+    } else if (sig.type === 'session_bail') {
+      // 20 tool calls = base 15, 60+ = 30
+      const t = clamp((sig.tool_calls - 20) / 40, 0, 1);
+      confusionScore += Math.round(lerp(t, 15, 30));
+    } else if (sig.type === 'high_error_rate') {
+      // 31% error rate = base 10, 100% = 35
+      const t = clamp((sig.rate - 30) / 70, 0, 1);
+      confusionScore += Math.round(lerp(t, 10, 35));
+    } else if (sig.type === 'long_prompt_short_session') {
+      // 30 tool calls = base 10, 80+ = 20
+      const t = clamp((sig.tool_calls - 30) / 50, 0, 1);
+      confusionScore += Math.round(lerp(t, 10, 20));
+    } else if (sig.type === 'no_completion') {
+      confusionScore += 10;
+    } else {
       confusionScore += SIGNAL_WEIGHTS[sig.type] || 0;
-      seenTypes.add(sig.type);
     }
   }
   confusionScore = Math.min(confusionScore, 100);
