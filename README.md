@@ -39,7 +39,8 @@ AgentActa gives you one place to inspect the full trail.
 - 🌗 Light and dark themes
 - 📊 Stats for sessions, messages, tools, and tokens
 - ⚡ Live indexing via file watching
-- 📱 Mobile-friendly UI
+- 📱 Mobile-optimized UI with floating navigation
+- 🏥 Session health scoring — reliability scores, issue detection, and per-signal breakdowns
 - 💡 Search suggestions based on real data
 - ⌨️ Command palette (⌘K / Ctrl+K) for quick navigation
 - 🎨 Theme settings (system, light, dark, OLED)
@@ -89,6 +90,14 @@ Session types get tagged so noisy categories are easier to spot (cron, sub-agent
 ### Timeline
 
 Pick a date, see everything that happened, newest first. Today's view updates live as new events come in.
+
+### Insights
+
+The Insights tab surfaces session health across your entire history.
+
+It tracks five issue signals — repeated tool loops, sessions that produced no output, high error rates, vague instructions, and incomplete sessions. Each signal is severity-scaled so scores reflect how bad the problem actually was, not just whether it occurred.
+
+The reliability score (0–100) is the inverse of the confusion score: higher means the agent completed work cleanly. The issue rate shows what percentage of possible signal types were detected in a session.
 
 ### File Activity
 
@@ -167,6 +176,7 @@ Default config (auto-generated on first run — session directories are detected
 | `GET /api/timeline/stream?after=<ts>` | SSE stream for live timeline updates |
 | `POST /api/maintenance` | VACUUM + WAL checkpoint (returns size before/after) |
 | `GET /api/health` | Server status, version, uptime, session count |
+| `GET /api/insights` | Session health summary — reliability scores, issue counts, top flagged sessions |
 | `GET /api/export/search?q=<query>&format=md` | Export search results |
 
 ### Context API

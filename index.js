@@ -20,6 +20,7 @@ if (process.argv.includes('--demo')) {
   }
   process.env.AGENTACTA_SESSIONS_PATH = demoDir;
   process.env.AGENTACTA_DB_PATH = path.join(demoDir, 'demo.db');
+  process.env.AGENTACTA_DEMO_MODE = '1'; // signal to config.js to skip file-based sessionsPath
   console.log(`Demo mode: using sessions from ${demoDir}`);
 }
 
@@ -28,6 +29,7 @@ const { open, init, createStmts } = require('./db');
 const { discoverSessionDirs, listJsonlFiles, indexFile } = require('./indexer');
 const { attributeSessionEvents, attributeEventDelta } = require('./project-attribution');
 const { loadDeltaAttributionContext } = require('./delta-attribution-context');
+const { analyzeSession, analyzeAll, getInsightsSummary } = require('./insights');
 
 const config = loadConfig();
 const PORT = config.port;
@@ -167,6 +169,14 @@ for (const dir of sessionDirs) {
   }
 }
 
+// Compute insights for all indexed sessions
+try {
+  analyzeAll(db);
+  console.log('Insights computed for all sessions');
+} catch (err) {
+  console.error('Error computing insights:', err.message);
+}
+
 console.log(`Watching ${sessionDirs.length} session directories`);
 
 // Debounce map: filePath -> timeout handle
@@ -178,11 +188,18 @@ function reindexRecursiveDir(dir) {
   try {
     const files = listJsonlFiles(dir.path, true);
     let changed = 0;
+    const upsert = db.prepare('INSERT OR REPLACE INTO session_insights (session_id, signals, confusion_score, flagged, computed_at) VALUES (?, ?, ?, ?, ?)');
     for (const filePath of files) {
       const result = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
       if (!result.skipped) {
         changed++;
-        if (result.sessionId) sseEmitter.emit('session-update', result.sessionId);
+        if (result.sessionId) {
+          try {
+            const insight = analyzeSession(db, result.sessionId);
+            if (insight) upsert.run(insight.session_id, JSON.stringify(insight.signals), insight.confusion_score, insight.flagged ? 1 : 0, insight.computed_at);
+          } catch {}
+          sseEmitter.emit('session-update', result.sessionId);
+        }
       }
     }
     if (changed > 0) console.log(`Live re-indexed ${changed} files (${dir.agent})`);
@@ -215,7 +232,10 @@ for (const dir of sessionDirs) {
           const result = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
           if (!result.skipped) {
             console.log(`Live re-indexed: ${filename} (${dir.agent})`);
-            if (result.sessionId) sseEmitter.emit('session-update', result.sessionId);
+            if (result.sessionId) {
+              try { analyzeSession(db, result.sessionId); const upsert = db.prepare('INSERT OR REPLACE INTO session_insights (session_id, signals, confusion_score, flagged, computed_at) VALUES (?, ?, ?, ?, ?)'); const insight = analyzeSession(db, result.sessionId); if (insight) upsert.run(insight.session_id, JSON.stringify(insight.signals), insight.confusion_score, insight.flagged ? 1 : 0, insight.computed_at); } catch {}
+              sseEmitter.emit('session-update', result.sessionId);
+            }
           }
         } catch (err) {
           console.error(`Error re-indexing ${filename}:`, err.message);
@@ -239,6 +259,7 @@ const server = http.createServer((req, res) => {
     if (pathname === '/api/reindex') {
       const { indexAll } = require('./indexer');
       const result = indexAll(db, config);
+      try { analyzeAll(db); } catch (e) { console.error('Insights recompute error:', e.message); }
       return json(res, { ok: true, sessions: result.sessions, events: result.events });
     }
 
@@ -763,6 +784,27 @@ const server = http.createServer((req, res) => {
         ORDER BY fa.timestamp DESC
       `).all(fp);
       json(res, { file: fp, sessions: rows });
+    }
+    else if (pathname === '/api/insights') {
+      const summary = getInsightsSummary(db);
+      return json(res, summary);
+    }
+    else if (pathname.match(/^\/api\/insights\/session\/[^/]+$/)) {
+      const id = pathname.split('/')[4];
+      const row = db.prepare('SELECT * FROM session_insights WHERE session_id = ?').get(id);
+      if (!row) {
+        // Compute on-the-fly if not yet analyzed
+        const result = analyzeSession(db, id);
+        if (!result) return json(res, { error: 'Session not found' }, 404);
+        return json(res, result);
+      }
+      return json(res, {
+        session_id: row.session_id,
+        signals: JSON.parse(row.signals || '[]'),
+        confusion_score: row.confusion_score,
+        flagged: !!row.flagged,
+        computed_at: row.computed_at
+      });
     }
     else if (!serveStatic(req, res)) {
       const index = path.join(PUBLIC, 'index.html');
