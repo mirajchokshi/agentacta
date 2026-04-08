@@ -5,7 +5,7 @@ const path = require('path');
 const os = require('os');
 
 const { open, init, createStmts } = require('../db');
-const { discoverSessionDirs, listJsonlFiles, indexFile } = require('../indexer');
+const { discoverSessionDirs, listJsonlFiles, indexFile, indexCronRunFile } = require('../indexer');
 
 const TMP = path.join(os.tmpdir(), `agentacta-test-idx-${Date.now()}`);
 const TEST_DB = path.join(TMP, 'test.db');
@@ -214,6 +214,92 @@ describe('indexer', () => {
     } finally {
       process.env.HOME = originalHome;
     }
+  });
+
+
+  it('keeps auto-discovered openclaw agent sessions even when sessionsPath is set', () => {
+    const originalHome = process.env.HOME;
+    const home = path.join(TMP, 'home-openclaw-merge');
+    const custom = path.join(home, 'custom-sessions');
+    const auto = path.join(home, '.openclaw', 'agents', 'helper', 'sessions');
+    fs.mkdirSync(custom, { recursive: true });
+    fs.mkdirSync(auto, { recursive: true });
+    process.env.HOME = home;
+
+    try {
+      const dirs = discoverSessionDirs({ sessionsPath: [custom] });
+      assert.ok(dirs.find(d => d.path === custom));
+      const autoDir = dirs.find(d => d.path === auto);
+      assert.ok(autoDir);
+      assert.strictEqual(autoDir.agent, 'helper');
+    } finally {
+      process.env.HOME = originalHome;
+    }
+  });
+
+  it('discovers cron runs as a synthetic fallback source', () => {
+    const originalHome = process.env.HOME;
+    const home = path.join(TMP, 'home-cron-runs');
+    const cronRuns = path.join(home, '.openclaw', 'cron', 'runs');
+    fs.mkdirSync(cronRuns, { recursive: true });
+    process.env.HOME = home;
+
+    try {
+      const dirs = discoverSessionDirs({});
+      const cronDir = dirs.find(d => d.path === cronRuns);
+      assert.ok(cronDir);
+      assert.strictEqual(cronDir.sourceType, 'cron-run');
+      assert.strictEqual(cronDir.agent, 'cron');
+    } finally {
+      process.env.HOME = originalHome;
+    }
+  });
+
+  it('indexes cron run metadata when no transcript exists', () => {
+    const fp = path.join(TMP, 'cron-run.jsonl');
+    fs.writeFileSync(fp, JSON.stringify({
+      ts: Date.parse('2026-03-08T12:05:00Z'),
+      runAtMs: Date.parse('2026-03-08T12:00:00Z'),
+      durationMs: 300000,
+      sessionId: 'cron-session-1',
+      sessionKey: 'agent:main:cron:job-1:run:cron-session-1',
+      summary: '[Sun 2026-03-08 07:00 CDT] Cron summary',
+      model: 'gpt-5.4',
+      usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }
+    }) + '\n');
+
+    const result = indexCronRunFile(db, fp, 'cron', stmts);
+    assert.strictEqual(result.sessionId, 'cron-session-1');
+
+    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('cron-session-1');
+    assert.strictEqual(sess.agent, 'main');
+    assert.strictEqual(sess.session_type, 'cron');
+    assert.strictEqual(sess.summary, 'Cron summary');
+    assert.strictEqual(sess.message_count, 0);
+    assert.strictEqual(sess.total_tokens, 15);
+  });
+
+  it('prefers transcript-backed sessions over cron metadata duplicates', () => {
+    const transcript = writeSession('cron-transcript.jsonl', [
+      { type: 'session', id: 'cron-preferred', timestamp: '2026-03-08T12:00:00Z', sessionType: 'cron' },
+      { type: 'message', id: 'msg-ctp-1', timestamp: '2026-03-08T12:01:00Z', message: { role: 'user', content: 'Real transcript prompt' } }
+    ]);
+    indexFile(db, transcript, 'main', stmts, false);
+
+    const fp = path.join(TMP, 'cron-duplicate.jsonl');
+    fs.writeFileSync(fp, JSON.stringify({
+      ts: Date.parse('2026-03-08T12:05:00Z'),
+      sessionId: 'cron-preferred',
+      sessionKey: 'agent:main:cron:job-2:run:cron-preferred',
+      summary: 'Synthetic duplicate summary'
+    }) + '\n');
+
+    const result = indexCronRunFile(db, fp, 'cron', stmts);
+    assert.ok(result.skipped);
+
+    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('cron-preferred');
+    assert.strictEqual(sess.summary, 'Real transcript prompt');
+    assert.strictEqual(sess.message_count, 1);
   });
 
   it('keeps codex discovery when override paths omit codex', () => {

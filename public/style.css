@@ -162,6 +162,8 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  overscroll-behavior-y: none;
+  overflow-x: hidden;
 }
 
 html.cmdk-open,
@@ -563,6 +565,8 @@ body.cmdk-open {
   cursor: pointer;
   transition: all var(--duration-normal) var(--ease-out);
   position: relative;
+  overflow: hidden;
+  max-width: 100%;
 }
 
 .session-item:hover {
@@ -1550,7 +1554,8 @@ mark {
     bottom: calc(24px + env(safe-area-inset-bottom, 0px));
     left: 50%;
     right: auto;
-    transform: translateX(-50%);
+    transform: translateX(-50%) translateZ(0);
+    -webkit-transform: translateX(-50%) translateZ(0);
     width: auto;
     height: auto;
     border-right: none;

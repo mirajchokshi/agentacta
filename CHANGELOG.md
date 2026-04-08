@@ -1,5 +1,16 @@
 # Changelog
 
+## [2026.4.8] - 2026-04-08
+
+### Added
+- **Cron run indexing** — OpenClaw cron runs (from `~/.openclaw/cron/runs/`) are now indexed as synthetic sessions, making them visible in AgentActa alongside regular sessions
+- **Custom agent session paths** — agent-specific session directories (e.g. `oakley-local`) are now auto-discovered and indexed when added to `sessionsPath` in config
+
+### Fixed
+- **Mobile nav stays fixed** — floating bottom nav no longer scrolls with the page on iOS Safari; added `translateZ(0)` to force GPU compositing layer
+- **No horizontal scroll on mobile** — sessions page could be swiped left/right on narrow screens; fixed with `overflow-x: hidden` on body and `overflow: hidden` on session cards
+- **Session dir deduplication** — improved `hasDir` to account for `sourceType` so cron-run dirs and transcript dirs at the same path are tracked independently
+
 ## [2026.3.27] - 2026-03-27
 
 ### Fixed

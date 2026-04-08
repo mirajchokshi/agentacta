@@ -29,14 +29,21 @@ function discoverSessionDirs(config) {
   const dirs = [];
   const home = process.env.HOME;
   const codexSessionsPath = path.join(home, '.codex/sessions');
+  const cronRunsPath = path.join(home, '.openclaw/cron/runs');
 
   function normalizedPath(p) {
     return path.resolve(p).replace(/[\\\/]+$/, '');
   }
 
-  function hasDir(targetPath) {
+  function hasDir(targetPath, sourceType = 'transcript') {
     const wanted = normalizedPath(targetPath);
-    return dirs.some(d => normalizedPath(d.path) === wanted);
+    return dirs.some(d => normalizedPath(d.path) === wanted && (d.sourceType || 'transcript') === sourceType);
+  }
+
+  function addDir(dir) {
+    if (!dir || !dir.path) return;
+    if (hasDir(dir.path, dir.sourceType || 'transcript')) return;
+    dirs.push(dir);
   }
 
   // Expand a single path into session dirs, handling Claude Code's per-project structure
@@ -52,14 +59,14 @@ function discoverSessionDirs(config) {
         const projDir = path.join(p, proj);
         if (fs.statSync(projDir).isDirectory()) {
           const hasJsonl = fs.readdirSync(projDir).some(f => f.endsWith('.jsonl'));
-          if (hasJsonl) dirs.push({ path: projDir, agent: 'claude-code' });
+          if (hasJsonl) addDir({ path: projDir, agent: 'claude-code' });
         }
       }
     } else if (normalized === normalizedCodex) {
       // Codex CLI stores nested YYYY/MM/DD directories and must be recursive.
-      dirs.push({ path: p, agent: 'codex-cli', recursive: true });
+      addDir({ path: p, agent: 'codex-cli', recursive: true });
     } else {
-      dirs.push({ path: p, agent: path.basename(path.dirname(p)) });
+      addDir({ path: p, agent: path.basename(path.dirname(p)) });
     }
   }
 
@@ -70,11 +77,6 @@ function discoverSessionDirs(config) {
       ? sessionsOverride
       : sessionsOverride.split(':');
     overridePaths.forEach(expandPath);
-    // Keep direct Codex visibility even when custom overrides omit it.
-    if (fs.existsSync(codexSessionsPath) && fs.statSync(codexSessionsPath).isDirectory() && !hasDir(codexSessionsPath)) {
-      dirs.push({ path: codexSessionsPath, agent: 'codex-cli', recursive: true });
-    }
-    if (dirs.length) return dirs;
   }
 
   // Auto-discover: ~/.openclaw/agents/*/sessions/
@@ -83,7 +85,7 @@ function discoverSessionDirs(config) {
     for (const agent of fs.readdirSync(oclawAgents)) {
       const sp = path.join(oclawAgents, agent, 'sessions');
       if (fs.existsSync(sp) && fs.statSync(sp).isDirectory()) {
-        dirs.push({ path: sp, agent });
+        addDir({ path: sp, agent });
       }
     }
   }
@@ -94,13 +96,18 @@ function discoverSessionDirs(config) {
   // Scan ~/.codex/sessions recursively (Codex CLI stores nested YYYY/MM/DD/*.jsonl)
   const codexSessions = codexSessionsPath;
   if (fs.existsSync(codexSessions) && fs.statSync(codexSessions).isDirectory()) {
-    dirs.push({ path: codexSessions, agent: 'codex-cli', recursive: true });
+    addDir({ path: codexSessions, agent: 'codex-cli', recursive: true });
+  }
+
+  // Fallback synthetic source for cron-backed runs that have metadata but no transcript JSONL.
+  if (fs.existsSync(cronRunsPath) && fs.statSync(cronRunsPath).isDirectory()) {
+    addDir({ path: cronRunsPath, agent: 'cron', sourceType: 'cron-run' });
   }
 
   if (!dirs.length) {
     // Fallback to hardcoded
     const fallback = path.join(home, '.openclaw/agents/main/sessions');
-    if (fs.existsSync(fallback)) dirs.push({ path: fallback, agent: 'main' });
+    if (fs.existsSync(fallback)) addDir({ path: fallback, agent: 'main' });
   }
 
   return dirs;
@@ -259,6 +266,86 @@ function extractProjectFromPath(filePath, config) {
   if (parts[0] === 'Shared') return aliasProject('shared', config);
 
   return null;
+}
+
+function indexCronRunFile(db, filePath, agentName, stmts) {
+  const stat = fs.statSync(filePath);
+  const mtime = stat.mtime.toISOString();
+
+  if (!REINDEX) {
+    const state = stmts.getState.get(filePath);
+    if (state && state.last_modified === mtime) return { skipped: true };
+  }
+
+  const raw = fs.readFileSync(filePath, 'utf8').trim();
+  if (!raw) return { skipped: true };
+
+  let meta;
+  try {
+    meta = JSON.parse(raw.split('\n').find(Boolean));
+  } catch {
+    return { skipped: true };
+  }
+
+  const sessionId = meta.sessionId;
+  if (!sessionId) return { skipped: true };
+
+  const existingRealSession = db.prepare('SELECT EXISTS(SELECT 1 FROM events WHERE session_id = ?) AS has_events').get(sessionId);
+  if (existingRealSession && existingRealSession.has_events) {
+    stmts.upsertState.run(filePath, 1, mtime);
+    return { skipped: true, preferredTranscript: true, sessionId };
+  }
+
+  const ts = typeof meta.ts === 'number' ? new Date(meta.ts).toISOString() : new Date().toISOString();
+  const runAt = typeof meta.runAtMs === 'number' ? new Date(meta.runAtMs).toISOString() : ts;
+  const durationMs = typeof meta.durationMs === 'number' ? meta.durationMs : null;
+  const endTime = ts;
+  const startTime = durationMs ? new Date(new Date(endTime).getTime() - durationMs).toISOString() : runAt;
+  const summary = stripLeadingDatetimePrefix(meta.summary || 'Cron run');
+  const sessionKey = typeof meta.sessionKey === 'string' ? meta.sessionKey : '';
+  const sessionKeyParts = sessionKey.split(':');
+  const inferredAgent = sessionKeyParts[0] === 'agent' && sessionKeyParts[1] ? sessionKeyParts[1] : agentName;
+  const model = meta.model || meta.provider || null;
+  const totalInputTokens = meta.usage && typeof meta.usage.input_tokens === 'number' ? meta.usage.input_tokens : 0;
+  const totalOutputTokens = meta.usage && typeof meta.usage.output_tokens === 'number' ? meta.usage.output_tokens : 0;
+  const totalTokens = meta.usage && typeof meta.usage.total_tokens === 'number'
+    ? meta.usage.total_tokens
+    : totalInputTokens + totalOutputTokens;
+
+  const commitIndex = db.transaction(() => {
+    if (stmts.deleteArchive) stmts.deleteArchive.run(sessionId);
+    stmts.deleteFileActivity.run(sessionId);
+    stmts.deleteEvents.run(sessionId);
+    stmts.deleteSession.run(sessionId);
+
+    stmts.upsertSession.run(
+      sessionId,
+      startTime,
+      endTime,
+      0,
+      0,
+      model,
+      summary,
+      inferredAgent,
+      'cron',
+      0,
+      totalTokens,
+      totalInputTokens,
+      totalOutputTokens,
+      0,
+      0,
+      null,
+      null,
+      null,
+      model ? JSON.stringify([model]) : null,
+      null
+    );
+
+    stmts.upsertState.run(filePath, 1, mtime);
+  });
+
+  commitIndex();
+  return { sessionId, synthetic: true };
 }
 
 function indexFile(db, filePath, agentName, stmts, archiveMode, config) {
@@ -664,7 +751,7 @@ function run() {
   let allFiles = [];
   for (const dir of sessionDirs) {
     const files = listJsonlFiles(dir.path, !!dir.recursive)
-      .map(filePath => ({ path: filePath, agent: dir.agent }));
+      .map(filePath => ({ path: filePath, agent: dir.agent, sourceType: dir.sourceType || 'transcript' }));
     allFiles.push(...files);
   }
 
@@ -673,7 +760,9 @@ function run() {
   const indexMany = db.transaction(() => {
     let indexed = 0;
     for (const f of allFiles) {
-      const result = indexFile(db, f.path, f.agent, stmts, archiveMode, config);
+      const result = f.sourceType === 'cron-run'
+        ? indexCronRunFile(db, f.path, f.agent, stmts)
+        : indexFile(db, f.path, f.agent, stmts, archiveMode, config);
       if (!result.skipped) {
         indexed++;
         if (indexed % 10 === 0) process.stdout.write('.');
@@ -706,7 +795,9 @@ function run() {
               const files = listJsonlFiles(dir.path, true);
               let changed = 0;
               for (const filePath of files) {
-                const result = indexFile(db, filePath, dir.agent, stmts, archiveMode, config);
+                const result = dir.sourceType === 'cron-run'
+                  ? indexCronRunFile(db, filePath, dir.agent, stmts)
+                  : indexFile(db, filePath, dir.agent, stmts, archiveMode, config);
                 if (!result.skipped) changed++;
               }
               if (changed > 0) console.log(`Re-indexed ${changed} files (${dir.agent})`);
@@ -723,7 +814,9 @@ function run() {
         if (!fs.existsSync(filePath)) return;
         setTimeout(() => {
           try {
-            const result = indexFile(db, filePath, dir.agent, stmts, archiveMode, config);
+            const result = dir.sourceType === 'cron-run'
+              ? indexCronRunFile(db, filePath, dir.agent, stmts)
+              : indexFile(db, filePath, dir.agent, stmts, archiveMode, config);
             if (!result.skipped) console.log(`Re-indexed: ${filename} (${dir.agent})`);
           } catch (err) {
             console.error(`Error re-indexing ${filename}:`, err.message);
@@ -745,7 +838,9 @@ function indexAll(db, config) {
     const files = listJsonlFiles(dir.path, !!dir.recursive);
     for (const filePath of files) {
       try {
-        const result = indexFile(db, filePath, dir.agent, stmts, archiveMode, config);
+        const result = dir.sourceType === 'cron-run'
+          ? indexCronRunFile(db, filePath, dir.agent, stmts)
+          : indexFile(db, filePath, dir.agent, stmts, archiveMode, config);
         if (!result.skipped) totalSessions++;
       } catch (err) {
         console.error(`Error indexing ${path.basename(filePath)}:`, err.message);
@@ -757,6 +852,6 @@ function indexAll(db, config) {
   return { sessions: stats.sessions, events: evStats.events, newSessions: totalSessions };
 }
 
-module.exports = { discoverSessionDirs, listJsonlFiles, indexFile, indexAll };
+module.exports = { discoverSessionDirs, listJsonlFiles, indexFile, indexCronRunFile, indexAll };
 
 if (require.main === module) run();
