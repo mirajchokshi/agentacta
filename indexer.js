@@ -290,6 +290,14 @@ function indexCronRunFile(db, filePath, agentName, stmts) {
   const sessionId = meta.sessionId;
   if (!sessionId) return { skipped: true };
 
+  // Guard: don't overwrite a session that was already indexed from a real transcript.
+  // Check both event presence AND session_type — a transcript session with zero events
+  // (e.g. header-only file) should still win over synthetic cron metadata.
+  const existingSession = db.prepare('SELECT session_type FROM sessions WHERE id = ?').get(sessionId);
+  if (existingSession && existingSession.session_type !== 'cron') {
+    stmts.upsertState.run(filePath, 1, mtime);
+    return { skipped: true, preferredTranscript: true, sessionId };
+  }
   const existingRealSession = db.prepare('SELECT EXISTS(SELECT 1 FROM events WHERE session_id = ?) AS has_events').get(sessionId);
   if (existingRealSession && existingRealSession.has_events) {
     stmts.upsertState.run(filePath, 1, mtime);
