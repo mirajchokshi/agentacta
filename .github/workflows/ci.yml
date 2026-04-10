@@ -16,4 +16,6 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - run: npm install
+      - run: npm run build
       - run: npm test
+      # build validates tsc compilation; tests run via tsx directly from src

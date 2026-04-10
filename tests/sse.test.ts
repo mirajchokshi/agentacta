@@ -1,24 +1,30 @@
-const { describe, it, before, after } = require('node:test');
-const assert = require('node:assert');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const http = require('http');
-const { EventEmitter } = require('events');
+import { describe, it, before, after } from 'node:test';
+import assert from 'node:assert';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import http from 'http';
+import { EventEmitter } from 'events';
 
-const { open, init, createStmts } = require('../db');
+import { open, init, createStmts } from '../src/db.js';
+import type { PreparedStatements, EventRow } from '../src/types.js';
+import type Database from 'better-sqlite3';
 
 const TMP = path.join(os.tmpdir(), `agentacta-test-sse-${Date.now()}`);
 const TEST_DB = path.join(TMP, 'test.db');
 
-function httpGet(url) {
+function httpGet(url: string): Promise<http.IncomingMessage> {
   return new Promise((resolve, reject) => {
     http.get(url, resolve).on('error', reject);
   });
 }
 
 describe('SSE endpoint', () => {
-  let server, port, db, stmts, sseEmitter;
+  let server: http.Server;
+  let port: number;
+  let db: Database.Database;
+  let stmts: PreparedStatements;
+  let sseEmitter: EventEmitter;
 
   before(async () => {
     fs.mkdirSync(TMP, { recursive: true });
@@ -31,12 +37,12 @@ describe('SSE endpoint', () => {
       1, 0, 'test-model', 'test sse', 'main', null, 0, 0, 0, 0, 0, 0, null, null, null, null, null);
     stmts.insertEvent.run('sse-evt-1', 'sse-sess-1', '2025-01-01T00:01:00Z', 'message', 'user', 'hello', null, null, null);
 
-    const jsonRes = (res, d, s = 200) => { res.writeHead(s, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(d)); };
+    const jsonRes = (res: http.ServerResponse, d: unknown, s = 200): void => { res.writeHead(s, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(d)); };
 
     server = http.createServer((req, res) => {
-      const url = new URL(req.url, `http://localhost`);
+      const url = new URL(req.url!, `http://localhost`);
       const p = url.pathname;
-      const q = {};
+      const q: Record<string, string> = {};
       url.searchParams.forEach((v, k) => q[k] = v);
 
       if (p.match(/^\/api\/sessions\/[^/]+\/stream$/)) {
@@ -51,14 +57,14 @@ describe('SSE endpoint', () => {
         });
         res.write(': connected\n\n');
 
-        let lastTs = req.headers['last-event-id'] || q.after || new Date().toISOString();
+        let lastTs = req.headers['last-event-id'] as string || q.after || new Date().toISOString();
 
-        const onUpdate = (sessionId) => {
+        const onUpdate = (sessionId: string): void => {
           if (sessionId !== id) return;
           try {
             const rows = db.prepare(
               'SELECT * FROM events WHERE session_id = ? AND timestamp > ? ORDER BY timestamp ASC'
-            ).all(id, lastTs);
+            ).all(id, lastTs) as EventRow[];
             if (rows.length) {
               lastTs = rows[rows.length - 1].timestamp;
               res.write(`id: ${lastTs}\ndata: ${JSON.stringify(rows)}\n\n`);
@@ -74,11 +80,11 @@ describe('SSE endpoint', () => {
     });
 
     port = 10000 + Math.floor(Math.random() * 50000);
-    await new Promise(resolve => server.listen(port, '127.0.0.1', resolve));
+    await new Promise<void>(resolve => server.listen(port, '127.0.0.1', resolve));
   });
 
   after(async () => {
-    await new Promise(resolve => server.close(resolve));
+    await new Promise<void>(resolve => server.close(() => resolve()));
     db.close();
     fs.rmSync(TMP, { recursive: true, force: true });
   });
@@ -92,10 +98,10 @@ describe('SSE endpoint', () => {
   });
 
   it('returns 404 for missing session', async () => {
-    const res = await new Promise((resolve, reject) => {
+    const res = await new Promise<{ status: number | undefined; body: unknown }>((resolve, reject) => {
       http.get(`http://127.0.0.1:${port}/api/sessions/nonexistent/stream`, res => {
         let data = '';
-        res.on('data', c => data += c);
+        res.on('data', (c: Buffer) => data += c);
         res.on('end', () => {
           try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
           catch { resolve({ status: res.statusCode, body: data }); }
@@ -106,25 +112,25 @@ describe('SSE endpoint', () => {
   });
 
   it('pushes new events when emitter fires', async () => {
-    const events = await new Promise((resolve, reject) => {
+    const events = await new Promise<EventRow[]>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Timeout waiting for SSE')), 5000);
 
       const req = http.get(
         `http://127.0.0.1:${port}/api/sessions/sse-sess-1/stream?after=2025-01-01T00:01:00Z`,
         res => {
           let buf = '';
-          res.on('data', chunk => {
+          res.on('data', (chunk: Buffer) => {
             buf += chunk.toString();
             const match = buf.match(/^data: (.+)$/m);
             if (match) {
               clearTimeout(timeout);
               res.destroy();
-              resolve(JSON.parse(match[1]));
+              resolve(JSON.parse(match[1]) as EventRow[]);
             }
           });
         }
       );
-      req.on('error', err => {
+      req.on('error', (err: NodeJS.ErrnoException) => {
         if (err.code !== 'ECONNRESET') reject(err);
       });
 
@@ -143,7 +149,7 @@ describe('SSE endpoint', () => {
 
   it('dedupes via Last-Event-ID on reconnect', async () => {
     // Simulate reconnect with Last-Event-ID header
-    const events = await new Promise((resolve, reject) => {
+    const events = await new Promise<EventRow[]>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Timeout')), 5000);
 
       const req = http.get({
@@ -153,17 +159,17 @@ describe('SSE endpoint', () => {
         headers: { 'Last-Event-ID': '2025-01-01T00:03:00Z' }
       }, res => {
         let buf = '';
-        res.on('data', chunk => {
+        res.on('data', (chunk: Buffer) => {
           buf += chunk.toString();
           const match = buf.match(/^data: (.+)$/m);
           if (match) {
             clearTimeout(timeout);
             res.destroy();
-            resolve(JSON.parse(match[1]));
+            resolve(JSON.parse(match[1]) as EventRow[]);
           }
         });
       });
-      req.on('error', err => {
+      req.on('error', (err: NodeJS.ErrnoException) => {
         if (err.code !== 'ECONNRESET') reject(err);
       });
 
@@ -186,14 +192,14 @@ describe('SSE endpoint', () => {
 
     let received = false;
 
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => resolve(), 500); // Expect no data
 
       const req = http.get(
         `http://127.0.0.1:${port}/api/sessions/sse-sess-1/stream?after=2025-01-01T00:10:00Z`,
         res => {
           let buf = '';
-          res.on('data', chunk => {
+          res.on('data', (chunk: Buffer) => {
             buf += chunk.toString();
             if (buf.match(/^data:/m)) {
               received = true;
@@ -204,7 +210,7 @@ describe('SSE endpoint', () => {
           });
         }
       );
-      req.on('error', err => {
+      req.on('error', (err: NodeJS.ErrnoException) => {
         if (err.code !== 'ECONNRESET') reject(err);
       });
 

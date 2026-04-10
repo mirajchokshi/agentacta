@@ -1,42 +1,49 @@
-'use strict';
+import type {
+  SessionRow,
+  EventRow,
+  AttributedEvent,
+  ProjectFilter,
+  AttributionResult,
+  ProjectScore,
+} from './types.js';
 
-const PATH_KEYS = new Set([
+const PATH_KEYS: Set<string> = new Set([
   'path', 'file', 'filename', 'file_path', 'filepath',
   'cwd', 'workdir', 'directory', 'dir', 'root',
   'repository_path', 'repositorypath', 'repo_path', 'repopath'
 ]);
 
-const PROJECT_KEYS = new Set([
+const PROJECT_KEYS: Set<string> = new Set([
   'project', 'project_name', 'projectname',
   'repo', 'repository', 'repo_name', 'reponame', 'repository_name', 'repositoryname',
   'workspace'
 ]);
 
-const BRANCH_KEYS = new Set([
+const BRANCH_KEYS: Set<string> = new Set([
   'branch', 'branch_name', 'branchname', 'ref', 'git_ref', 'gitref'
 ]);
 
 const LOOKAROUND_WINDOW = 6;
 const MIN_CONFIDENCE = 2;
 
-function safeParseJson(value) {
+function safeParseJson(value: unknown): Record<string, unknown> | null {
   if (typeof value !== 'string') return null;
   try {
-    return JSON.parse(value);
+    return JSON.parse(value) as Record<string, unknown>;
   } catch {
     return null;
   }
 }
 
-function normalizeKey(value) {
+function normalizeKey(value: unknown): string {
   return String(value || '').trim().toLowerCase();
 }
 
-function normalizeProjectKey(value) {
+function normalizeProjectKey(value: unknown): string {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-function looksLikeFilesystemPath(value, options = {}) {
+function looksLikeFilesystemPath(value: unknown, options: { allowRelative?: boolean } = {}): boolean {
   const { allowRelative = false } = options;
   if (typeof value !== 'string') return false;
 
@@ -70,19 +77,19 @@ function looksLikeFilesystemPath(value, options = {}) {
   return parts.length >= 2;
 }
 
-function isInternalProjectTag(tag) {
+function isInternalProjectTag(tag: string): boolean {
   if (!tag) return true;
   return tag.startsWith('agent:') || tag.startsWith('claude:');
 }
 
-function toDisplayProject(tag) {
+function toDisplayProject(tag: unknown): string | null {
   if (!tag || typeof tag !== 'string') return null;
   const value = tag.trim();
   if (!value || isInternalProjectTag(value)) return null;
   return value;
 }
 
-function extractProjectFromPath(filePath) {
+export function extractProjectFromPath(filePath: string | null): string | null {
   if (!filePath || typeof filePath !== 'string') return null;
   const normalized = filePath.trim().replace(/\\/g, '/');
   if (!looksLikeFilesystemPath(normalized, { allowRelative: true })) return null;
@@ -111,44 +118,46 @@ function extractProjectFromPath(filePath) {
   return null;
 }
 
-function extractSessionProjects(session) {
+function extractSessionProjects(session: SessionRow): string[] {
   const raw = session && session.projects;
   if (!raw) return [];
-  let parsed;
+  let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
     return [];
   }
   if (!Array.isArray(parsed)) return [];
-  return [...new Set(parsed.map(toDisplayProject).filter(Boolean))];
+  return [...new Set(
+    (parsed as unknown[]).map(toDisplayProject).filter((p): p is string => p !== null)
+  )];
 }
 
-function addCandidate(candidateSet, value) {
+function addCandidate(candidateSet: Set<string>, value: string | null): void {
   const p = toDisplayProject(value);
   if (p) candidateSet.add(p);
 }
 
-function visitObject(value, visitor, key = '') {
+function visitObject(value: unknown, visitor: (key: string, value: unknown) => void, key: string = ''): void {
   if (!value || typeof value !== 'object') return;
   if (Array.isArray(value)) {
     for (const item of value) visitObject(item, visitor, key);
     return;
   }
-  for (const [k, v] of Object.entries(value)) {
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
     visitor(k, v);
     if (v && typeof v === 'object') visitObject(v, visitor, k);
   }
 }
 
-function buildCandidateProjects(session, events) {
-  const candidateSet = new Set(extractSessionProjects(session));
+function buildCandidateProjects(session: SessionRow, events: EventRow[]): string[] {
+  const candidateSet = new Set<string>(extractSessionProjects(session));
 
   for (const event of events || []) {
     const args = safeParseJson(event.tool_args);
     if (!args) continue;
 
-    visitObject(args, (key, value) => {
+    visitObject(args, (key: string, value: unknown) => {
       if (typeof value !== 'string') return;
 
       const keyNorm = normalizeKey(key);
@@ -171,31 +180,35 @@ function buildCandidateProjects(session, events) {
   return [...candidateSet];
 }
 
-function escapeRegExp(value) {
+function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function countCandidateMentions(text, candidate) {
+function countCandidateMentions(text: string, candidate: string): number {
   if (!text || !candidate) return 0;
   const rx = new RegExp(`(^|[^a-z0-9])${escapeRegExp(candidate.toLowerCase())}([^a-z0-9]|$)`, 'gi');
   let matches = 0;
-  let m;
   const haystack = text.toLowerCase();
-  while ((m = rx.exec(haystack)) !== null) {
+  while (rx.exec(haystack) !== null) {
     matches += 1;
   }
   return matches;
 }
 
-function buildCandidateLookup(candidates) {
-  const byNorm = new Map();
+function buildCandidateLookup(candidates: string[]): Map<string, string> {
+  const byNorm = new Map<string, string>();
   for (const candidate of candidates) {
     byNorm.set(normalizeProjectKey(candidate), candidate);
   }
   return byNorm;
 }
 
-function resolveCandidate(value, candidates, byNorm, options = {}) {
+function resolveCandidate(
+  value: unknown,
+  candidates: string[],
+  byNorm: Map<string, string>,
+  options: { allowPath?: boolean } = {}
+): string | null {
   const { allowPath = true } = options;
   if (!value || typeof value !== 'string') return null;
   const raw = value.trim();
@@ -221,8 +234,8 @@ function resolveCandidate(value, candidates, byNorm, options = {}) {
   return null;
 }
 
-function chooseBestProject(scores) {
-  let bestProject = null;
+function chooseBestProject(scores: Map<string, number>): ProjectScore {
+  let bestProject: string | null = null;
   let bestScore = 0;
   let secondBest = 0;
 
@@ -245,22 +258,22 @@ function chooseBestProject(scores) {
   return { project: bestProject, score: bestScore };
 }
 
-function addScore(scores, project, value) {
+function addScore(scores: Map<string, number>, project: string | null, value: number): void {
   if (!project || value <= 0) return;
   scores.set(project, (scores.get(project) || 0) + value);
 }
 
-function extractCallBaseId(id) {
+function extractCallBaseId(id: string | null | undefined): string {
   if (!id) return '';
   return String(id).replace(/:(call|result)$/, '');
 }
 
-function scoreEvent(event, candidates, byNorm) {
-  const scores = new Map();
+function scoreEvent(event: AttributedEvent, candidates: string[], byNorm: Map<string, string>): ProjectScore {
+  const scores = new Map<string, number>();
   const args = safeParseJson(event.tool_args);
 
   if (args) {
-    visitObject(args, (key, value) => {
+    visitObject(args, (key: string, value: unknown) => {
       if (typeof value !== 'string') return;
       const keyNorm = normalizeKey(key);
       if (PATH_KEYS.has(keyNorm)) {
@@ -312,66 +325,66 @@ function scoreEvent(event, candidates, byNorm) {
   return chooseBestProject(scores);
 }
 
-function findPrevAttributed(events, idx) {
+function findPrevAttributed(events: AttributedEvent[], idx: number): string | null {
   for (let i = idx - 1; i >= 0 && idx - i <= LOOKAROUND_WINDOW; i--) {
     if (events[i].project) return events[i].project;
   }
   return null;
 }
 
-function findNextAttributed(events, idx) {
+function findNextAttributed(events: AttributedEvent[], idx: number): string | null {
   for (let i = idx + 1; i < events.length && i - idx <= LOOKAROUND_WINDOW; i++) {
     if (events[i].project) return events[i].project;
   }
   return null;
 }
 
-function attributeSessionEvents(session, events) {
-  const list = Array.isArray(events) ? events : [];
+export function attributeSessionEvents(session: SessionRow, events: EventRow[]): AttributionResult {
+  const list: EventRow[] = Array.isArray(events) ? events : [];
   if (!list.length) return { events: [], projectFilters: [] };
 
-  const candidates = buildCandidateProjects(session, list);
-  const byNorm = buildCandidateLookup(candidates);
-  const withOrder = list.map((event, idx) => ({ idx, event }));
+  const candidates: string[] = buildCandidateProjects(session, list);
+  const byNorm: Map<string, string> = buildCandidateLookup(candidates);
+  const withOrder: { idx: number; event: EventRow }[] = list.map((event, idx) => ({ idx, event }));
 
   withOrder.sort((a, b) => {
-    const ta = Date.parse(a.event.timestamp || 0) || 0;
-    const tb = Date.parse(b.event.timestamp || 0) || 0;
+    const ta = Date.parse(a.event.timestamp || '') || 0;
+    const tb = Date.parse(b.event.timestamp || '') || 0;
     if (ta !== tb) return ta - tb;
     return String(a.event.id || '').localeCompare(String(b.event.id || ''));
   });
 
-  const callProjectByBase = new Map();
-  const attributedOrdered = withOrder.map(({ idx, event }) => {
-    const base = {
+  const callProjectByBase = new Map<string, string>();
+  const attributedOrdered: { idx: number; event: AttributedEvent }[] = withOrder.map(({ idx, event }) => {
+    const base: AttributedEvent = {
       ...event,
       project: null,
       project_confidence: 0
     };
 
-    const scored = scoreEvent(base, candidates, byNorm);
+    const scored: ProjectScore = scoreEvent(base, candidates, byNorm);
     if (scored.project) {
       base.project = scored.project;
       base.project_confidence = scored.score;
     }
 
     if (base.type === 'tool_call' && base.project) {
-      const callBaseId = extractCallBaseId(base.id);
+      const callBaseId: string = extractCallBaseId(base.id);
       if (callBaseId) callProjectByBase.set(callBaseId, base.project);
     }
 
     return { idx, event: base };
   });
 
-  const orderedEvents = attributedOrdered.map(entry => entry.event);
+  const orderedEvents: AttributedEvent[] = attributedOrdered.map(entry => entry.event);
 
   for (let i = 0; i < orderedEvents.length; i++) {
-    const current = orderedEvents[i];
+    const current: AttributedEvent = orderedEvents[i];
     if (current.project) continue;
 
     if (current.type === 'tool_result') {
-      const callBaseId = extractCallBaseId(current.id);
-      const linkedProject = callProjectByBase.get(callBaseId);
+      const callBaseId: string = extractCallBaseId(current.id);
+      const linkedProject: string | undefined = callProjectByBase.get(callBaseId);
       if (linkedProject) {
         current.project = linkedProject;
         current.project_confidence = 3;
@@ -381,8 +394,8 @@ function attributeSessionEvents(session, events) {
 
     if (current.type !== 'message') continue;
 
-    const prevProject = findPrevAttributed(orderedEvents, i);
-    const nextProject = findNextAttributed(orderedEvents, i);
+    const prevProject: string | null = findPrevAttributed(orderedEvents, i);
+    const nextProject: string | null = findNextAttributed(orderedEvents, i);
 
     if (prevProject && nextProject && prevProject === nextProject) {
       current.project = prevProject;
@@ -396,12 +409,12 @@ function attributeSessionEvents(session, events) {
     }
   }
 
-  const eventsOut = new Array(list.length);
+  const eventsOut: AttributedEvent[] = new Array<AttributedEvent>(list.length);
   for (const entry of attributedOrdered) {
     eventsOut[entry.idx] = entry.event;
   }
 
-  const counts = new Map();
+  const counts = new Map<string, number>();
   for (const event of eventsOut) {
     if (!event.project || event.project_confidence < MIN_CONFIDENCE) {
       event.project = null;
@@ -411,33 +424,34 @@ function attributeSessionEvents(session, events) {
     counts.set(event.project, (counts.get(event.project) || 0) + 1);
   }
 
-  const projectFilters = [...counts.entries()]
+  const projectFilters: ProjectFilter[] = [...counts.entries()]
     .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
     .map(([project, eventCount]) => ({ project, eventCount }));
 
   return { events: eventsOut, projectFilters };
 }
 
-function attributeEventDelta(session, deltaEvents, contextEvents = []) {
-  const delta = Array.isArray(deltaEvents) ? deltaEvents : [];
+export function attributeEventDelta(
+  session: SessionRow,
+  deltaEvents: EventRow[],
+  contextEvents: EventRow[] = []
+): AttributedEvent[] {
+  const delta: EventRow[] = Array.isArray(deltaEvents) ? deltaEvents : [];
   if (!delta.length) return [];
 
-  const context = Array.isArray(contextEvents) ? contextEvents : [];
-  const merged = [...context, ...delta];
-  const attributed = attributeSessionEvents(session, merged).events;
+  const context: EventRow[] = Array.isArray(contextEvents) ? contextEvents : [];
+  const merged: EventRow[] = [...context, ...delta];
+  const attributed: AttributedEvent[] = attributeSessionEvents(session, merged).events;
 
-  const byId = new Map();
+  const byId = new Map<string, AttributedEvent>();
   for (const event of attributed) {
     if (!event || !event.id) continue;
     byId.set(event.id, event);
   }
 
-  return delta.map(event => byId.get(event.id) || { ...event, project: null, project_confidence: 0 });
+  return delta.map(event =>
+    byId.get(event.id) || { ...event, project: null, project_confidence: 0 }
+  );
 }
 
-module.exports = {
-  attributeSessionEvents,
-  attributeEventDelta,
-  extractProjectFromPath,
-  isInternalProjectTag
-};
+export { isInternalProjectTag };

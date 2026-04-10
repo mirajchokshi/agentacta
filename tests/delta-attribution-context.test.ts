@@ -1,18 +1,20 @@
-const { describe, it, before, after } = require('node:test');
-const assert = require('node:assert');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+import { describe, it, before, after } from 'node:test';
+import assert from 'node:assert';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
-const { open, init, createStmts } = require('../db');
-const { loadDeltaAttributionContext } = require('../delta-attribution-context');
+import { open, init, createStmts } from '../src/db.js';
+import { loadDeltaAttributionContext } from '../src/delta-attribution-context.js';
+import type { PreparedStatements, EventRow } from '../src/types.js';
+import type Database from 'better-sqlite3';
 
 const TMP = path.join(os.tmpdir(), `agentacta-test-delta-context-${Date.now()}`);
 const TEST_DB = path.join(TMP, 'test.db');
 
 describe('delta attribution context', () => {
-  let db;
-  let stmts;
+  let db: Database.Database;
+  let stmts: PreparedStatements;
 
   before(() => {
     fs.mkdirSync(TMP, { recursive: true });
@@ -73,35 +75,41 @@ describe('delta attribution context', () => {
   });
 
   it('returns prior neighborhood rows for incoming message deltas', () => {
-    const deltaRows = [
+    const deltaRows: EventRow[] = [
       {
         id: 'ctx-msg-2',
         session_id: 'delta-ctx-sess-1',
         timestamp: '2026-03-12T10:01:00.000Z',
         type: 'message',
         role: 'assistant',
-        content: 'new streamed message'
+        content: 'new streamed message',
+        tool_name: null,
+        tool_args: null,
+        tool_result: null
       }
     ];
 
     const context = loadDeltaAttributionContext(db, 'delta-ctx-sess-1', deltaRows);
-    assert.ok(context.some(row => row.id === 'ctx-call-1:call'));
-    assert.ok(context.some(row => row.id === 'ctx-msg-1'));
+    assert.ok(context.some((row: EventRow) => row.id === 'ctx-call-1:call'));
+    assert.ok(context.some((row: EventRow) => row.id === 'ctx-msg-1'));
   });
 
   it('still returns linked tool_call rows for tool_result deltas', () => {
-    const deltaRows = [
+    const deltaRows: EventRow[] = [
       {
         id: 'ctx-call-1:result',
         session_id: 'delta-ctx-sess-1',
         timestamp: '2026-03-12T10:01:05.000Z',
         type: 'tool_result',
         role: 'tool',
-        content: 'ok'
+        content: 'ok',
+        tool_name: null,
+        tool_args: null,
+        tool_result: null
       }
     ];
 
     const context = loadDeltaAttributionContext(db, 'delta-ctx-sess-1', deltaRows);
-    assert.ok(context.some(row => row.id === 'ctx-call-1:call'));
+    assert.ok(context.some((row: EventRow) => row.id === 'ctx-call-1:call'));
   });
 });

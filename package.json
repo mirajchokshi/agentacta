@@ -2,28 +2,26 @@
   "name": "agentacta",
   "version": "2026.4.8",
   "description": "Audit trail and search engine for AI agent sessions",
-  "main": "index.js",
+  "main": "dist/index.js",
   "bin": {
     "agentacta": "index.js"
   },
   "files": [
     "index.js",
-    "indexer.js",
-    "db.js",
-    "config.js",
-    "project-attribution.js",
-    "delta-attribution-context.js",
-    "insights.js",
+    "dist/",
     "public/",
     "LICENSE",
     "README.md"
   ],
   "scripts": {
-    "start": "node index.js",
-    "index": "node indexer.js",
-    "test": "node --test tests/*.test.js",
-    "demo": "node scripts/seed-demo.js && node index.js --demo",
-    "seed-demo": "node scripts/seed-demo.js"
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "index": "node dist/indexer.js",
+    "test": "tsx --test tests/*.test.ts",
+    "demo": "node scripts/seed-demo.js && node dist/index.js --demo",
+    "seed-demo": "node scripts/seed-demo.js",
+    "prepublishOnly": "npm run build && npm test"
   },
   "keywords": [
     "ai",
@@ -46,6 +44,12 @@
   "homepage": "https://github.com/mirajchokshi/agentacta",
   "dependencies": {
     "better-sqlite3": "^12.6.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.15.3",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
   },
   "engines": {
     "node": ">=18.0.0"

@@ -1,30 +1,37 @@
-const { describe, it, before, after } = require('node:test');
-const assert = require('node:assert');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const http = require('http');
+import { describe, it, before, after } from 'node:test';
+import assert from 'node:assert';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import http from 'http';
 
-const { open, init, createStmts } = require('../db');
+import { open, init, createStmts } from '../src/db.js';
+import type { PreparedStatements, CountRow } from '../src/types.js';
+import type Database from 'better-sqlite3';
 
 const TMP = path.join(os.tmpdir(), `agentacta-test-context-${Date.now()}`);
 const TEST_DB = path.join(TMP, 'test.db');
 
-function fetch(url) {
+interface FetchResult {
+  status: number | undefined;
+  data: Record<string, unknown>;
+}
+
+function fetch(url: string): Promise<FetchResult> {
   return new Promise((resolve, reject) => {
     http.get(url, res => {
       let data = '';
-      res.on('data', c => data += c);
+      res.on('data', (c: Buffer) => data += c);
       res.on('end', () => {
         try { resolve({ status: res.statusCode, data: JSON.parse(data) }); }
-        catch { resolve({ status: res.statusCode, data }); }
+        catch { resolve({ status: res.statusCode, data: data as unknown as Record<string, unknown> }); }
       });
     }).on('error', reject);
   });
 }
 
 // Inline helpers matching index.js logic
-function relativeTime(ts) {
+function relativeTime(ts: string | null): string | null {
   if (!ts) return null;
   const diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
   if (diff < 60) return 'just now';
@@ -33,7 +40,7 @@ function relativeTime(ts) {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-function normalizeAgentLabel(agent) {
+function normalizeAgentLabel(agent: string | null): string | null {
   if (!agent) return agent;
   if (agent === 'main') return 'openclaw-main';
   if (agent.startsWith('claude-') || agent.startsWith('claude--')) return 'claude-code';
@@ -41,13 +48,15 @@ function normalizeAgentLabel(agent) {
 }
 
 describe('context api', () => {
-  let server, port, db;
+  let server: http.Server;
+  let port: number;
+  let db: Database.Database;
 
   before(async () => {
     fs.mkdirSync(TMP, { recursive: true });
     init(TEST_DB);
     db = open(TEST_DB);
-    const stmts = createStmts(db);
+    const stmts: PreparedStatements = createStmts(db);
 
     // Seed test data: 2 sessions, events, file_activity
     stmts.upsertSession.run('ctx-sess-1', '2025-06-01T10:00:00Z', '2025-06-01T10:30:00Z',
@@ -80,39 +89,39 @@ describe('context api', () => {
 
     // Create mini server replicating context API logic from index.js
     server = http.createServer((req, res) => {
-      const u = new URL(req.url, `http://localhost:${port}`);
+      const u = new URL(req.url!, `http://localhost:${port}`);
       const pathname = u.pathname;
-      const query = {};
+      const query: Record<string, string> = {};
       u.searchParams.forEach((v, k) => query[k] = v);
-      const jsonRes = (d, s = 200) => { res.writeHead(s, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(d)); };
+      const jsonRes = (d: unknown, s = 200): void => { res.writeHead(s, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(d)); };
 
       if (pathname === '/api/context/file') {
         const fp = query.path || '';
         if (!fp) return jsonRes({ error: 'path parameter is required' }, 400);
 
-        const sessionCount = db.prepare(
+        const sessionCount = (db.prepare(
           'SELECT COUNT(DISTINCT session_id) as c FROM file_activity WHERE file_path = ?'
-        ).get(fp).c;
+        ).get(fp) as CountRow).c;
 
         if (sessionCount === 0) {
           return jsonRes({ file: fp, sessionCount: 0, lastModified: null, recentChanges: [], operations: {}, relatedFiles: [], recentErrors: [] });
         }
 
-        const lastTouched = db.prepare(
+        const lastTouched = (db.prepare(
           'SELECT MAX(timestamp) as t FROM file_activity WHERE file_path = ?'
-        ).get(fp).t;
+        ).get(fp) as { t: string }).t;
 
         const recentChanges = db.prepare(
           `SELECT DISTINCT s.summary FROM file_activity fa
            JOIN sessions s ON s.id = fa.session_id
            WHERE fa.file_path = ? AND s.summary IS NOT NULL
            ORDER BY s.start_time DESC LIMIT 5`
-        ).all(fp).map(r => r.summary);
+        ).all(fp).map((r) => (r as { summary: string }).summary);
 
         const opsRows = db.prepare(
           'SELECT operation, COUNT(*) as c FROM file_activity WHERE file_path = ? GROUP BY operation'
-        ).all(fp);
-        const operations = {};
+        ).all(fp) as { operation: string; c: number }[];
+        const operations: Record<string, number> = {};
         for (const r of opsRows) operations[r.operation] = r.c;
 
         const relatedFiles = db.prepare(
@@ -122,13 +131,13 @@ describe('context api', () => {
            WHERE fa1.file_path = ? AND fa2.file_path != ?
            GROUP BY fa2.file_path
            ORDER BY c DESC LIMIT 5`
-        ).all(fp, fp).map(r => ({ path: r.file_path, count: r.c }));
+        ).all(fp, fp).map((r) => ({ path: (r as { file_path: string; c: number }).file_path, count: (r as { file_path: string; c: number }).c }));
 
         const sessionIdsArr = db.prepare(
           'SELECT DISTINCT session_id FROM file_activity WHERE file_path = ?'
-        ).all(fp).map(r => r.session_id);
+        ).all(fp).map((r) => (r as { session_id: string }).session_id);
 
-        let recentErrors = [];
+        let recentErrors: string[] = [];
         if (sessionIdsArr.length) {
           const placeholders = sessionIdsArr.map(() => '?').join(',');
           recentErrors = db.prepare(
@@ -137,7 +146,7 @@ describe('context api', () => {
                AND tool_result IS NOT NULL
                AND (tool_result LIKE '%error%' OR tool_result LIKE '%Error%' OR tool_result LIKE '%ERROR%')
              ORDER BY timestamp DESC LIMIT 3`
-          ).all(...sessionIdsArr).map(r => r.tool_result.slice(0, 200));
+          ).all(...sessionIdsArr).map((r) => (r as { tool_result: string }).tool_result.slice(0, 200));
         }
 
         return jsonRes({
@@ -152,11 +161,11 @@ describe('context api', () => {
 
         const sessionIdsFromFiles = db.prepare(
           'SELECT DISTINCT session_id FROM file_activity WHERE file_path LIKE ?'
-        ).all(repoPath + '%').map(r => r.session_id);
+        ).all(repoPath + '%').map((r) => (r as { session_id: string }).session_id);
 
         const promptSessions = db.prepare(
           'SELECT id FROM sessions WHERE initial_prompt LIKE ?'
-        ).all('%' + repoPath + '%').map(r => r.id);
+        ).all('%' + repoPath + '%').map((r) => (r as { id: string }).id);
 
         const allIds = [...new Set([...sessionIdsFromFiles, ...promptSessions])];
 
@@ -169,33 +178,36 @@ describe('context api', () => {
         const agg = db.prepare(
           `SELECT COUNT(*) as c, SUM(total_cost) as cost, SUM(total_tokens) as tokens
            FROM sessions WHERE id IN (${ph})`
-        ).get(...allIds);
+        ).get(...allIds) as { c: number; cost: number; tokens: number };
 
         const agents = [...new Set(
           db.prepare(`SELECT DISTINCT agent FROM sessions WHERE id IN (${ph}) AND agent IS NOT NULL`).all(...allIds)
-            .map(r => normalizeAgentLabel(r.agent)).filter(Boolean)
+            .map((r) => normalizeAgentLabel((r as { agent: string }).agent)).filter(Boolean) as string[]
         )];
 
         const topFiles = db.prepare(
           `SELECT file_path, COUNT(*) as c FROM file_activity
            WHERE session_id IN (${ph})
            GROUP BY file_path ORDER BY c DESC LIMIT 10`
-        ).all(...allIds).map(r => ({ path: r.file_path, count: r.c }));
+        ).all(...allIds).map((r) => ({ path: (r as { file_path: string; c: number }).file_path, count: (r as { file_path: string; c: number }).c }));
 
         const recentSessions = db.prepare(
           `SELECT id, summary, agent, start_time, end_time FROM sessions
            WHERE id IN (${ph})
            ORDER BY start_time DESC LIMIT 5`
-        ).all(...allIds).map(r => ({
-          id: r.id, summary: r.summary, agent: normalizeAgentLabel(r.agent),
-          timestamp: r.start_time, status: r.end_time ? 'completed' : 'in-progress'
-        }));
+        ).all(...allIds).map((r) => {
+          const row = r as { id: string; summary: string | null; agent: string | null; start_time: string; end_time: string | null };
+          return {
+            id: row.id, summary: row.summary, agent: normalizeAgentLabel(row.agent),
+            timestamp: row.start_time, status: row.end_time ? 'completed' : 'in-progress'
+          };
+        });
 
         const commonTools = db.prepare(
           `SELECT tool_name, COUNT(*) as c FROM events
            WHERE session_id IN (${ph}) AND tool_name IS NOT NULL
            GROUP BY tool_name ORDER BY c DESC LIMIT 10`
-        ).all(...allIds).map(r => ({ tool: r.tool_name, count: r.c }));
+        ).all(...allIds).map((r) => ({ tool: (r as { tool_name: string; c: number }).tool_name, count: (r as { tool_name: string; c: number }).c }));
 
         const commonErrors = db.prepare(
           `SELECT DISTINCT SUBSTR(tool_result, 1, 200) as err FROM events
@@ -203,7 +215,7 @@ describe('context api', () => {
              AND tool_result IS NOT NULL
              AND (tool_result LIKE '%error%' OR tool_result LIKE '%Error%' OR tool_result LIKE '%ERROR%')
            ORDER BY timestamp DESC LIMIT 5`
-        ).all(...allIds).map(r => r.err);
+        ).all(...allIds).map((r) => (r as { err: string }).err);
 
         return jsonRes({
           repo: repoPath, sessionCount: allIds.length,
@@ -215,17 +227,21 @@ describe('context api', () => {
         const name = query.name || '';
         if (!name) return jsonRes({ error: 'name parameter is required' }, 400);
 
-        const sessions = db.prepare('SELECT * FROM sessions WHERE agent = ?').all(name);
+        const sessions = db.prepare('SELECT * FROM sessions WHERE agent = ?').all(name) as {
+          id: string; start_time: string; end_time: string | null; total_cost: number;
+          summary: string | null; agent: string | null;
+        }[];
 
         if (sessions.length === 0) {
           return jsonRes({ agent: name, sessionCount: 0, totalCost: 0, avgDuration: 0, topTools: [], recentSessions: [], successRate: 0 });
         }
 
         const totalCost = sessions.reduce((s, r) => s + (r.total_cost || 0), 0);
-        let totalDuration = 0, durationCount = 0;
+        let totalDuration = 0;
+        let durationCount = 0;
         for (const s of sessions) {
           if (s.start_time && s.end_time) {
-            totalDuration += (new Date(s.end_time) - new Date(s.start_time)) / 1000;
+            totalDuration += (new Date(s.end_time).getTime() - new Date(s.start_time).getTime()) / 1000;
             durationCount++;
           }
         }
@@ -239,7 +255,7 @@ describe('context api', () => {
           `SELECT tool_name, COUNT(*) as c FROM events
            WHERE session_id IN (${ph}) AND tool_name IS NOT NULL
            GROUP BY tool_name ORDER BY c DESC LIMIT 10`
-        ).all(...ids).map(r => ({ tool: r.tool_name, count: r.c }));
+        ).all(...ids).map((r) => ({ tool: (r as { tool_name: string; c: number }).tool_name, count: (r as { tool_name: string; c: number }).c }));
 
         const recentSess = sessions
           .sort((a, b) => (b.start_time || '').localeCompare(a.start_time || ''))
@@ -257,11 +273,11 @@ describe('context api', () => {
     });
 
     port = 10000 + Math.floor(Math.random() * 50000);
-    await new Promise(resolve => server.listen(port, '127.0.0.1', resolve));
+    await new Promise<void>(resolve => server.listen(port, '127.0.0.1', resolve));
   });
 
   after(async () => {
-    await new Promise(resolve => server.close(resolve));
+    await new Promise<void>(resolve => server.close(() => resolve()));
     db.close();
     fs.rmSync(TMP, { recursive: true, force: true });
   });
@@ -275,16 +291,15 @@ describe('context api', () => {
     assert.strictEqual(data.sessionCount, 2);
     assert.ok(data.lastModified); // relative time string
     assert.ok(Array.isArray(data.recentChanges));
-    assert.ok(data.recentChanges.length >= 1);
-    assert.ok(data.operations.read >= 2);
-    assert.ok(data.operations.edit >= 2);
+    assert.ok((data.recentChanges as unknown[]).length >= 1);
+    assert.ok((data.operations as Record<string, number>).read >= 2);
+    assert.ok((data.operations as Record<string, number>).edit >= 2);
   });
 
   it('GET /api/context/file returns relatedFiles', async () => {
     const { data } = await fetch(`http://127.0.0.1:${port}/api/context/file?path=/home/user/myrepo/auth.js`);
     assert.ok(Array.isArray(data.relatedFiles));
-    assert.ok(data.relatedFiles.length >= 1);
-    const paths = data.relatedFiles.map(r => r.path);
+    const paths = (data.relatedFiles as { path: string }[]).map(r => r.path);
     assert.ok(paths.includes('/home/user/myrepo/config.js') || paths.includes('/home/user/myrepo/login.js'));
     // The queried file should NOT appear in relatedFiles
     assert.ok(!paths.includes('/home/user/myrepo/auth.js'));
@@ -293,8 +308,8 @@ describe('context api', () => {
   it('GET /api/context/file returns recentErrors', async () => {
     const { data } = await fetch(`http://127.0.0.1:${port}/api/context/file?path=/home/user/myrepo/auth.js`);
     assert.ok(Array.isArray(data.recentErrors));
-    assert.ok(data.recentErrors.length >= 1);
-    assert.ok(data.recentErrors.some(e => e.includes('error') || e.includes('Error') || e.includes('ERROR')));
+    assert.ok((data.recentErrors as string[]).length >= 1);
+    assert.ok((data.recentErrors as string[]).some(e => e.includes('error') || e.includes('Error') || e.includes('ERROR')));
   });
 
   it('GET /api/context/file with missing path returns 400', async () => {
@@ -317,14 +332,14 @@ describe('context api', () => {
     assert.strictEqual(status, 200);
     assert.strictEqual(data.repo, '/home/user/myrepo');
     assert.strictEqual(data.sessionCount, 2); // sess-1 and sess-2 match
-    assert.ok(data.totalCost > 0);
-    assert.ok(data.totalTokens > 0);
+    assert.ok((data.totalCost as number) > 0);
+    assert.ok((data.totalTokens as number) > 0);
     assert.ok(Array.isArray(data.agents));
-    assert.ok(data.agents.includes('claude-code'));
+    assert.ok((data.agents as string[]).includes('claude-code'));
     assert.ok(Array.isArray(data.topFiles));
-    assert.ok(data.topFiles.length >= 1);
+    assert.ok((data.topFiles as unknown[]).length >= 1);
     assert.ok(Array.isArray(data.recentSessions));
-    assert.ok(data.recentSessions.length >= 1);
+    assert.ok((data.recentSessions as unknown[]).length >= 1);
     assert.ok(Array.isArray(data.commonTools));
     assert.ok(Array.isArray(data.commonErrors));
   });
@@ -348,11 +363,11 @@ describe('context api', () => {
     assert.strictEqual(status, 200);
     assert.strictEqual(data.agent, 'claude-code');
     assert.strictEqual(data.sessionCount, 2);
-    assert.ok(data.totalCost > 0);
-    assert.ok(data.avgDuration > 0);
+    assert.ok((data.totalCost as number) > 0);
+    assert.ok((data.avgDuration as number) > 0);
     assert.ok(Array.isArray(data.topTools));
     assert.ok(Array.isArray(data.recentSessions));
-    assert.strictEqual(data.recentSessions.length, 2);
+    assert.strictEqual((data.recentSessions as unknown[]).length, 2);
     assert.strictEqual(data.successRate, 100); // both have summaries
   });
 

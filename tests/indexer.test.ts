@@ -1,30 +1,33 @@
-const { describe, it, before, after } = require('node:test');
-const assert = require('node:assert');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+import { describe, it, before, after } from 'node:test';
+import assert from 'node:assert';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
-const { open, init, createStmts } = require('../db');
-const { discoverSessionDirs, listJsonlFiles, indexFile, indexCronRunFile } = require('../indexer');
+import { open, init, createStmts } from '../src/db.js';
+import { discoverSessionDirs, listJsonlFiles, indexFile, indexCronRunFile } from '../src/indexer.js';
+import type { PreparedStatements, SessionRow, SessionDir, IndexResult } from '../src/types.js';
+import type Database from 'better-sqlite3';
 
 const TMP = path.join(os.tmpdir(), `agentacta-test-idx-${Date.now()}`);
 const TEST_DB = path.join(TMP, 'test.db');
 
-function setup() {
+function setup(): Database.Database {
   fs.mkdirSync(TMP, { recursive: true });
   process.env.AGENTACTA_DB_PATH = TEST_DB;
   init(TEST_DB);
   return open(TEST_DB);
 }
 
-function writeSession(filename, lines) {
+function writeSession(filename: string, lines: Record<string, unknown>[]): string {
   const fp = path.join(TMP, filename);
   fs.writeFileSync(fp, lines.map(l => JSON.stringify(l)).join('\n') + '\n');
   return fp;
 }
 
 describe('indexer', () => {
-  let db, stmts;
+  let db: Database.Database;
+  let stmts: PreparedStatements;
 
   before(() => {
     db = setup();
@@ -42,10 +45,10 @@ describe('indexer', () => {
       { type: 'message', id: 'msg-1', timestamp: '2025-01-01T00:01:00Z', message: { role: 'user', content: 'Hello agent' } },
       { type: 'message', id: 'msg-2', timestamp: '2025-01-01T00:02:00Z', message: { role: 'assistant', content: 'Hi there!' } }
     ]);
-    const result = indexFile(db, fp, 'test-agent', stmts, false);
+    const result: IndexResult = indexFile(db, fp, 'test-agent', stmts, false);
     assert.strictEqual(result.sessionId, 'sess-001');
     assert.strictEqual(result.msgCount, 2);
-    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('sess-001');
+    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('sess-001') as SessionRow;
     assert.strictEqual(sess.agent, 'test-agent');
     assert.strictEqual(sess.summary, 'Hello agent');
   });
@@ -60,9 +63,9 @@ describe('indexer', () => {
         ]
       }}
     ]);
-    const result = indexFile(db, fp, 'test', stmts, false);
+    const result: IndexResult = indexFile(db, fp, 'test', stmts, false);
     assert.strictEqual(result.toolCount, 1);
-    const fa = db.prepare('SELECT * FROM file_activity WHERE session_id = ?').all('sess-002');
+    const fa = db.prepare('SELECT * FROM file_activity WHERE session_id = ?').all('sess-002') as { file_path: string }[];
     assert.strictEqual(fa.length, 1);
     assert.strictEqual(fa[0].file_path, '/tmp/foo.js');
   });
@@ -71,21 +74,21 @@ describe('indexer', () => {
     const fp = writeSession('nosess.jsonl', [
       { type: 'message', id: 'msg-x', timestamp: '2025-01-01T00:00:00Z', message: { role: 'user', content: 'hi' } }
     ]);
-    const result = indexFile(db, fp, 'test', stmts, false);
+    const result: IndexResult = indexFile(db, fp, 'test', stmts, false);
     assert.ok(result.skipped);
   });
 
   it('skips empty files', () => {
     const fp = path.join(TMP, 'empty.jsonl');
     fs.writeFileSync(fp, '');
-    const result = indexFile(db, fp, 'test', stmts, false);
+    const result: IndexResult = indexFile(db, fp, 'test', stmts, false);
     assert.ok(result.skipped);
   });
 
   it('handles malformed JSON lines gracefully', () => {
     const fp = path.join(TMP, 'bad.jsonl');
     fs.writeFileSync(fp, JSON.stringify({ type: 'session', id: 'sess-bad', timestamp: '2025-01-01T00:00:00Z' }) + '\n{not valid json}\n');
-    const result = indexFile(db, fp, 'test', stmts, false);
+    const result: IndexResult = indexFile(db, fp, 'test', stmts, false);
     assert.strictEqual(result.sessionId, 'sess-bad');
   });
 
@@ -94,7 +97,7 @@ describe('indexer', () => {
       { type: 'session', id: 'sess-arch', timestamp: '2025-01-01T00:00:00Z' },
       { type: 'message', id: 'msg-a', timestamp: '2025-01-01T00:01:00Z', message: { role: 'user', content: 'archived' } }
     ]);
-    const result = indexFile(db, fp, 'test', stmts, true);
+    indexFile(db, fp, 'test', stmts, true);
     const rows = db.prepare('SELECT * FROM archive WHERE session_id = ?').all('sess-arch');
     assert.strictEqual(rows.length, 2);
   });
@@ -108,7 +111,7 @@ describe('indexer', () => {
       }}
     ]);
     indexFile(db, fp, 'test', stmts, false);
-    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('sess-cost');
+    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('sess-cost') as SessionRow;
     assert.strictEqual(sess.total_cost, 0.05);
     assert.strictEqual(sess.total_tokens, 1000);
     assert.strictEqual(sess.input_tokens, 400);
@@ -121,7 +124,7 @@ describe('indexer', () => {
       { type: 'message', id: 'msg-hb2', timestamp: '2025-01-01T00:02:00Z', message: { role: 'user', content: 'Real question here' } }
     ]);
     indexFile(db, fp, 'test', stmts, false);
-    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('sess-hb');
+    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('sess-hb') as SessionRow;
     assert.strictEqual(sess.summary, 'Real question here');
   });
 
@@ -141,16 +144,16 @@ describe('indexer', () => {
       }
     ]);
 
-    const result = indexFile(db, fp, 'codex-cli', stmts, false);
+    const result: IndexResult = indexFile(db, fp, 'codex-cli', stmts, false);
     assert.strictEqual(result.sessionId, 'codex-symphony-1');
 
-    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('codex-symphony-1');
+    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('codex-symphony-1') as SessionRow;
     assert.strictEqual(sess.agent, 'codex-cli');
     assert.strictEqual(sess.session_type, 'codex-symphony');
-    assert.match(sess.summary, /originator=symphony-orchestrator/);
-    assert.match(sess.summary, /source=vscode/);
+    assert.match(sess.summary!, /originator=symphony-orchestrator/);
+    assert.match(sess.summary!, /source=vscode/);
 
-    const projects = JSON.parse(sess.projects);
+    const projects = JSON.parse(sess.projects!) as string[];
     assert.ok(projects.includes('HON-6'));
   });
 
@@ -170,14 +173,14 @@ describe('indexer', () => {
       }
     ]);
 
-    const result = indexFile(db, fp, 'codex-cli', stmts, false);
+    const result: IndexResult = indexFile(db, fp, 'codex-cli', stmts, false);
     assert.strictEqual(result.sessionId, 'codex-direct-1');
 
-    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('codex-direct-1');
+    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('codex-direct-1') as SessionRow;
     assert.strictEqual(sess.agent, 'codex-cli');
     assert.strictEqual(sess.session_type, 'codex-direct');
 
-    const projects = JSON.parse(sess.projects);
+    const projects = JSON.parse(sess.projects!) as string[];
     assert.ok(projects.includes('mosaic'));
   });
 
@@ -189,8 +192,8 @@ describe('indexer', () => {
     fs.writeFileSync(rootFile, '{"type":"session","id":"r","timestamp":"2025-01-01T00:00:00Z"}\n');
     fs.writeFileSync(nestedFile, '{"type":"session","id":"n","timestamp":"2025-01-01T00:00:00Z"}\n');
 
-    const flat = listJsonlFiles(TMP, false);
-    const recursive = listJsonlFiles(TMP, true);
+    const flat: string[] = listJsonlFiles(TMP, false);
+    const recursive: string[] = listJsonlFiles(TMP, true);
 
     assert.ok(flat.includes(rootFile));
     assert.ok(!flat.includes(nestedFile));
@@ -206,11 +209,11 @@ describe('indexer', () => {
     process.env.HOME = home;
 
     try {
-      const dirs = discoverSessionDirs({ sessionsPath: [codex] });
+      const dirs: SessionDir[] = discoverSessionDirs({ sessionsPath: [codex] });
       const codexDir = dirs.find(d => d.path === codex);
       assert.ok(codexDir);
-      assert.strictEqual(codexDir.agent, 'codex-cli');
-      assert.strictEqual(codexDir.recursive, true);
+      assert.strictEqual(codexDir!.agent, 'codex-cli');
+      assert.strictEqual(codexDir!.recursive, true);
     } finally {
       process.env.HOME = originalHome;
     }
@@ -227,11 +230,11 @@ describe('indexer', () => {
     process.env.HOME = home;
 
     try {
-      const dirs = discoverSessionDirs({ sessionsPath: [custom] });
+      const dirs: SessionDir[] = discoverSessionDirs({ sessionsPath: [custom] });
       assert.ok(dirs.find(d => d.path === custom));
       const autoDir = dirs.find(d => d.path === auto);
       assert.ok(autoDir);
-      assert.strictEqual(autoDir.agent, 'helper');
+      assert.strictEqual(autoDir!.agent, 'helper');
     } finally {
       process.env.HOME = originalHome;
     }
@@ -245,11 +248,11 @@ describe('indexer', () => {
     process.env.HOME = home;
 
     try {
-      const dirs = discoverSessionDirs({});
+      const dirs: SessionDir[] = discoverSessionDirs({});
       const cronDir = dirs.find(d => d.path === cronRuns);
       assert.ok(cronDir);
-      assert.strictEqual(cronDir.sourceType, 'cron-run');
-      assert.strictEqual(cronDir.agent, 'cron');
+      assert.strictEqual(cronDir!.sourceType, 'cron-run');
+      assert.strictEqual(cronDir!.agent, 'cron');
     } finally {
       process.env.HOME = originalHome;
     }
@@ -268,10 +271,10 @@ describe('indexer', () => {
       usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }
     }) + '\n');
 
-    const result = indexCronRunFile(db, fp, 'cron', stmts);
+    const result: IndexResult = indexCronRunFile(db, fp, 'cron', stmts);
     assert.strictEqual(result.sessionId, 'cron-session-1');
 
-    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('cron-session-1');
+    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('cron-session-1') as SessionRow;
     assert.strictEqual(sess.agent, 'main');
     assert.strictEqual(sess.session_type, 'cron');
     assert.strictEqual(sess.summary, 'Cron summary');
@@ -294,10 +297,10 @@ describe('indexer', () => {
       summary: 'Synthetic duplicate summary'
     }) + '\n');
 
-    const result = indexCronRunFile(db, fp, 'cron', stmts);
+    const result: IndexResult = indexCronRunFile(db, fp, 'cron', stmts);
     assert.ok(result.skipped);
 
-    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('cron-preferred');
+    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('cron-preferred') as SessionRow;
     assert.strictEqual(sess.summary, 'Real transcript prompt');
     assert.strictEqual(sess.message_count, 1);
   });
@@ -312,11 +315,11 @@ describe('indexer', () => {
     process.env.HOME = home;
 
     try {
-      const dirs = discoverSessionDirs({ sessionsPath: [custom] });
+      const dirs: SessionDir[] = discoverSessionDirs({ sessionsPath: [custom] });
       const codexDir = dirs.find(d => d.path === codex);
       assert.ok(codexDir);
-      assert.strictEqual(codexDir.agent, 'codex-cli');
-      assert.strictEqual(codexDir.recursive, true);
+      assert.strictEqual(codexDir!.agent, 'codex-cli');
+      assert.strictEqual(codexDir!.recursive, true);
     } finally {
       process.env.HOME = originalHome;
     }

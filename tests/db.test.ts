@@ -1,10 +1,12 @@
-const { describe, it, before, after } = require('node:test');
-const assert = require('node:assert');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+import { describe, it, after } from 'node:test';
+import assert from 'node:assert';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
-const { open, init, createStmts } = require('../db');
+import { open, init, createStmts } from '../src/db.js';
+import type { PreparedStatements, CountRow } from '../src/types.js';
+import type Database from 'better-sqlite3';
 
 const TEST_DB = path.join(os.tmpdir(), `agentacta-test-db-${Date.now()}.db`);
 
@@ -18,8 +20,8 @@ describe('db', () => {
   it('init creates all tables', () => {
     process.env.AGENTACTA_DB_PATH = TEST_DB;
     init(TEST_DB);
-    const db = open(TEST_DB);
-    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
+    const db: Database.Database = open(TEST_DB);
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => (r as { name: string }).name);
     assert.ok(tables.includes('sessions'));
     assert.ok(tables.includes('events'));
     assert.ok(tables.includes('index_state'));
@@ -32,16 +34,16 @@ describe('db', () => {
   it('init is idempotent', () => {
     init(TEST_DB);
     init(TEST_DB);
-    const db = open(TEST_DB);
-    const count = db.prepare("SELECT COUNT(*) as c FROM sessions").get().c;
+    const db: Database.Database = open(TEST_DB);
+    const count = (db.prepare("SELECT COUNT(*) as c FROM sessions").get() as CountRow).c;
     assert.strictEqual(count, 0);
     db.close();
   });
 
   it('createStmts returns all expected statements', () => {
-    const db = open(TEST_DB);
-    const stmts = createStmts(db);
-    const expected = ['getState', 'getSession', 'deleteEvents', 'deleteSession',
+    const db: Database.Database = open(TEST_DB);
+    const stmts: PreparedStatements = createStmts(db);
+    const expected: (keyof PreparedStatements)[] = ['getState', 'getSession', 'deleteEvents', 'deleteSession',
       'deleteFileActivity', 'insertEvent', 'upsertSession', 'upsertState',
       'insertFileActivity', 'deleteArchive', 'insertArchive'];
     for (const key of expected) {
@@ -51,8 +53,8 @@ describe('db', () => {
   });
 
   it('FTS search works after insert', () => {
-    const db = open(TEST_DB);
-    const stmts = createStmts(db);
+    const db: Database.Database = open(TEST_DB);
+    const stmts: PreparedStatements = createStmts(db);
     stmts.upsertSession.run('test-sess-1', '2025-01-01T00:00:00Z', '2025-01-01T01:00:00Z',
       1, 0, 'test-model', 'test summary', 'main', null, 0, 0, 0, 0, 0, 0, null, null, null, null, null);
     stmts.insertEvent.run('evt-1', 'test-sess-1', '2025-01-01T00:00:00Z', 'message', 'user',

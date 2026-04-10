@@ -1,14 +1,15 @@
-const Database = require('better-sqlite3');
-const path = require('path');
-const { loadConfig } = require('./config');
+import Database from 'better-sqlite3';
+import { loadConfig } from './config.js';
+import type { AgentActaConfig, PreparedStatements, PragmaColumnRow } from './types.js';
 
-let _config = null;
-function getConfig() {
+let _config: AgentActaConfig | null = null;
+
+function getConfig(): AgentActaConfig {
   if (!_config) _config = loadConfig();
   return _config;
 }
 
-function open(dbPath) {
+export function open(dbPath?: string): Database.Database {
   const p = dbPath || getConfig().dbPath;
   const db = new Database(p);
   db.pragma('journal_mode = WAL');
@@ -16,7 +17,7 @@ function open(dbPath) {
   return db;
 }
 
-function init(dbPath) {
+export function init(dbPath?: string): void {
   const db = open(dbPath);
 
   db.exec(`
@@ -118,22 +119,23 @@ function init(dbPath) {
   `);
 
   // Add columns if missing (migration)
-  const cols = db.prepare("PRAGMA table_info(sessions)").all().map(c => c.name);
-  if (!cols.includes('agent')) db.exec("ALTER TABLE sessions ADD COLUMN agent TEXT");
-  if (!cols.includes('session_type')) db.exec("ALTER TABLE sessions ADD COLUMN session_type TEXT");
-  if (!cols.includes('total_cost')) db.exec("ALTER TABLE sessions ADD COLUMN total_cost REAL DEFAULT 0");
-  if (!cols.includes('total_tokens')) db.exec("ALTER TABLE sessions ADD COLUMN total_tokens INTEGER DEFAULT 0");
-  if (!cols.includes('input_tokens')) db.exec("ALTER TABLE sessions ADD COLUMN input_tokens INTEGER DEFAULT 0");
-  if (!cols.includes('output_tokens')) db.exec("ALTER TABLE sessions ADD COLUMN output_tokens INTEGER DEFAULT 0");
-  if (!cols.includes('cache_read_tokens')) db.exec("ALTER TABLE sessions ADD COLUMN cache_read_tokens INTEGER DEFAULT 0");
-  if (!cols.includes('cache_write_tokens')) db.exec("ALTER TABLE sessions ADD COLUMN cache_write_tokens INTEGER DEFAULT 0");
-  if (!cols.includes('models')) db.exec("ALTER TABLE sessions ADD COLUMN models TEXT");
-  if (!cols.includes('projects')) db.exec("ALTER TABLE sessions ADD COLUMN projects TEXT");
+  const cols: PragmaColumnRow[] = db.prepare("PRAGMA table_info(sessions)").all() as PragmaColumnRow[];
+  const colNames: string[] = cols.map((c: PragmaColumnRow) => c.name);
+  if (!colNames.includes('agent')) db.exec("ALTER TABLE sessions ADD COLUMN agent TEXT");
+  if (!colNames.includes('session_type')) db.exec("ALTER TABLE sessions ADD COLUMN session_type TEXT");
+  if (!colNames.includes('total_cost')) db.exec("ALTER TABLE sessions ADD COLUMN total_cost REAL DEFAULT 0");
+  if (!colNames.includes('total_tokens')) db.exec("ALTER TABLE sessions ADD COLUMN total_tokens INTEGER DEFAULT 0");
+  if (!colNames.includes('input_tokens')) db.exec("ALTER TABLE sessions ADD COLUMN input_tokens INTEGER DEFAULT 0");
+  if (!colNames.includes('output_tokens')) db.exec("ALTER TABLE sessions ADD COLUMN output_tokens INTEGER DEFAULT 0");
+  if (!colNames.includes('cache_read_tokens')) db.exec("ALTER TABLE sessions ADD COLUMN cache_read_tokens INTEGER DEFAULT 0");
+  if (!colNames.includes('cache_write_tokens')) db.exec("ALTER TABLE sessions ADD COLUMN cache_write_tokens INTEGER DEFAULT 0");
+  if (!colNames.includes('models')) db.exec("ALTER TABLE sessions ADD COLUMN models TEXT");
+  if (!colNames.includes('projects')) db.exec("ALTER TABLE sessions ADD COLUMN projects TEXT");
 
   db.close();
 }
 
-function createStmts(db) {
+export function createStmts(db: Database.Database): PreparedStatements {
   return {
     getState: db.prepare('SELECT * FROM index_state WHERE file_path = ?'),
     getSession: db.prepare('SELECT id FROM sessions WHERE id = ?'),
@@ -148,5 +150,3 @@ function createStmts(db) {
     insertArchive: db.prepare('INSERT INTO archive (session_id, line_number, raw_json) VALUES (?, ?, ?)')
   };
 }
-
-module.exports = { open, init, createStmts };

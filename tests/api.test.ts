@@ -1,31 +1,40 @@
-const { describe, it, before, after } = require('node:test');
-const assert = require('node:assert');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const http = require('http');
+import { describe, it, before, after } from 'node:test';
+import assert from 'node:assert';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import http from 'http';
 
-const { open, init, createStmts } = require('../db');
+import { open, init, createStmts } from '../src/db.js';
+import type { PreparedStatements, CountRow } from '../src/types.js';
+import type Database from 'better-sqlite3';
 
 const TMP = path.join(os.tmpdir(), `agentacta-test-api-${Date.now()}`);
 const TEST_DB = path.join(TMP, 'test.db');
 const SESSIONS_DIR = path.join(TMP, 'sessions');
 
-function fetch(url) {
+interface FetchResult {
+  status: number | undefined;
+  data: Record<string, unknown>;
+}
+
+function fetch(url: string): Promise<FetchResult> {
   return new Promise((resolve, reject) => {
     http.get(url, res => {
       let data = '';
-      res.on('data', c => data += c);
+      res.on('data', (c: Buffer) => data += c);
       res.on('end', () => {
         try { resolve({ status: res.statusCode, data: JSON.parse(data) }); }
-        catch { resolve({ status: res.statusCode, data }); }
+        catch { resolve({ status: res.statusCode, data: data as unknown as Record<string, unknown> }); }
       });
     }).on('error', reject);
   });
 }
 
 describe('api', () => {
-  let server, port, db;
+  let server: http.Server;
+  let port: number;
+  let db: Database.Database;
 
   before(async () => {
     fs.mkdirSync(SESSIONS_DIR, { recursive: true });
@@ -45,19 +54,9 @@ describe('api', () => {
     port = 10000 + Math.floor(Math.random() * 50000);
     process.env.PORT = String(port);
 
-    // Clear cached modules
-    for (const key of Object.keys(require.cache)) {
-      if (key.includes('agentacta') && !key.includes('node_modules') && !key.includes('tests')) {
-        delete require.cache[key];
-      }
-    }
-
-    // Start the server by requiring index.js
-    // We need to capture the server - but index.js doesn't export it
-    // Instead, init DB and test API via direct HTTP after spawning
     init(TEST_DB);
     db = open(TEST_DB);
-    const stmts = createStmts(db);
+    const stmts: PreparedStatements = createStmts(db);
 
     // Insert test data directly
     stmts.upsertSession.run('api-sess-1', '2025-01-01T00:00:00Z', '2025-01-01T00:02:00Z',
@@ -66,15 +65,14 @@ describe('api', () => {
     stmts.insertEvent.run('api-evt-2', 'api-sess-1', '2025-01-01T00:02:00Z', 'message', 'assistant', 'test response', null, null, null);
 
     // Create a minimal HTTP server that mimics the API
-    const { createServer } = http;
-    server = createServer((req, res) => {
-      const url = new URL(req.url, `http://localhost:${port}`);
+    server = http.createServer((req, res) => {
+      const url = new URL(req.url!, `http://localhost:${port}`);
       const p = url.pathname;
-      const json = (d, s = 200) => { res.writeHead(s, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(d)); };
+      const json = (d: unknown, s = 200): void => { res.writeHead(s, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(d)); };
 
       if (p === '/api/stats') {
-        const sessions = db.prepare('SELECT COUNT(*) as c FROM sessions').get().c;
-        const events = db.prepare('SELECT COUNT(*) as c FROM events').get().c;
+        const sessions = (db.prepare('SELECT COUNT(*) as c FROM sessions').get() as CountRow).c;
+        const events = (db.prepare('SELECT COUNT(*) as c FROM events').get() as CountRow).c;
         json({ sessions, events });
       } else if (p === '/api/sessions') {
         const rows = db.prepare('SELECT * FROM sessions ORDER BY start_time DESC LIMIT 50').all();
@@ -86,12 +84,12 @@ describe('api', () => {
         const events = db.prepare('SELECT * FROM events WHERE session_id = ?').all(id);
         json({ session, events });
       } else if (p === '/api/health') {
-        const sessions = db.prepare('SELECT COUNT(*) as c FROM sessions').get().c;
+        const sessions = (db.prepare('SELECT COUNT(*) as c FROM sessions').get() as CountRow).c;
         let dbSizeBytes = 0;
         try { dbSizeBytes = fs.statSync(TEST_DB).size; } catch {}
         json({
           status: 'ok',
-          version: require('../package.json').version,
+          version: JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')).version,
           uptime: Math.round(process.uptime()),
           sessions,
           dbSizeBytes,
@@ -103,17 +101,17 @@ describe('api', () => {
         try {
           const results = db.prepare("SELECT e.* FROM events_fts fts JOIN events e ON e.rowid = fts.rowid WHERE events_fts MATCH ? LIMIT 50").all(q);
           json({ results, total: results.length });
-        } catch (err) { json({ error: err.message }, 400); }
+        } catch (err) { json({ error: (err as Error).message }, 400); }
       } else {
         json({ error: 'Not found' }, 404);
       }
     });
 
-    await new Promise(resolve => server.listen(port, '127.0.0.1', resolve));
+    await new Promise<void>(resolve => server.listen(port, '127.0.0.1', resolve));
   });
 
   after(async () => {
-    await new Promise(resolve => server.close(resolve));
+    await new Promise<void>(resolve => server.close(() => resolve()));
     db.close();
     fs.rmSync(TMP, { recursive: true, force: true });
   });
@@ -128,15 +126,15 @@ describe('api', () => {
   it('GET /api/sessions returns sessions list', async () => {
     const { status, data } = await fetch(`http://127.0.0.1:${port}/api/sessions`);
     assert.strictEqual(status, 200);
-    assert.ok(data.sessions.length >= 1);
-    assert.strictEqual(data.sessions[0].id, 'api-sess-1');
+    assert.ok((data.sessions as unknown[]).length >= 1);
+    assert.strictEqual((data.sessions as Record<string, unknown>[])[0].id, 'api-sess-1');
   });
 
   it('GET /api/sessions/:id returns session detail', async () => {
     const { status, data } = await fetch(`http://127.0.0.1:${port}/api/sessions/api-sess-1`);
     assert.strictEqual(status, 200);
-    assert.strictEqual(data.session.id, 'api-sess-1');
-    assert.strictEqual(data.events.length, 2);
+    assert.strictEqual((data.session as Record<string, unknown>).id, 'api-sess-1');
+    assert.strictEqual((data.events as unknown[]).length, 2);
   });
 
   it('GET /api/sessions/:id returns 404 for missing', async () => {
@@ -147,7 +145,7 @@ describe('api', () => {
   it('GET /api/search with FTS query returns results', async () => {
     const { status, data } = await fetch(`http://127.0.0.1:${port}/api/search?q=test`);
     assert.strictEqual(status, 200);
-    assert.ok(data.results.length >= 1);
+    assert.ok((data.results as unknown[]).length >= 1);
   });
 
   it('GET /api/health returns status and fields', async () => {
@@ -159,12 +157,12 @@ describe('api', () => {
     assert.ok(typeof data.sessions === 'number');
     assert.ok(typeof data.dbSizeBytes === 'number');
     assert.ok(typeof data.node === 'string');
-    assert.ok(data.node.startsWith('v'));
+    assert.ok((data.node as string).startsWith('v'));
   });
 
   it('GET /api/search with empty query returns empty', async () => {
     const { status, data } = await fetch(`http://127.0.0.1:${port}/api/search?q=`);
     assert.strictEqual(status, 200);
-    assert.strictEqual(data.results.length, 0);
+    assert.strictEqual((data.results as unknown[]).length, 0);
   });
 });
