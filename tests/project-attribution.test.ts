@@ -1,7 +1,8 @@
-const { describe, it } = require('node:test');
-const assert = require('node:assert');
+import { describe, it } from 'node:test';
+import assert from 'node:assert';
 
-const { attributeSessionEvents, attributeEventDelta, extractProjectFromPath } = require('../dist/project-attribution');
+import { attributeSessionEvents, attributeEventDelta, extractProjectFromPath } from '../src/project-attribution.js';
+import type { SessionRow, EventRow, AttributedEvent, AttributionResult } from '../src/types.js';
 
 describe('project attribution', () => {
   it('extracts repo names from common absolute paths', () => {
@@ -22,8 +23,8 @@ describe('project attribution', () => {
   });
 
   it('attributes tool call and linked tool result from file path signals', () => {
-    const session = { projects: JSON.stringify(['proj-a', 'proj-b']) };
-    const events = [
+    const session = { projects: JSON.stringify(['proj-a', 'proj-b']) } as SessionRow;
+    const events: EventRow[] = [
       {
         id: 'call-1:result',
         session_id: 'sess-1',
@@ -31,7 +32,9 @@ describe('project attribution', () => {
         type: 'tool_result',
         role: 'tool',
         content: 'ok',
-        tool_name: 'Read'
+        tool_name: 'Read',
+        tool_args: null,
+        tool_result: null
       },
       {
         id: 'call-1:call',
@@ -39,8 +42,10 @@ describe('project attribution', () => {
         timestamp: '2026-03-12T10:00:02.000Z',
         type: 'tool_call',
         role: 'assistant',
+        content: null,
         tool_name: 'Read',
-        tool_args: JSON.stringify({ file_path: '/home/dev/Developer/proj-a/src/a.js' })
+        tool_args: JSON.stringify({ file_path: '/home/dev/Developer/proj-a/src/a.js' }),
+        tool_result: null
       },
       {
         id: 'msg-1',
@@ -48,11 +53,14 @@ describe('project attribution', () => {
         timestamp: '2026-03-12T10:00:01.000Z',
         type: 'message',
         role: 'assistant',
-        content: 'proj-a is the target; proj-a is active for this change'
+        content: 'proj-a is the target; proj-a is active for this change',
+        tool_name: null,
+        tool_args: null,
+        tool_result: null
       }
     ];
 
-    const result = attributeSessionEvents(session, events);
+    const result: AttributionResult = attributeSessionEvents(session, events);
     assert.strictEqual(result.events[1].project, 'proj-a');
     assert.strictEqual(result.events[0].project, 'proj-a');
     assert.strictEqual(result.events[2].project, 'proj-a');
@@ -60,56 +68,63 @@ describe('project attribution', () => {
   });
 
   it('uses branch name as a project signal when candidates exist', () => {
-    const session = { projects: JSON.stringify(['proj-a', 'proj-b']) };
-    const events = [
+    const session = { projects: JSON.stringify(['proj-a', 'proj-b']) } as SessionRow;
+    const events: EventRow[] = [
       {
         id: 'call-2:call',
         session_id: 'sess-2',
         timestamp: '2026-03-12T11:00:00.000Z',
         type: 'tool_call',
         role: 'assistant',
+        content: null,
         tool_name: 'git_commit',
-        tool_args: JSON.stringify({ branch: 'proj-b/feature/project-filtering' })
+        tool_args: JSON.stringify({ branch: 'proj-b/feature/project-filtering' }),
+        tool_result: null
       }
     ];
 
-    const result = attributeSessionEvents(session, events);
+    const result: AttributionResult = attributeSessionEvents(session, events);
     assert.strictEqual(result.events[0].project, 'proj-b');
     assert.deepStrictEqual(result.projectFilters, [{ project: 'proj-b', eventCount: 1 }]);
   });
 
   it('keeps unattributed events out of project filters', () => {
-    const session = { projects: JSON.stringify(['proj-a', 'proj-b']) };
-    const events = [
+    const session = { projects: JSON.stringify(['proj-a', 'proj-b']) } as SessionRow;
+    const events: EventRow[] = [
       {
         id: 'msg-2',
         session_id: 'sess-3',
         timestamp: '2026-03-12T12:00:00.000Z',
         type: 'message',
         role: 'assistant',
-        content: 'general status update'
+        content: 'general status update',
+        tool_name: null,
+        tool_args: null,
+        tool_result: null
       }
     ];
 
-    const result = attributeSessionEvents(session, events);
+    const result: AttributionResult = attributeSessionEvents(session, events);
     assert.strictEqual(result.events[0].project, null);
     assert.deepStrictEqual(result.projectFilters, []);
   });
 
   it('attributes delta tool_result from prior context tool_call', () => {
-    const session = { projects: JSON.stringify(['proj-a']) };
-    const context = [
+    const session = { projects: JSON.stringify(['proj-a']) } as SessionRow;
+    const context: EventRow[] = [
       {
         id: 'call-3:call',
         session_id: 'sess-4',
         timestamp: '2026-03-12T09:59:59.000Z',
         type: 'tool_call',
         role: 'assistant',
+        content: null,
         tool_name: 'Read',
-        tool_args: JSON.stringify({ file_path: '/home/dev/Developer/proj-a/src/a.js' })
+        tool_args: JSON.stringify({ file_path: '/home/dev/Developer/proj-a/src/a.js' }),
+        tool_result: null
       }
     ];
-    const delta = [
+    const delta: EventRow[] = [
       {
         id: 'call-3:result',
         session_id: 'sess-4',
@@ -117,61 +132,70 @@ describe('project attribution', () => {
         type: 'tool_result',
         role: 'tool',
         content: 'ok',
-        tool_name: 'Read'
+        tool_name: 'Read',
+        tool_args: null,
+        tool_result: null
       }
     ];
 
-    const events = attributeEventDelta(session, delta, context);
+    const events: AttributedEvent[] = attributeEventDelta(session, delta, context);
     assert.strictEqual(events.length, 1);
     assert.strictEqual(events[0].id, 'call-3:result');
     assert.strictEqual(events[0].project, 'proj-a');
   });
 
   it('attributes delta message from prior context neighborhood', () => {
-    const session = { projects: JSON.stringify(['proj-a']) };
-    const context = [
+    const session = { projects: JSON.stringify(['proj-a']) } as SessionRow;
+    const context: EventRow[] = [
       {
         id: 'call-4:call',
         session_id: 'sess-5',
         timestamp: '2026-03-12T10:00:00.000Z',
         type: 'tool_call',
         role: 'assistant',
+        content: null,
         tool_name: 'Read',
-        tool_args: JSON.stringify({ file_path: '/home/dev/Developer/proj-a/src/a.js' })
+        tool_args: JSON.stringify({ file_path: '/home/dev/Developer/proj-a/src/a.js' }),
+        tool_result: null
       }
     ];
-    const delta = [
+    const delta: EventRow[] = [
       {
         id: 'msg-4',
         session_id: 'sess-5',
         timestamp: '2026-03-12T10:00:01.000Z',
         type: 'message',
         role: 'assistant',
-        content: 'continuing with the fix'
+        content: 'continuing with the fix',
+        tool_name: null,
+        tool_args: null,
+        tool_result: null
       }
     ];
 
-    const events = attributeEventDelta(session, delta, context);
+    const events: AttributedEvent[] = attributeEventDelta(session, delta, context);
     assert.strictEqual(events.length, 1);
     assert.strictEqual(events[0].id, 'msg-4');
     assert.strictEqual(events[0].project, 'proj-a');
   });
 
   it('avoids false workspace attribution from slashy metadata', () => {
-    const session = { projects: null };
-    const events = [
+    const session = { projects: null } as SessionRow;
+    const events: EventRow[] = [
       {
         id: 'call-5:call',
         session_id: 'sess-6',
         timestamp: '2026-03-12T10:30:00.000Z',
         type: 'tool_call',
         role: 'assistant',
+        content: null,
         tool_name: 'Bash',
-        tool_args: JSON.stringify({ note: 'acme/proj-a', ref: 'refs/heads/main' })
+        tool_args: JSON.stringify({ note: 'acme/proj-a', ref: 'refs/heads/main' }),
+        tool_result: null
       }
     ];
 
-    const result = attributeSessionEvents(session, events);
+    const result: AttributionResult = attributeSessionEvents(session, events);
     assert.strictEqual(result.events[0].project, null);
     assert.strictEqual(result.events[0].project_confidence, 0);
   });
