@@ -8,6 +8,14 @@ Thanks for your interest! AgentActa is a zero-framework Node.js project — we k
 git clone https://github.com/mirajchokshi/agentacta.git
 cd agentacta
 npm install
+npm run build
+```
+
+## Running
+
+```bash
+npm run dev      # dev mode with tsx (no build step)
+npm start        # production mode from dist/
 ```
 
 ## Running Tests
@@ -16,11 +24,11 @@ npm install
 npm test
 ```
 
-Tests use Node's built-in test runner (`node:test` + `node:assert`). No extra test frameworks needed.
+Tests use Node's built-in test runner (`node:test` + `node:assert`) and are written in TypeScript, run via `tsx`. No extra test frameworks needed.
 
 ## Code Style
 
-- No frameworks — vanilla Node.js, raw HTTP, better-sqlite3
+- No frameworks — vanilla Node.js HTTP server, better-sqlite3, TypeScript
 - No new npm dependencies without strong justification
 - Keep functions small and focused
 - Use `const` by default, `let` when needed, never `var`
@@ -64,7 +72,7 @@ curl -N "http://127.0.0.1:3117/api/sessions/<SESSION_ID>/stream?after=2000-01-01
 #    If scrolled down, a "N new events" pill appears — click to jump to top.
 ```
 
-**Automated tests:** `npm test` includes `tests/sse.test.js` which covers headers, 404,
+**Automated tests:** `npm test` includes `tests/sse.test.ts` which covers headers, 404,
 event push, Last-Event-ID reconnect, and cross-session isolation.
 
 ## Reporting Issues

@@ -6,6 +6,7 @@ AgentActa is a local audit trail and search engine for AI agent sessions. It ind
 
 ## Stack
 
+- TypeScript backend (compiled to `dist/` via tsc)
 - Vanilla Node.js HTTP server (no Express)
 - SQLite via better-sqlite3 (WAL mode)
 - Vanilla JS frontend (no framework)
@@ -14,13 +15,18 @@ AgentActa is a local audit trail and search engine for AI agent sessions. It ind
 
 ## Key files
 
-- `index.js` — HTTP server, all API routes (~750 lines)
-- `db.js` — SQLite schema, init, prepared statements
-- `indexer.js` — JSONL session log parser and indexer
-- `config.js` — Config loading (CWD → XDG), env var overrides
+- `src/index.ts` — HTTP server, all API routes
+- `src/db.ts` — SQLite schema, init, prepared statements
+- `src/indexer.ts` — JSONL session log parser and indexer
+- `src/config.ts` — Config loading (CWD → XDG), env var overrides
+- `src/types.ts` — All TypeScript interfaces and type definitions
+- `src/insights.ts` — Session health scoring
+- `src/project-attribution.ts` — Project-scoped event attribution
+- `src/delta-attribution-context.ts` — Delta attribution context loader
 - `public/app.js` — Frontend application (~1800 lines)
 - `public/style.css` — All styles
 - `public/index.html` — Shell (sidebar nav + main content area)
+- `index.js` — Thin shebang wrapper → `dist/index.js`
 
 ## Architecture
 
@@ -47,7 +53,15 @@ curl http://localhost:4003/api/context/agent?name=claude-code
 npm test
 ```
 
-Uses `node:test` and `node:assert`. Tests are in `tests/`. Currently 38 tests across 6 suites.
+Uses `node:test` and `node:assert`. Tests are in `tests/` as TypeScript, run via `tsx`. Currently 58 tests across 8 suites.
+
+## Building
+
+```bash
+npm run build    # compile TS → dist/
+npm run dev      # run with tsx (no build step needed)
+npm start        # run compiled dist/index.js
+```
 
 ## Patterns to follow
 

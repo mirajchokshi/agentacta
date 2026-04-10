@@ -22,9 +22,9 @@ npx agentacta
 
 ## Why this exists
 
-Agents move fast. Your memory of what happened doesn’t.
+Agents move fast. Your memory of what happened doesn't.
 
-When you need to answer “what changed, when, and why,” you’re usually scraping logs, scrolling transcripts, or asking the same assistant that forgot 20 minutes ago.
+When you need to answer "what changed, when, and why," you're usually scraping logs, scrolling transcripts, or asking the same assistant that forgot 20 minutes ago.
 
 AgentActa gives you one place to inspect the full trail.
 
@@ -40,7 +40,7 @@ AgentActa gives you one place to inspect the full trail.
 - 📊 Stats for sessions, messages, tools, and tokens
 - ⚡ Live indexing via file watching
 - 📱 Mobile-optimized UI with floating navigation
-- 🏥 Session health scoring — reliability scores, issue detection, and per-signal breakdowns
+- 🏥 Session health scoring - reliability scores, issue detection, and per-signal breakdowns
 - 💡 Search suggestions based on real data
 - ⌨️ Command palette (⌘K / Ctrl+K) for quick navigation
 - 🎨 Theme settings (system, light, dark, OLED)
@@ -95,9 +95,9 @@ Pick a date, see everything that happened, newest first. Today's view updates li
 
 The Insights tab surfaces session health across your entire history.
 
-It tracks five issue signals — repeated tool loops, sessions that produced no output, high error rates, vague instructions, and incomplete sessions. Each signal is severity-scaled so scores reflect how bad the problem actually was, not just whether it occurred.
+It tracks five issue signals - repeated tool loops, sessions that produced no output, high error rates, vague instructions, and incomplete sessions. Each signal is severity-scaled so scores reflect how bad the problem actually was, not just whether it occurred.
 
-The reliability score (0–100) is the inverse of the confusion score: higher means the agent completed work cleanly. The issue rate shows what percentage of possible signal types were detected in a session.
+The reliability score (0-100) is the inverse of the confusion score: higher means the agent completed work cleanly. The issue rate shows what percentage of possible signal types were detected in a session.
 
 ### File Activity
 
@@ -131,7 +131,7 @@ On first run, AgentActa creates:
 - `~/.config/agentacta/config.json`
 - or `agentacta.config.json` in current directory (if present)
 
-Default config (auto-generated on first run — session directories are detected automatically):
+Default config (auto-generated on first run - session directories are detected automatically):
 
 ```json
 {
@@ -176,7 +176,7 @@ Default config (auto-generated on first run — session directories are detected
 | `GET /api/timeline/stream?after=<ts>` | SSE stream for live timeline updates |
 | `POST /api/maintenance` | VACUUM + WAL checkpoint (returns size before/after) |
 | `GET /api/health` | Server status, version, uptime, session count |
-| `GET /api/insights` | Session health summary — reliability scores, issue counts, top flagged sessions |
+| `GET /api/insights` | Session health summary - reliability scores, issue counts, top flagged sessions |
 | `GET /api/export/search?q=<query>&format=md` | Export search results |
 
 ### Context API
@@ -189,7 +189,7 @@ The Context API gives agents historical context before they start working. Inste
 | `GET /api/context/repo?path=<repo-path>` | Aggregates for a repo/project |
 | `GET /api/context/agent?name=<agent-name>` | Stats for a specific agent |
 
-**File context** — how many sessions touched this file, when it was last modified, recent change summaries, operation breakdown (reads vs edits), related files, and recent errors:
+**File context** - how many sessions touched this file, when it was last modified, recent change summaries, operation breakdown (reads vs edits), related files, and recent errors:
 
 ```bash
 curl http://localhost:4003/api/context/file?path=/home/user/project/server.js
@@ -206,7 +206,7 @@ curl http://localhost:4003/api/context/file?path=/home/user/project/server.js
 }
 ```
 
-**Agent context** — total sessions, cost, average duration, most-used tools, recent work:
+**Agent context** - total sessions, cost, average duration, most-used tools, recent work:
 
 ```bash
 curl http://localhost:4003/api/context/agent?name=claude-code
@@ -223,7 +223,7 @@ curl http://localhost:4003/api/context/agent?name=claude-code
 }
 ```
 
-**Repo context** — aggregate cost, tokens, distinct agents, most-touched files, common tools:
+**Repo context** - aggregate cost, tokens, distinct agents, most-touched files, common tools:
 
 ```bash
 curl http://localhost:4003/api/context/repo?path=agentacta
@@ -292,13 +292,13 @@ Your session history stays local.
 
 PRs welcome.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). If you’re adding a new agent format, start in `indexer.js`.
+See [CONTRIBUTING.md](CONTRIBUTING.md). If you're adding a new agent format, start in `src/indexer.ts`.
 
 ## Name
 
-*Acta* is Latin for “things done.”
+*Acta* is Latin for "things done."
 
-That’s the job here: keep a readable record of what your agents actually did.
+That's the job here: keep a readable record of what your agents actually did.
 
 ## License
 
