@@ -35,14 +35,14 @@ import { analyzeSession, analyzeAll, getInsightsSummary } from './insights.js';
 
 // --version / -v flag: print version and exit
 if (process.argv.includes('--version') || process.argv.includes('-v')) {
-  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')) as { name: string; version: string };
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')) as { name: string; version: string };
   console.log(`${pkg.name} v${pkg.version}`);
   process.exit(0);
 }
 
 // --demo flag: use demo session data (must run before config load)
 if (process.argv.includes('--demo')) {
-  const demoDir: string = path.join(__dirname, 'demo');
+  const demoDir: string = path.join(__dirname, '..', 'demo');
   if (!fs.existsSync(demoDir) || fs.readdirSync(demoDir).filter((f: string) => f.endsWith('.jsonl')).length === 0) {
     console.error('Demo data not found. Run: node scripts/seed-demo.js');
     process.exit(1);
@@ -59,7 +59,7 @@ const ARCHIVE_MODE: boolean = config.storage === 'archive';
 
 console.log(`AgentActa running in ${config.storage} mode`);
 
-const PUBLIC: string = path.join(__dirname, 'public');
+const PUBLIC: string = path.join(__dirname, '..', 'public');
 const MIME: Record<string, string> = {
   '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript',
   '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml',
@@ -290,7 +290,7 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
     }
 
     else if (pathname === '/api/health') {
-      const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')) as { name: string; version: string };
+      const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')) as { name: string; version: string };
       const sessions: number = (db.prepare('SELECT COUNT(*) as c FROM sessions').get() as CountRow).c;
       const dbSize: DbSize = getDbSize();
       return json(res, {
