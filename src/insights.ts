@@ -1,37 +1,40 @@
-'use strict';
+import type Database from 'better-sqlite3';
+import type {
+  SessionRow,
+  EventRow,
+  InsightSignal,
+  InsightResult,
+  InsightsSummary,
+  SessionInsightRow,
+  SessionInsightJoinedRow,
+  AgentInsights,
+  TopFlaggedSession,
+  CountRow,
+} from './types.js';
+import { SIGNAL_WEIGHTS } from './types.js';
 
-// SIGNAL_WEIGHTS kept for reference — no longer used directly in scoring.
-// Scoring is now severity-scaled per signal (see analyzeSession).
-const SIGNAL_WEIGHTS = {
-  tool_retry_loop: 30,
-  session_bail: 25,
-  high_error_rate: 20,
-  long_prompt_short_session: 15,
-  no_completion: 10
-};
-
-function analyzeSession(db, sessionId) {
-  const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+export function analyzeSession(db: Database.Database, sessionId: string): InsightResult | null {
+  const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId) as SessionRow | undefined;
   if (!session) return null;
 
   const events = db.prepare(
     'SELECT * FROM events WHERE session_id = ? ORDER BY timestamp ASC'
-  ).all(sessionId);
+  ).all(sessionId) as EventRow[];
 
-  const signals = [];
+  const signals: InsightSignal[] = [];
 
   // 1. tool_retry_loop: Same tool called 3+ times consecutively
   // Group by tool, keep highest streak count per tool
-  const toolCalls = events.filter(e => e.type === 'tool_call');
+  const toolCalls = events.filter((e: EventRow) => e.type === 'tool_call');
   if (toolCalls.length >= 3) {
-    const worstStreakByTool = {};
+    const worstStreakByTool: Record<string, number> = {};
     let consecutive = 1;
     for (let i = 1; i < toolCalls.length; i++) {
       if (toolCalls[i].tool_name === toolCalls[i - 1].tool_name) {
         consecutive++;
       } else {
         if (consecutive >= 3) {
-          const tool = toolCalls[i - 1].tool_name;
+          const tool = toolCalls[i - 1].tool_name as string;
           if (!worstStreakByTool[tool] || consecutive > worstStreakByTool[tool]) {
             worstStreakByTool[tool] = consecutive;
           }
@@ -41,7 +44,7 @@ function analyzeSession(db, sessionId) {
     }
     // Check final streak
     if (consecutive >= 3) {
-      const tool = toolCalls[toolCalls.length - 1].tool_name;
+      const tool = toolCalls[toolCalls.length - 1].tool_name as string;
       if (!worstStreakByTool[tool] || consecutive > worstStreakByTool[tool]) {
         worstStreakByTool[tool] = consecutive;
       }
@@ -53,7 +56,7 @@ function analyzeSession(db, sessionId) {
 
   // 2. session_bail: >20 tool calls but no file write events
   if (toolCalls.length > 20) {
-    const hasWrite = events.some(e =>
+    const hasWrite = events.some((e: EventRow) =>
       e.type === 'tool_call' && e.tool_name &&
       (e.tool_name === 'Write' || e.tool_name === 'Edit' ||
        e.tool_name.toLowerCase().includes('write') ||
@@ -68,14 +71,14 @@ function analyzeSession(db, sessionId) {
   }
 
   // 3. high_error_rate: >30% of tool calls returned errors
-  const toolResults = events.filter(e => e.type === 'tool_result');
+  const toolResults = events.filter((e: EventRow) => e.type === 'tool_result');
   if (toolResults.length > 0) {
-    const errorResults = toolResults.filter(e => {
+    const errorResults = toolResults.filter((e: EventRow) => {
       const c = (e.content || e.tool_result || '').toLowerCase();
       return c.includes('error') || c.includes('Error') || c.includes('ERROR') ||
              c.includes('failed') || c.includes('exception');
     });
-    const errorRate = errorResults.length / toolResults.length;
+    const errorRate: number = errorResults.length / toolResults.length;
     if (errorRate > 0.3) {
       signals.push({
         type: 'high_error_rate',
@@ -88,7 +91,7 @@ function analyzeSession(db, sessionId) {
 
   // 4. long_prompt_short_session: Initial prompt <15 words but >30 tool calls
   if (session.initial_prompt && toolCalls.length > 30) {
-    const wordCount = session.initial_prompt.trim().split(/\s+/).length;
+    const wordCount: number = session.initial_prompt.trim().split(/\s+/).length;
     if (wordCount < 15) {
       signals.push({
         type: 'long_prompt_short_session',
@@ -100,7 +103,7 @@ function analyzeSession(db, sessionId) {
 
   // 5. no_completion: Last event is a tool call, not an assistant message
   if (events.length > 0) {
-    const lastEvent = events[events.length - 1];
+    const lastEvent: EventRow = events[events.length - 1];
     if (lastEvent.type === 'tool_call' || lastEvent.type === 'tool_result') {
       signals.push({
         type: 'no_completion',
@@ -111,40 +114,38 @@ function analyzeSession(db, sessionId) {
   }
 
   // Compute confusion_score — severity-scaled per signal
-  function clamp(val, min, max) { return Math.max(min, Math.min(max, val)); }
-  function lerp(t, min, max) { return min + clamp(t, 0, 1) * (max - min); }
+  function clamp(val: number, min: number, max: number): number { return Math.max(min, Math.min(max, val)); }
+  function lerp(t: number, min: number, max: number): number { return min + clamp(t, 0, 1) * (max - min); }
 
-  const seenTypes = new Set();
-  let confusionScore = 0;
+  const seenTypes: Set<string> = new Set();
+  let confusionScore: number = 0;
   for (const sig of signals) {
     if (seenTypes.has(sig.type)) continue;
     seenTypes.add(sig.type);
 
     if (sig.type === 'tool_retry_loop') {
       // streak 3 = base 20, streak 10+ = 40
-      const t = clamp((sig.count - 3) / 7, 0, 1);
+      const t: number = clamp((sig.count - 3) / 7, 0, 1);
       confusionScore += Math.round(lerp(t, 20, 40));
     } else if (sig.type === 'session_bail') {
       // 20 tool calls = base 15, 60+ = 30
-      const t = clamp((sig.tool_calls - 20) / 40, 0, 1);
+      const t: number = clamp((sig.tool_calls - 20) / 40, 0, 1);
       confusionScore += Math.round(lerp(t, 15, 30));
     } else if (sig.type === 'high_error_rate') {
       // 31% error rate = base 10, 100% = 35
-      const t = clamp((sig.rate - 30) / 70, 0, 1);
+      const t: number = clamp((sig.rate - 30) / 70, 0, 1);
       confusionScore += Math.round(lerp(t, 10, 35));
     } else if (sig.type === 'long_prompt_short_session') {
       // 30 tool calls = base 10, 80+ = 20
-      const t = clamp((sig.tool_calls - 30) / 50, 0, 1);
+      const t: number = clamp((sig.tool_calls - 30) / 50, 0, 1);
       confusionScore += Math.round(lerp(t, 10, 20));
     } else if (sig.type === 'no_completion') {
       confusionScore += 10;
-    } else {
-      confusionScore += SIGNAL_WEIGHTS[sig.type] || 0;
     }
   }
   confusionScore = Math.min(confusionScore, 100);
 
-  const flagged = confusionScore >= 30;
+  const flagged: boolean = confusionScore >= 30;
 
   return {
     session_id: sessionId,
@@ -155,9 +156,9 @@ function analyzeSession(db, sessionId) {
   };
 }
 
-function analyzeAll(db) {
-  const sessions = db.prepare('SELECT id FROM sessions').all();
-  const results = [];
+export function analyzeAll(db: Database.Database): InsightResult[] {
+  const sessions = db.prepare('SELECT id FROM sessions').all() as Array<{ id: string }>;
+  const results: InsightResult[] = [];
 
   const upsert = db.prepare(`
     INSERT OR REPLACE INTO session_insights
@@ -167,7 +168,7 @@ function analyzeAll(db) {
 
   const runAll = db.transaction(() => {
     for (const s of sessions) {
-      const result = analyzeSession(db, s.id);
+      const result: InsightResult | null = analyzeSession(db, s.id);
       if (!result) continue;
       upsert.run(
         result.session_id,
@@ -184,10 +185,10 @@ function analyzeAll(db) {
   return results;
 }
 
-function getInsightsSummary(db) {
+export function getInsightsSummary(db: Database.Database): InsightsSummary {
   const rows = db.prepare(
     'SELECT si.*, s.summary, s.model, s.agent, s.start_time, s.tool_count, s.message_count FROM session_insights si JOIN sessions s ON s.id = si.session_id'
-  ).all();
+  ).all() as SessionInsightJoinedRow[];
 
   if (!rows.length) {
     return {
@@ -201,17 +202,17 @@ function getInsightsSummary(db) {
     };
   }
 
-  let totalScore = 0;
-  let flaggedCount = 0;
-  const signalCounts = {};
-  const byAgent = {};
+  let totalScore: number = 0;
+  let flaggedCount: number = 0;
+  const signalCounts: Record<string, number> = {};
+  const byAgent: Record<string, AgentInsights> = {};
 
   for (const row of rows) {
     totalScore += row.confusion_score;
     if (row.flagged) flaggedCount++;
 
-    const signals = JSON.parse(row.signals || '[]');
-    const seenTypes = new Set();
+    const signals: InsightSignal[] = JSON.parse(row.signals || '[]');
+    const seenTypes: Set<string> = new Set();
     for (const sig of signals) {
       if (!seenTypes.has(sig.type)) {
         signalCounts[sig.type] = (signalCounts[sig.type] || 0) + 1;
@@ -219,7 +220,7 @@ function getInsightsSummary(db) {
       }
     }
 
-    const agent = row.agent || 'unknown';
+    const agent: string = row.agent || 'unknown';
     if (!byAgent[agent]) byAgent[agent] = { count: 0, flagged: 0, total_score: 0 };
     byAgent[agent].count++;
     if (row.flagged) byAgent[agent].flagged++;
@@ -230,11 +231,11 @@ function getInsightsSummary(db) {
     byAgent[agent].avg_score = Math.round(byAgent[agent].total_score / byAgent[agent].count);
   }
 
-  const topFlagged = rows
-    .filter(r => r.flagged)
-    .sort((a, b) => b.confusion_score - a.confusion_score)
+  const topFlagged: TopFlaggedSession[] = rows
+    .filter((r: SessionInsightJoinedRow) => r.flagged)
+    .sort((a: SessionInsightJoinedRow, b: SessionInsightJoinedRow) => b.confusion_score - a.confusion_score)
     .slice(0, 20)
-    .map(r => ({
+    .map((r: SessionInsightJoinedRow): TopFlaggedSession => ({
       session_id: r.session_id,
       summary: r.summary,
       model: r.model,
@@ -256,5 +257,3 @@ function getInsightsSummary(db) {
     top_flagged: topFlagged
   };
 }
-
-module.exports = { analyzeSession, analyzeAll, getInsightsSummary };

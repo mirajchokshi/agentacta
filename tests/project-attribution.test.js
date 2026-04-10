@@ -1,7 +1,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
 
-const { attributeSessionEvents, attributeEventDelta, extractProjectFromPath } = require('../project-attribution');
+const { attributeSessionEvents, attributeEventDelta, extractProjectFromPath } = require('../dist/project-attribution');
 
 describe('project attribution', () => {
   it('extracts repo names from common absolute paths', () => {

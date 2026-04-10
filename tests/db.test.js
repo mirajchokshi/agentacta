@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const { open, init, createStmts } = require('../db');
+const { open, init, createStmts } = require('../dist/db');
 
 const TEST_DB = path.join(os.tmpdir(), `agentacta-test-db-${Date.now()}.db`);
 

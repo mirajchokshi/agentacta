@@ -15,11 +15,11 @@ describe('config', () => {
 
   it('env vars override defaults', () => {
     // Clear module cache to get fresh config
-    delete require.cache[require.resolve('../config')];
+    delete require.cache[require.resolve('../dist/config')];
     process.env.AGENTACTA_DB_PATH = '/tmp/override.db';
     process.env.PORT = '9999';
     process.env.AGENTACTA_STORAGE = 'archive';
-    const { loadConfig } = require('../config');
+    const { loadConfig } = require('../dist/config');
     const config = loadConfig();
     assert.strictEqual(config.port, 9999);
     assert.strictEqual(config.storage, 'archive');
@@ -28,7 +28,7 @@ describe('config', () => {
     delete process.env.AGENTACTA_DB_PATH;
     delete process.env.PORT;
     delete process.env.AGENTACTA_STORAGE;
-    delete require.cache[require.resolve('../config')];
+    delete require.cache[require.resolve('../dist/config')];
   });
 
   it('loadConfig returns expected defaults', () => {
@@ -39,12 +39,12 @@ describe('config', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentacta-test-'));
     process.chdir(tmpDir);
     try {
-      delete require.cache[require.resolve('../config')];
+      delete require.cache[require.resolve('../dist/config')];
       delete process.env.PORT;
       delete process.env.AGENTACTA_STORAGE;
       delete process.env.AGENTACTA_DB_PATH;
       delete process.env.AGENTACTA_SESSIONS_PATH;
-      const { loadConfig } = require('../config');
+      const { loadConfig } = require('../dist/config');
       const config = loadConfig();
       assert.strictEqual(config.port, 4003);
       assert.strictEqual(config.storage, 'reference');

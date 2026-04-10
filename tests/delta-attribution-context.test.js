@@ -4,8 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const { open, init, createStmts } = require('../db');
-const { loadDeltaAttributionContext } = require('../delta-attribution-context');
+const { open, init, createStmts } = require('../dist/db');
+const { loadDeltaAttributionContext } = require('../dist/delta-attribution-context');
 
 const TMP = path.join(os.tmpdir(), `agentacta-test-delta-context-${Date.now()}`);
 const TEST_DB = path.join(TMP, 'test.db');

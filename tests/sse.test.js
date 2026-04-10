@@ -6,7 +6,7 @@ const os = require('os');
 const http = require('http');
 const { EventEmitter } = require('events');
 
-const { open, init, createStmts } = require('../db');
+const { open, init, createStmts } = require('../dist/db');
 
 const TMP = path.join(os.tmpdir(), `agentacta-test-sse-${Date.now()}`);
 const TEST_DB = path.join(TMP, 'test.db');

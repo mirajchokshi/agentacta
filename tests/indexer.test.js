@@ -4,8 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const { open, init, createStmts } = require('../db');
-const { discoverSessionDirs, listJsonlFiles, indexFile, indexCronRunFile } = require('../indexer');
+const { open, init, createStmts } = require('../dist/db');
+const { discoverSessionDirs, listJsonlFiles, indexFile, indexCronRunFile } = require('../dist/indexer');
 
 const TMP = path.join(os.tmpdir(), `agentacta-test-idx-${Date.now()}`);
 const TEST_DB = path.join(TMP, 'test.db');
