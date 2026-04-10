@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026.4.10] - 2026-04-10
+
+### Changed
+- **Full TypeScript migration** — all 7 backend modules converted from JavaScript to TypeScript in `src/` directory with strict mode enabled
+- **Type-safe tests** — all 8 test files converted to TypeScript, running via `tsx` directly from source (no build step needed to test)
+- **New `src/types.ts`** — 427 lines of interfaces covering sessions, events, file activity, config, insights, attribution, and API request/response types
+- **Build pipeline** — `tsc` compiles to `dist/`, `tsx` for dev mode, `prepublishOnly` ensures build+test before npm publish
+- **Updated docs** — CLAUDE.md, CONTRIBUTING.md, README.md updated to reflect TypeScript stack
+
 ## [2026.4.8] - 2026-04-08
 
 ### Added
