@@ -63,7 +63,7 @@ npm run demo
 # 2. Open a session in the browser, note the session ID
 
 # 3. In another terminal, connect with curl:
-curl -N "http://127.0.0.1:3117/api/sessions/<SESSION_ID>/stream?after=2000-01-01T00:00:00Z"
+curl -N "http://127.0.0.1:4003/api/sessions/<SESSION_ID>/stream?after=2000-01-01T00:00:00Z"
 
 # 4. Append a new line to the session's JSONL file to trigger a re-index.
 #    After ~2s debounce, you should see the SSE push in curl output.

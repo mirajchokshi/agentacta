@@ -131,19 +131,20 @@ On first run, AgentActa creates:
 - `~/.config/agentacta/config.json`
 - or `agentacta.config.json` in current directory (if present)
 
-Default config (auto-generated on first run - session directories are detected automatically):
+Default config shape (auto-generated on first run - session directories are detected automatically):
 
 ```json
 {
   "port": 4003,
   "storage": "reference",
-  "sessionsPath": ["~/.claude/projects", "~/.openclaw/sessions"],
+  "sessionsPath": null,
   "dbPath": "./agentacta.db",
   "projectAliases": {}
 }
 ```
 
-`sessionsPath` accepts a string, a colon-delimited string, or a JSON array.
+Leave `sessionsPath` as `null` to use auto-discovery, or set it to add custom session roots.
+It accepts a string, a colon-delimited string, or a JSON array.
 
 ### Storage modes
 
@@ -168,6 +169,7 @@ Default config (auto-generated on first run - session directories are detected a
 | `GET /api/stats` | Session/message/tool/token totals |
 | `GET /api/sessions` | Session list with metadata |
 | `GET /api/sessions/:id` | Full session events |
+| `GET /api/sessions/:id/stream?after=<ts>` | SSE stream for live session-detail updates |
 | `GET /api/search?q=<query>` | Full-text search + filters |
 | `GET /api/suggestions` | Search suggestions |
 | `GET /api/timeline?date=YYYY-MM-DD` | Events for one day |
