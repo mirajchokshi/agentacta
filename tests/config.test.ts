@@ -1,8 +1,6 @@
-import { describe, it, before, after } from 'node:test';
+import { describe, it, after } from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
-import os from 'os';
-import fs from 'fs';
 
 import { loadConfig } from '../src/config.js';
 import type { AgentActaConfig } from '../src/types.js';
@@ -45,5 +43,26 @@ describe('config', () => {
     assert.strictEqual(config.port, 4003);
     // dbPath should be resolved to an absolute path
     assert.ok(path.isAbsolute(config.dbPath));
+  });
+
+  it('parses AGENTACTA_SESSIONS_PATH as a JSON array', () => {
+    process.env.AGENTACTA_SESSIONS_PATH = '["/tmp/one", "/tmp/two"]';
+    const config: AgentActaConfig = loadConfig();
+    assert.deepStrictEqual(config.sessionsPath, ['/tmp/one', '/tmp/two']);
+    delete process.env.AGENTACTA_SESSIONS_PATH;
+  });
+
+  it('falls back to the current config when port and storage env vars are invalid', () => {
+    delete process.env.PORT;
+    delete process.env.AGENTACTA_STORAGE;
+    const baseline: AgentActaConfig = loadConfig();
+
+    process.env.PORT = 'not-a-port';
+    process.env.AGENTACTA_STORAGE = 'warehouse';
+    const config: AgentActaConfig = loadConfig();
+    assert.strictEqual(config.port, baseline.port);
+    assert.strictEqual(config.storage, baseline.storage);
+    delete process.env.PORT;
+    delete process.env.AGENTACTA_STORAGE;
   });
 });
