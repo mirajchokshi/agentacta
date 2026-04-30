@@ -27,7 +27,8 @@ const DEFAULTS: AgentActaConfig = {
   storage: 'reference',
   sessionsPath: null,
   dbPath: './agentacta.db',
-  projectAliases: {}
+  projectAliases: {},
+  authToken: null
 };
 
 function detectSessionDirs(): string[] | null {
@@ -117,6 +118,7 @@ function loadConfig(): AgentActaConfig {
   if (process.env.AGENTACTA_STORAGE) config.storage = normalizeStorage(process.env.AGENTACTA_STORAGE, config.storage);
   if (process.env.AGENTACTA_SESSIONS_PATH) config.sessionsPath = normalizeSessionsPath(process.env.AGENTACTA_SESSIONS_PATH);
   if (process.env.AGENTACTA_DB_PATH) config.dbPath = process.env.AGENTACTA_DB_PATH;
+  if (process.env.AGENTACTA_AUTH_TOKEN) config.authToken = process.env.AGENTACTA_AUTH_TOKEN;
   if (process.env.AGENTACTA_PROJECT_ALIASES_JSON) {
     try {
       config.projectAliases = JSON.parse(process.env.AGENTACTA_PROJECT_ALIASES_JSON) as Record<string, string>;

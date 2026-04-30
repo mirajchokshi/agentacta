@@ -55,6 +55,8 @@ if (process.argv.includes('--demo')) {
 
 const config: AgentActaConfig = loadConfig();
 const PORT: number = config.port;
+const HOST: string = process.env.AGENTACTA_HOST || '127.0.0.1';
+const AUTH_TOKEN: string = (config.authToken || '').trim();
 const ARCHIVE_MODE: boolean = config.storage === 'archive';
 
 console.log(`AgentActa running in ${config.storage} mode`);
@@ -69,6 +71,42 @@ const MIME: Record<string, string> = {
 function json(res: http.ServerResponse, data: unknown, status: number = 200): void {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(data));
+}
+
+function isLoopbackHost(host: string): boolean {
+  const normalized: string = host.toLowerCase();
+  return normalized === '127.0.0.1' || normalized === 'localhost' || normalized === '::1';
+}
+
+function parseCookie(header: string | undefined, key: string): string | null {
+  if (!header) return null;
+  for (const part of header.split(';')) {
+    const [rawName, ...valueParts] = part.trim().split('=');
+    if (rawName === key) return decodeURIComponent(valueParts.join('='));
+  }
+  return null;
+}
+
+function getPresentedToken(req: http.IncomingMessage, query: Record<string, string>): string {
+  const authorization: string = req.headers.authorization || '';
+  if (authorization.toLowerCase().startsWith('bearer ')) return authorization.slice(7).trim();
+  const headerToken: string | string[] | undefined = req.headers['x-agentacta-token'];
+  if (typeof headerToken === 'string') return headerToken.trim();
+  if (query.token) return query.token;
+  return parseCookie(req.headers.cookie, 'agentacta_token') || '';
+}
+
+function requireAuth(req: http.IncomingMessage, res: http.ServerResponse, query: Record<string, string>): boolean {
+  if (!AUTH_TOKEN) return true;
+  const presentedToken: string = getPresentedToken(req, query);
+  if (presentedToken && presentedToken === AUTH_TOKEN) {
+    if (query.token) {
+      res.setHeader('Set-Cookie', `agentacta_token=${encodeURIComponent(AUTH_TOKEN)}; HttpOnly; SameSite=Lax; Path=/`);
+    }
+    return true;
+  }
+  json(res, { error: 'Unauthorized' }, 401);
+  return false;
 }
 
 function download(res: http.ServerResponse, data: unknown, filename: string, contentType: string): void {
@@ -283,6 +321,8 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
   const { pathname, query }: ParsedQuery = parseQuery(req.url || '/');
 
   try {
+    if (!requireAuth(req, res, query)) return;
+
     if (pathname === '/api/reindex') {
       const result: IndexAllResult = indexAll(db, config);
       try { analyzeAll(db); } catch (e: unknown) { console.error('Insights recompute error:', (e as Error).message); }
@@ -847,7 +887,11 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
   }
 });
 
-const HOST: string = process.env.AGENTACTA_HOST || '127.0.0.1';
+if (!isLoopbackHost(HOST) && !AUTH_TOKEN && process.env.AGENTACTA_ALLOW_UNAUTHENTICATED_NETWORK !== '1') {
+  console.error('Refusing to bind AgentActa on a non-loopback host without auth. Set AGENTACTA_AUTH_TOKEN, or set AGENTACTA_ALLOW_UNAUTHENTICATED_NETWORK=1 if this is an intentional trusted-network exposure.');
+  process.exit(1);
+}
+
 server.on('error', (err: NodeJS.ErrnoException) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`Port ${PORT} in use, retrying in 2s...`);

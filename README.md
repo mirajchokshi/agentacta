@@ -262,13 +262,23 @@ const data = await res.json();
 
 AgentActa binds to `127.0.0.1` by default.
 
-If you expose it on a network, do it intentionally:
+If you expose it on a network, protect it with a shared token:
 
 ```bash
-AGENTACTA_HOST=0.0.0.0 agentacta
+AGENTACTA_HOST=0.0.0.0 AGENTACTA_AUTH_TOKEN="$(openssl rand -hex 24)" agentacta
 ```
 
-**Important:** Session data can contain sensitive content (file snippets, API payloads, personal messages, tool args). There is no built-in auth yet, so only expose on trusted networks.
+Then open AgentActa once with the token in the URL. AgentActa will store it in a local cookie for the browser:
+
+```text
+http://your-host:4003/?token=your-token
+```
+
+API clients can send either `Authorization: Bearer your-token` or `X-AgentActa-Token: your-token`.
+
+AgentActa refuses non-loopback binds without `AGENTACTA_AUTH_TOKEN` unless you explicitly set `AGENTACTA_ALLOW_UNAUTHENTICATED_NETWORK=1` for a trusted-network-only deployment.
+
+**Important:** Session data can contain sensitive content (file snippets, API payloads, personal messages, tool args). Do not expose AgentActa publicly without a real access layer in front of it.
 
 ## Tech stack
 
