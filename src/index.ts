@@ -123,6 +123,13 @@ function download(res: http.ServerResponse, data: unknown, filename: string, con
   res.end(typeof data === 'string' ? data : JSON.stringify(data, null, 2));
 }
 
+function requireMethod(req: http.IncomingMessage, res: http.ServerResponse, method: string): boolean {
+  if (req.method === method) return true;
+  res.setHeader('Allow', method);
+  json(res, { error: 'Method not allowed' }, 405);
+  return false;
+}
+
 function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const reqUrl: string = req.url || '/';
   let fp: string = path.join(PUBLIC, reqUrl.split('?')[0] === '/' ? 'index.html' : reqUrl.split('?')[0]);
@@ -330,6 +337,7 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
     if (!requireAuth(req, res, query)) return;
 
     if (pathname === '/api/reindex') {
+      if (!requireMethod(req, res, 'POST')) return;
       const result: IndexAllResult = indexAll(db, config);
       try { analyzeAll(db); } catch (e: unknown) { console.error('Insights recompute error:', (e as Error).message); }
       return json(res, { ok: true, sessions: result.sessions, events: result.events });
@@ -647,7 +655,7 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       });
     }
     else if (pathname === '/api/maintenance') {
-      if (req.method !== 'POST') return json(res, { error: 'Method not allowed' }, 405);
+      if (!requireMethod(req, res, 'POST')) return;
       const sizeBefore: DbSize = getDbSize();
       db.pragma('wal_checkpoint(TRUNCATE)');
       db.exec('VACUUM');
