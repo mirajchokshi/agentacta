@@ -14,6 +14,7 @@ function resolveConfigFile(): string {
 }
 
 const CONFIG_FILE: string = resolveConfigFile();
+const VALID_STORAGE_MODES: ReadonlySet<string> = new Set(['reference', 'archive']);
 
 const KNOWN_SESSION_DIRS: string[] = [
   path.join(os.homedir(), '.claude', 'projects'),    // Claude Code
@@ -26,12 +27,58 @@ const DEFAULTS: AgentActaConfig = {
   storage: 'reference',
   sessionsPath: null,
   dbPath: './agentacta.db',
-  projectAliases: {}
+  projectAliases: {},
+  authToken: null
 };
 
 function detectSessionDirs(): string[] | null {
   const found: string[] = KNOWN_SESSION_DIRS.filter((d: string) => fs.existsSync(d));
   return found.length > 0 ? found : null;
+}
+
+function normalizeSessionsPath(value: unknown): string | string[] | null {
+  if (Array.isArray(value)) {
+    const paths = value.filter((entry: unknown): entry is string => typeof entry === 'string')
+      .map((entry: string) => entry.trim())
+      .filter(Boolean);
+    return paths.length ? paths : null;
+  }
+
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  if (trimmed.startsWith('[')) {
+    try {
+      return normalizeSessionsPath(JSON.parse(trimmed));
+    } catch (err) {
+      console.error('Warning: Could not parse sessionsPath JSON array:', (err as Error).message);
+      return null;
+    }
+  }
+
+  if (trimmed.includes(path.delimiter)) {
+    const paths = trimmed.split(path.delimiter).map((entry: string) => entry.trim()).filter(Boolean);
+    return paths.length ? paths : null;
+  }
+
+  return trimmed;
+}
+
+function normalizePort(value: unknown, fallback: number): number {
+  if (typeof value !== 'string' && typeof value !== 'number') return fallback;
+  const parsed = Number.parseInt(String(value), 10);
+  if (Number.isInteger(parsed) && parsed > 0 && parsed <= 65535) return parsed;
+  console.error(`Warning: Invalid port ${JSON.stringify(value)}. Falling back to ${fallback}.`);
+  return fallback;
+}
+
+function normalizeStorage(value: unknown, fallback: AgentActaConfig['storage']): AgentActaConfig['storage'] {
+  if (typeof value === 'string' && VALID_STORAGE_MODES.has(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    console.error(`Warning: Invalid storage mode ${JSON.stringify(value)}. Falling back to ${fallback}.`);
+  }
+  return fallback;
 }
 
 function loadConfig(): AgentActaConfig {
@@ -62,11 +109,16 @@ function loadConfig(): AgentActaConfig {
   if (process.env.AGENTACTA_DEMO_MODE) delete fileConfig.sessionsPath;
   const config: AgentActaConfig = { ...DEFAULTS, ...fileConfig };
 
+  config.sessionsPath = normalizeSessionsPath(config.sessionsPath);
+  config.port = normalizePort(config.port, DEFAULTS.port);
+  config.storage = normalizeStorage(config.storage, DEFAULTS.storage);
+
   // Env var overrides (highest priority)
-  if (process.env.PORT) config.port = parseInt(process.env.PORT);
-  if (process.env.AGENTACTA_STORAGE) config.storage = process.env.AGENTACTA_STORAGE;
-  if (process.env.AGENTACTA_SESSIONS_PATH) config.sessionsPath = process.env.AGENTACTA_SESSIONS_PATH;
+  if (process.env.PORT) config.port = normalizePort(process.env.PORT, config.port);
+  if (process.env.AGENTACTA_STORAGE) config.storage = normalizeStorage(process.env.AGENTACTA_STORAGE, config.storage);
+  if (process.env.AGENTACTA_SESSIONS_PATH) config.sessionsPath = normalizeSessionsPath(process.env.AGENTACTA_SESSIONS_PATH);
   if (process.env.AGENTACTA_DB_PATH) config.dbPath = process.env.AGENTACTA_DB_PATH;
+  if (process.env.AGENTACTA_AUTH_TOKEN) config.authToken = process.env.AGENTACTA_AUTH_TOKEN;
   if (process.env.AGENTACTA_PROJECT_ALIASES_JSON) {
     try {
       config.projectAliases = JSON.parse(process.env.AGENTACTA_PROJECT_ALIASES_JSON) as Record<string, string>;

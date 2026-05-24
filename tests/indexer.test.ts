@@ -240,6 +240,49 @@ describe('indexer', () => {
     }
   });
 
+  it('uses normalized config sessionsPath instead of raw env override', () => {
+    const originalHome = process.env.HOME;
+    const originalSessionsPath = process.env.AGENTACTA_SESSIONS_PATH;
+    const home = path.join(TMP, 'home-normalized-env');
+    const one = path.join(home, 'one');
+    const two = path.join(home, 'two');
+    fs.mkdirSync(one, { recursive: true });
+    fs.mkdirSync(two, { recursive: true });
+    process.env.HOME = home;
+    process.env.AGENTACTA_SESSIONS_PATH = JSON.stringify([one, two]);
+
+    try {
+      const dirs: SessionDir[] = discoverSessionDirs({ sessionsPath: [one, two] });
+      assert.ok(dirs.find(d => d.path === one));
+      assert.ok(dirs.find(d => d.path === two));
+    } finally {
+      process.env.HOME = originalHome;
+      if (originalSessionsPath === undefined) delete process.env.AGENTACTA_SESSIONS_PATH;
+      else process.env.AGENTACTA_SESSIONS_PATH = originalSessionsPath;
+    }
+  });
+
+  it('uses only explicit session paths in demo mode', () => {
+    const originalHome = process.env.HOME;
+    const originalDemoMode = process.env.AGENTACTA_DEMO_MODE;
+    const home = path.join(TMP, 'home-demo-only');
+    const demo = path.join(home, 'demo-sessions');
+    const auto = path.join(home, '.openclaw', 'agents', 'main', 'sessions');
+    fs.mkdirSync(demo, { recursive: true });
+    fs.mkdirSync(auto, { recursive: true });
+    process.env.HOME = home;
+    process.env.AGENTACTA_DEMO_MODE = '1';
+
+    try {
+      const dirs: SessionDir[] = discoverSessionDirs({ sessionsPath: [demo] });
+      assert.deepStrictEqual(dirs.map(d => d.path), [demo]);
+    } finally {
+      process.env.HOME = originalHome;
+      if (originalDemoMode === undefined) delete process.env.AGENTACTA_DEMO_MODE;
+      else process.env.AGENTACTA_DEMO_MODE = originalDemoMode;
+    }
+  });
+
   it('discovers cron runs as a synthetic fallback source', () => {
     const originalHome = process.env.HOME;
     const home = path.join(TMP, 'home-cron-runs');

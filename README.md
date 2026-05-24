@@ -131,19 +131,20 @@ On first run, AgentActa creates:
 - `~/.config/agentacta/config.json`
 - or `agentacta.config.json` in current directory (if present)
 
-Default config (auto-generated on first run - session directories are detected automatically):
+Default config shape (auto-generated on first run - session directories are detected automatically):
 
 ```json
 {
   "port": 4003,
   "storage": "reference",
-  "sessionsPath": ["~/.claude/projects", "~/.openclaw/sessions"],
+  "sessionsPath": null,
   "dbPath": "./agentacta.db",
   "projectAliases": {}
 }
 ```
 
-`sessionsPath` accepts a string, a colon-delimited string, or a JSON array.
+Leave `sessionsPath` as `null` to use auto-discovery, or set it to add custom session roots.
+It accepts a string, a colon-delimited string, or a JSON array.
 
 ### Storage modes
 
@@ -168,6 +169,7 @@ Default config (auto-generated on first run - session directories are detected a
 | `GET /api/stats` | Session/message/tool/token totals |
 | `GET /api/sessions` | Session list with metadata |
 | `GET /api/sessions/:id` | Full session events |
+| `GET /api/sessions/:id/stream?after=<ts>` | SSE stream for live session-detail updates |
 | `GET /api/search?q=<query>` | Full-text search + filters |
 | `GET /api/suggestions` | Search suggestions |
 | `GET /api/timeline?date=YYYY-MM-DD` | Events for one day |
@@ -260,13 +262,23 @@ const data = await res.json();
 
 AgentActa binds to `127.0.0.1` by default.
 
-If you expose it on a network, do it intentionally:
+If you expose it on a network, protect it with a shared token:
 
 ```bash
-AGENTACTA_HOST=0.0.0.0 agentacta
+AGENTACTA_HOST=0.0.0.0 AGENTACTA_AUTH_TOKEN="$(openssl rand -hex 24)" agentacta
 ```
 
-**Important:** Session data can contain sensitive content (file snippets, API payloads, personal messages, tool args). There is no built-in auth yet, so only expose on trusted networks.
+Then open AgentActa once with the token in the URL. AgentActa will store it in a local cookie for the browser:
+
+```text
+http://your-host:4003/?token=your-token
+```
+
+API clients can send either `Authorization: Bearer your-token` or `X-AgentActa-Token: your-token`.
+
+AgentActa refuses non-loopback binds without `AGENTACTA_AUTH_TOKEN` unless you explicitly set `AGENTACTA_ALLOW_UNAUTHENTICATED_NETWORK=1` for a trusted-network-only deployment.
+
+**Important:** Session data can contain sensitive content (file snippets, API payloads, personal messages, tool args). Do not expose AgentActa publicly without a real access layer in front of it.
 
 ## Tech stack
 

@@ -7,6 +7,7 @@ export interface AgentActaConfig {
   sessionsPath: string | string[] | null;
   dbPath: string;
   projectAliases: Record<string, string>;
+  authToken?: string | null;
 }
 
 // ─── Database row types ──────────────────────────────────────────────
