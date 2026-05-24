@@ -129,6 +129,9 @@ export function init(dbPath?: string): void {
   if (!colNames.includes('output_tokens')) db.exec("ALTER TABLE sessions ADD COLUMN output_tokens INTEGER DEFAULT 0");
   if (!colNames.includes('cache_read_tokens')) db.exec("ALTER TABLE sessions ADD COLUMN cache_read_tokens INTEGER DEFAULT 0");
   if (!colNames.includes('cache_write_tokens')) db.exec("ALTER TABLE sessions ADD COLUMN cache_write_tokens INTEGER DEFAULT 0");
+  if (!colNames.includes('initial_prompt')) db.exec("ALTER TABLE sessions ADD COLUMN initial_prompt TEXT");
+  if (!colNames.includes('first_message_id')) db.exec("ALTER TABLE sessions ADD COLUMN first_message_id TEXT");
+  if (!colNames.includes('first_message_timestamp')) db.exec("ALTER TABLE sessions ADD COLUMN first_message_timestamp TEXT");
   if (!colNames.includes('models')) db.exec("ALTER TABLE sessions ADD COLUMN models TEXT");
   if (!colNames.includes('projects')) db.exec("ALTER TABLE sessions ADD COLUMN projects TEXT");
 
