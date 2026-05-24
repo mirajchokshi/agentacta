@@ -1,5 +1,22 @@
 # Changelog
 
+## [2026.5.23] - 2026-05-23
+
+### Added
+- **Authenticated network binds** - non-loopback hosts now require `AGENTACTA_AUTH_TOKEN` unless `AGENTACTA_ALLOW_UNAUTHENTICATED_NETWORK=1` is explicitly set.
+- **Bearer/header/cookie auth support** - protected deployments accept `Authorization: Bearer`, `X-AgentActa-Token`, or a local `agentacta_token` cookie seeded from `?token=...`.
+- **SSE endpoint docs** - README and contributor notes now document the session stream endpoint.
+
+### Changed
+- `sessionsPath` config and environment handling now accepts normalized strings, JSON arrays, and platform-delimited paths consistently.
+- Demo mode only indexes the seeded demo session path, preventing live session auto-discovery during local demos.
+
+### Fixed
+- Pull-to-refresh now POSTs to `/api/reindex`, matching the mutating-route method guard.
+- `/api/reindex` and `/api/maintenance` reject non-POST requests with `405 Method Not Allowed`.
+- Legacy databases missing newer session metadata columns are migrated before prepared statements are created.
+- Malformed auth cookie values are treated as missing tokens instead of returning 500 errors.
+
 ## [2026.4.10] - 2026-04-10
 
 ### Changed
