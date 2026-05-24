@@ -89,14 +89,17 @@ function discoverSessionDirs(config: AgentActaConfig): SessionDir[] {
     }
   }
 
-  // Config sessionsPath or env var override
-  const sessionsOverride = process.env.AGENTACTA_SESSIONS_PATH || (config && config.sessionsPath);
+  // Env overrides are normalized in loadConfig(); use the config value here so
+  // JSON arrays and platform path delimiters behave consistently at runtime.
+  const sessionsOverride = config && config.sessionsPath;
   if (sessionsOverride) {
     const overridePaths: string[] = Array.isArray(sessionsOverride)
       ? sessionsOverride
       : sessionsOverride.split(':');
     overridePaths.forEach(expandPath);
   }
+
+  if (process.env.AGENTACTA_DEMO_MODE) return dirs;
 
   // Auto-discover: ~/.openclaw/agents/*/sessions/
   const oclawAgents = path.join(home, '.openclaw/agents');

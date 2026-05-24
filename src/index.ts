@@ -82,7 +82,13 @@ function parseCookie(header: string | undefined, key: string): string | null {
   if (!header) return null;
   for (const part of header.split(';')) {
     const [rawName, ...valueParts] = part.trim().split('=');
-    if (rawName === key) return decodeURIComponent(valueParts.join('='));
+    if (rawName === key) {
+      try {
+        return decodeURIComponent(valueParts.join('='));
+      } catch {
+        return null;
+      }
+    }
   }
   return null;
 }
