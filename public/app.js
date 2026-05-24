@@ -2061,7 +2061,7 @@ handleRoute();
       indicator.textContent = 'Refreshing\u2026';
       indicator.classList.add('refreshing');
       try {
-        await api('/reindex');
+        await api('/reindex', { method: 'POST' });
         // Just reindex data without re-rendering the view
         // The next manual navigation will pick up new data
       } catch(err) {}
