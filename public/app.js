@@ -132,7 +132,12 @@ function fmtCost(c) {
 
 function escHtml(s) {
   if (!s) return '';
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
 }
 
 function fmtToolName(name) {
@@ -547,7 +552,7 @@ async function showSearchHome() {
 
     ${suggestions.length ? `<div class="section-label">Quick Search</div>
     <div class="filters" id="suggestions">
-      ${suggestions.map(s => `<span class="suggestion-chip" data-q="${s}">${s}</span>`).join('')}
+      ${suggestions.map(s => `<span class="suggestion-chip" data-q="${escHtml(s)}">${escHtml(s)}</span>`).join('')}
     </div>` : ''}
 
     <div class="section-label">Recent Sessions</div>
