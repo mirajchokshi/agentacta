@@ -32,6 +32,7 @@ import { discoverSessionDirs, listJsonlFiles, indexFile, indexAll } from './inde
 import { attributeSessionEvents, attributeEventDelta } from './project-attribution.js';
 import { loadDeltaAttributionContext } from './delta-attribution-context.js';
 import { analyzeSession, analyzeAll, getInsightsSummary } from './insights.js';
+import { isIsoDate } from './date-utils.js';
 
 // --version / -v flag: print version and exit
 if (process.argv.includes('--version') || process.argv.includes('-v')) {
@@ -595,8 +596,12 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
     }
     else if (pathname === '/api/timeline') {
       const date: string = query.date || (() => { const n: Date = new Date(); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`; })();
-      const from: string = new Date(date + 'T00:00:00').toISOString();
-      const to: string = new Date(date + 'T23:59:59.999').toISOString();
+      if (!isIsoDate(date)) {
+        json(res, { error: 'Invalid date. Expected YYYY-MM-DD.' }, 400);
+        return;
+      }
+      const from: string = new Date(date + 'T00:00:00.000Z').toISOString();
+      const to: string = new Date(date + 'T23:59:59.999Z').toISOString();
       const limit: number = Math.min(parseInt(query.limit || '100', 10) || 100, 500);
       const offset: number = Math.max(parseInt(query.offset || '0', 10) || 0, 0);
       const events: TimelineEventRow[] = db.prepare(
