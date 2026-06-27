@@ -1,5 +1,12 @@
 # Changelog
 
+## [2026.6.27] - 2026-06-27
+
+### Fixed
+- **Session live trace updates** - session detail pages now subscribe to the session SSE stream instead of relying only on polling.
+- **SSE event cursors** - live session updates now use timestamp plus event ID cursors so same-timestamp events are not skipped.
+- **Reconnect compatibility** - existing timestamp-only SSE reconnect cursors remain supported while newer clients use the stronger cursor format.
+
 ## [2026.5.23] - 2026-05-23
 
 ### Added
