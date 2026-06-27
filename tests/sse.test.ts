@@ -13,6 +13,14 @@ import type Database from 'better-sqlite3';
 const TMP = path.join(os.tmpdir(), `agentacta-test-sse-${Date.now()}`);
 const TEST_DB = path.join(TMP, 'test.db');
 
+function parseCursor(cursor: string | undefined, fallbackAfter: string, fallbackAfterId?: string): { after: string; afterId: string | null } {
+  const raw = (cursor || '').trim();
+  if (!raw) return { after: fallbackAfter, afterId: fallbackAfterId || null };
+  const sep = raw.indexOf('|');
+  if (sep === -1) return { after: raw, afterId: null };
+  return { after: raw.slice(0, sep), afterId: raw.slice(sep + 1) };
+}
+
 function httpGet(url: string): Promise<http.IncomingMessage> {
   return new Promise((resolve, reject) => {
     http.get(url, resolve).on('error', reject);
@@ -57,17 +65,27 @@ describe('SSE endpoint', () => {
         });
         res.write(': connected\n\n');
 
-        let lastTs = req.headers['last-event-id'] as string || q.after || new Date().toISOString();
+        let cursor = parseCursor(req.headers['last-event-id'] as string | undefined, q.after || new Date().toISOString(), q.afterId || '');
 
         const onUpdate = (sessionId: string): void => {
           if (sessionId !== id) return;
           try {
-            const rows = db.prepare(
-              'SELECT * FROM events WHERE session_id = ? AND timestamp > ? ORDER BY timestamp ASC'
-            ).all(id, lastTs) as EventRow[];
+            const rows = cursor.afterId === null
+              ? db.prepare(
+                `SELECT * FROM events
+                 WHERE session_id = ? AND timestamp > ?
+                 ORDER BY timestamp ASC, id ASC`
+              ).all(id, cursor.after) as EventRow[]
+              : db.prepare(
+                `SELECT * FROM events
+                 WHERE session_id = ?
+                   AND (timestamp > ? OR (timestamp = ? AND id > ?))
+                 ORDER BY timestamp ASC, id ASC`
+              ).all(id, cursor.after, cursor.after, cursor.afterId) as EventRow[];
             if (rows.length) {
-              lastTs = rows[rows.length - 1].timestamp;
-              res.write(`id: ${lastTs}\ndata: ${JSON.stringify(rows)}\n\n`);
+              const tail = rows[rows.length - 1];
+              cursor = { after: tail.timestamp, afterId: tail.id };
+              res.write(`id: ${tail.timestamp}|${tail.id}\ndata: ${JSON.stringify(rows)}\n\n`);
             }
           } catch {}
         };
@@ -183,6 +201,42 @@ describe('SSE endpoint', () => {
     // Should only get evt-3, not evt-1 or evt-2
     assert.strictEqual(events.length, 1);
     assert.strictEqual(events[0].id, 'sse-evt-3');
+  });
+
+  it('uses timestamp plus event id cursor so same-timestamp events are not skipped', async () => {
+    const events = await new Promise<EventRow[]>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Timeout')), 5000);
+
+      const req = http.get(
+        `http://127.0.0.1:${port}/api/sessions/sse-sess-1/stream?after=2025-01-01T00:06:00Z&afterId=sse-evt-4`,
+        res => {
+          let buf = '';
+          res.on('data', (chunk: Buffer) => {
+            buf += chunk.toString();
+            const match = buf.match(/^data: (.+)$/m);
+            if (match) {
+              clearTimeout(timeout);
+              res.destroy();
+              resolve(JSON.parse(match[1]) as EventRow[]);
+            }
+          });
+        }
+      );
+      req.on('error', (err: NodeJS.ErrnoException) => {
+        if (err.code !== 'ECONNRESET') reject(err);
+      });
+
+      setTimeout(() => {
+        stmts.insertEvent.run('sse-evt-4', 'sse-sess-1', '2025-01-01T00:06:00Z',
+          'message', 'assistant', 'already seen', null, null, null);
+        stmts.insertEvent.run('sse-evt-5', 'sse-sess-1', '2025-01-01T00:06:00Z',
+          'message', 'assistant', 'same timestamp new event', null, null, null);
+        sseEmitter.emit('session-update', 'sse-sess-1');
+      }, 100);
+    });
+
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].id, 'sse-evt-5');
   });
 
   it('ignores updates for other sessions', async () => {
