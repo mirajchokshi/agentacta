@@ -996,7 +996,7 @@ async function viewSession(id) {
     }
   };
 
-  // Poll every 3s for new events using delta endpoint
+  // Subscribe to real-time updates via SSE, with polling as a fallback.
   let lastSeenTs = allEvents.length ? allEvents[0].timestamp : new Date(0).toISOString();
   let lastSeenId = allEvents.length ? allEvents[0].id : '';
   const pollNewEvents = async () => {
@@ -1014,7 +1014,33 @@ async function viewSession(id) {
     }
   };
 
-  const pollInterval = setInterval(pollNewEvents, 3000);
+  let pollInterval = null;
+  const startPolling = () => {
+    if (pollInterval) return;
+    pollInterval = setInterval(pollNewEvents, 3000);
+  };
+
+  let eventSource = null;
+  if ('EventSource' in window) {
+    eventSource = new EventSource(`/api/sessions/${encodeURIComponent(id)}/stream?after=${encodeURIComponent(lastSeenTs)}&afterId=${encodeURIComponent(lastSeenId)}`);
+    eventSource.onmessage = (event) => {
+      try {
+        const incoming = JSON.parse(event.data) || [];
+        if (incoming.length) {
+          const tail = incoming[incoming.length - 1];
+          lastSeenTs = tail.timestamp || lastSeenTs;
+          lastSeenId = tail.id || lastSeenId;
+          applyIncomingEvents(incoming);
+        }
+      } catch (err) {
+        // malformed SSE payload; fallback polling can recover on the next tick
+        startPolling();
+      }
+    };
+    eventSource.onerror = () => startPolling();
+  } else {
+    startPolling();
+  }
 
   const sseScrollHandler = () => {
     if (window.scrollY < 100) {
@@ -1026,7 +1052,8 @@ async function viewSession(id) {
 
   window._sseCleanup = () => {
     if (onScroll) { window.removeEventListener('scroll', onScroll); onScroll = null; }
-    clearInterval(pollInterval);
+    if (eventSource) eventSource.close();
+    if (pollInterval) clearInterval(pollInterval);
     window.removeEventListener('scroll', sseScrollHandler);
     const ind = document.getElementById('newEventsIndicator');
     if (ind) ind.remove();

@@ -217,6 +217,18 @@ function toFtsQuery(q: string): string {
     .join(' AND ');
 }
 
+function parseEventCursor(cursor: string | undefined, fallbackAfter: string, fallbackAfterId?: string): { after: string; afterId: string | null } {
+  const raw: string = (cursor || '').trim();
+  if (!raw) return { after: fallbackAfter, afterId: fallbackAfterId || null };
+  const sep: number = raw.indexOf('|');
+  if (sep === -1) return { after: raw, afterId: null };
+  return { after: raw.slice(0, sep), afterId: raw.slice(sep + 1) };
+}
+
+function formatEventCursor(row: EventRow): string {
+  return `${row.timestamp}|${row.id}`;
+}
+
 // Init DB and start watcher
 init();
 const db: Database.Database = open();
@@ -458,19 +470,29 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       });
       res.write(': connected\n\n');
 
-      let lastTs: string = (req.headers['last-event-id'] as string) || query.after || new Date().toISOString();
+      let cursor = parseEventCursor(req.headers['last-event-id'] as string | undefined, query.after || new Date().toISOString(), query.afterId || '');
 
       const onUpdate = (sessionId: string): void => {
         if (sessionId !== id) return;
         try {
-          const rows: EventRow[] = db.prepare(
-            'SELECT * FROM events WHERE session_id = ? AND timestamp > ? ORDER BY timestamp ASC'
-          ).all(id, lastTs) as EventRow[];
+          const rows: EventRow[] = cursor.afterId === null
+            ? db.prepare(
+              `SELECT * FROM events
+               WHERE session_id = ? AND timestamp > ?
+               ORDER BY timestamp ASC, id ASC`
+            ).all(id, cursor.after) as EventRow[]
+            : db.prepare(
+              `SELECT * FROM events
+               WHERE session_id = ?
+                 AND (timestamp > ? OR (timestamp = ? AND id > ?))
+               ORDER BY timestamp ASC, id ASC`
+            ).all(id, cursor.after, cursor.after, cursor.afterId) as EventRow[];
           if (rows.length) {
             const contextRows: EventRow[] = loadDeltaAttributionContext(db, id, rows);
             const attributedRows: AttributedEvent[] = attributeEventDelta(session, rows, contextRows);
-            lastTs = rows[rows.length - 1].timestamp;
-            res.write(`id: ${lastTs}\ndata: ${JSON.stringify(attributedRows)}\n\n`);
+            const tail: EventRow = rows[rows.length - 1];
+            cursor = { after: tail.timestamp, afterId: tail.id };
+            res.write(`id: ${formatEventCursor(tail)}\ndata: ${JSON.stringify(attributedRows)}\n\n`);
           }
         } catch (err: unknown) {
           console.error('SSE query error:', (err as Error).message);
