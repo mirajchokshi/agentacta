@@ -41,9 +41,9 @@ describe('api', () => {
     fs.mkdirSync(SESSIONS_DIR, { recursive: true });
     // Write a session file
     const lines = [
-      JSON.stringify({ type: 'session', id: 'api-sess-1', timestamp: '2025-01-01T00:00:00Z' }),
-      JSON.stringify({ type: 'message', id: 'api-msg-1', timestamp: '2025-01-01T00:01:00Z', message: { role: 'user', content: 'test api query' } }),
-      JSON.stringify({ type: 'message', id: 'api-msg-2', timestamp: '2025-01-01T00:02:00Z', message: { role: 'assistant', content: 'test response' } })
+      JSON.stringify({ type: 'session', id: 'api-sess-1', timestamp: '2025-01-01T12:00:00Z' }),
+      JSON.stringify({ type: 'message', id: 'api-msg-1', timestamp: '2025-01-01T12:01:00Z', message: { role: 'user', content: 'test api query' } }),
+      JSON.stringify({ type: 'message', id: 'api-msg-2', timestamp: '2025-01-01T12:02:00Z', message: { role: 'assistant', content: 'test response' } })
     ].join('\n') + '\n';
     fs.writeFileSync(path.join(SESSIONS_DIR, 'api-sess-1.jsonl'), lines);
 
@@ -60,10 +60,10 @@ describe('api', () => {
     const stmts: PreparedStatements = createStmts(db);
 
     // Insert test data directly
-    stmts.upsertSession.run('api-sess-1', '2025-01-01T00:00:00Z', '2025-01-01T00:02:00Z',
-      2, 0, 'test-model', 'test api query', 'main', null, 0.01, 500, 200, 300, 0, 0, 'test api query', 'api-msg-1', '2025-01-01T00:01:00Z', null, null);
-    stmts.insertEvent.run('api-evt-1', 'api-sess-1', '2025-01-01T00:01:00Z', 'message', 'user', 'test api query', null, null, null);
-    stmts.insertEvent.run('api-evt-2', 'api-sess-1', '2025-01-01T00:02:00Z', 'message', 'assistant', 'test response', null, null, null);
+    stmts.upsertSession.run('api-sess-1', '2025-01-01T12:00:00Z', '2025-01-01T12:02:00Z',
+      2, 0, 'test-model', 'test api query', 'main', null, 0.01, 500, 200, 300, 0, 0, 'test api query', 'api-msg-1', '2025-01-01T12:01:00Z', null, null);
+    stmts.insertEvent.run('api-evt-1', 'api-sess-1', '2025-01-01T12:01:00Z', 'message', 'user', 'test api query', null, null, null);
+    stmts.insertEvent.run('api-evt-2', 'api-sess-1', '2025-01-01T12:02:00Z', 'message', 'assistant', 'test response', null, null, null);
 
     // Create a minimal HTTP server that mimics the API
     server = http.createServer((req, res) => {
