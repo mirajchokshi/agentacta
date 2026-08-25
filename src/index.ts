@@ -32,6 +32,7 @@ import { discoverSessionDirs, listJsonlFiles, indexFile, indexAll } from './inde
 import { attributeSessionEvents, attributeEventDelta } from './project-attribution.js';
 import { loadDeltaAttributionContext } from './delta-attribution-context.js';
 import { analyzeSession, analyzeAll, getInsightsSummary } from './insights.js';
+import { isValidDateKey, resolveStaticPath } from './http-utils.js';
 
 // --version / -v flag: print version and exit
 if (process.argv.includes('--version') || process.argv.includes('-v')) {
@@ -132,9 +133,8 @@ function requireMethod(req: http.IncomingMessage, res: http.ServerResponse, meth
 
 function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const reqUrl: string = req.url || '/';
-  let fp: string = path.join(PUBLIC, reqUrl.split('?')[0] === '/' ? 'index.html' : reqUrl.split('?')[0]);
-  fp = path.normalize(fp);
-  if (!fp.startsWith(PUBLIC)) { res.writeHead(403); res.end(); return true; }
+  const fp: string | null = resolveStaticPath(PUBLIC, reqUrl.split('?')[0]);
+  if (!fp) { res.writeHead(403); res.end(); return true; }
   if (fs.existsSync(fp) && fs.statSync(fp).isFile()) {
     const ext: string = path.extname(fp);
     res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
@@ -617,6 +617,7 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
     }
     else if (pathname === '/api/timeline') {
       const date: string = query.date || (() => { const n: Date = new Date(); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`; })();
+      if (!isValidDateKey(date)) { json(res, { error: 'Invalid date, expected YYYY-MM-DD' }, 400); return; }
       const from: string = new Date(date + 'T00:00:00').toISOString();
       const to: string = new Date(date + 'T23:59:59.999').toISOString();
       const limit: number = Math.min(parseInt(query.limit || '100', 10) || 100, 500);

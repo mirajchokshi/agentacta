@@ -6,6 +6,7 @@ import os from 'os';
 import http from 'http';
 
 import { open, init, createStmts } from '../src/db.js';
+import { isValidDateKey } from '../src/http-utils.js';
 import type { PreparedStatements, CountRow } from '../src/types.js';
 import type Database from 'better-sqlite3';
 
@@ -40,9 +41,9 @@ describe('api', () => {
     fs.mkdirSync(SESSIONS_DIR, { recursive: true });
     // Write a session file
     const lines = [
-      JSON.stringify({ type: 'session', id: 'api-sess-1', timestamp: '2025-01-01T00:00:00Z' }),
-      JSON.stringify({ type: 'message', id: 'api-msg-1', timestamp: '2025-01-01T00:01:00Z', message: { role: 'user', content: 'test api query' } }),
-      JSON.stringify({ type: 'message', id: 'api-msg-2', timestamp: '2025-01-01T00:02:00Z', message: { role: 'assistant', content: 'test response' } })
+      JSON.stringify({ type: 'session', id: 'api-sess-1', timestamp: '2025-01-01T12:00:00Z' }),
+      JSON.stringify({ type: 'message', id: 'api-msg-1', timestamp: '2025-01-01T12:01:00Z', message: { role: 'user', content: 'test api query' } }),
+      JSON.stringify({ type: 'message', id: 'api-msg-2', timestamp: '2025-01-01T12:02:00Z', message: { role: 'assistant', content: 'test response' } })
     ].join('\n') + '\n';
     fs.writeFileSync(path.join(SESSIONS_DIR, 'api-sess-1.jsonl'), lines);
 
@@ -59,10 +60,10 @@ describe('api', () => {
     const stmts: PreparedStatements = createStmts(db);
 
     // Insert test data directly
-    stmts.upsertSession.run('api-sess-1', '2025-01-01T00:00:00Z', '2025-01-01T00:02:00Z',
-      2, 0, 'test-model', 'test api query', 'main', null, 0.01, 500, 200, 300, 0, 0, 'test api query', 'api-msg-1', '2025-01-01T00:01:00Z', null, null);
-    stmts.insertEvent.run('api-evt-1', 'api-sess-1', '2025-01-01T00:01:00Z', 'message', 'user', 'test api query', null, null, null);
-    stmts.insertEvent.run('api-evt-2', 'api-sess-1', '2025-01-01T00:02:00Z', 'message', 'assistant', 'test response', null, null, null);
+    stmts.upsertSession.run('api-sess-1', '2025-01-01T12:00:00Z', '2025-01-01T12:02:00Z',
+      2, 0, 'test-model', 'test api query', 'main', null, 0.01, 500, 200, 300, 0, 0, 'test api query', 'api-msg-1', '2025-01-01T12:01:00Z', null, null);
+    stmts.insertEvent.run('api-evt-1', 'api-sess-1', '2025-01-01T12:01:00Z', 'message', 'user', 'test api query', null, null, null);
+    stmts.insertEvent.run('api-evt-2', 'api-sess-1', '2025-01-01T12:02:00Z', 'message', 'assistant', 'test response', null, null, null);
 
     // Create a minimal HTTP server that mimics the API
     server = http.createServer((req, res) => {
@@ -95,6 +96,15 @@ describe('api', () => {
           dbSizeBytes,
           node: process.version
         });
+      } else if (p === '/api/timeline') {
+        const date = url.searchParams.get('date') || '2025-01-01';
+        if (!isValidDateKey(date)) return json({ error: 'Invalid date, expected YYYY-MM-DD' }, 400);
+        const from = new Date(date + 'T00:00:00').toISOString();
+        const to = new Date(date + 'T23:59:59.999').toISOString();
+        const events = db.prepare(
+          'SELECT e.* FROM events e WHERE e.timestamp >= ? AND e.timestamp <= ? ORDER BY e.timestamp DESC'
+        ).all(from, to);
+        json({ date, events, total: events.length });
       } else if (p === '/api/search') {
         const q = url.searchParams.get('q') || '';
         if (!q) return json({ results: [], total: 0 });
@@ -164,5 +174,23 @@ describe('api', () => {
     const { status, data } = await fetch(`http://127.0.0.1:${port}/api/search?q=`);
     assert.strictEqual(status, 200);
     assert.strictEqual((data.results as unknown[]).length, 0);
+  });
+
+  it('GET /api/timeline returns events for a valid date', async () => {
+    const { status, data } = await fetch(`http://127.0.0.1:${port}/api/timeline?date=2025-01-01`);
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.date, '2025-01-01');
+    assert.ok((data.events as unknown[]).length >= 1);
+  });
+
+  it('GET /api/timeline rejects a malformed date with 400', async () => {
+    const { status, data } = await fetch(`http://127.0.0.1:${port}/api/timeline?date=not-a-date`);
+    assert.strictEqual(status, 400);
+    assert.match(data.error as string, /YYYY-MM-DD/);
+  });
+
+  it('GET /api/timeline rejects an impossible date with 400', async () => {
+    const { status } = await fetch(`http://127.0.0.1:${port}/api/timeline?date=2026-02-30`);
+    assert.strictEqual(status, 400);
   });
 });
