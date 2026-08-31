@@ -3,11 +3,13 @@
 ## [2026.8.31] - 2026-08-31
 
 ### Added
-- **OpenClaw SQLite session source** - OpenClaw ≥2026.8.1 stores session transcripts in per-agent SQLite databases (`~/.openclaw/agents/<agent>/agent/openclaw-agent.sqlite`, `transcript_events` table) instead of JSONL files. AgentActa now auto-discovers these stores, indexes each session's events through the existing parser, and live-watches the database for new activity (WAL-aware: watches the containing directory).
-- **Incremental DB session re-indexing** - DB-backed sessions are skipped when unchanged using a `seq:<max_seq>:<line_count>` change token in `index_state`, so appends re-index only the affected session.
+- **OpenClaw SQLite session source** - OpenClaw ≥2026.8.1 stores session transcripts in per-agent SQLite databases (`~/.openclaw/agents/<agent>/agent/openclaw-agent.sqlite`, `transcript_events` table) instead of JSONL files. AgentActa now auto-discovers these stores, indexes each session's events through the existing parser, and live-watches the database for new activity (WAL-aware: watches the containing directory, debounced with a max-wait so a continuously busy store still flushes).
+- **Incremental DB session re-indexing** - DB-backed sessions are skipped when unchanged using a `seq:<max_seq>:<line_count>:<byte_count>` change token in `index_state` (byte count catches in-place row updates), with a cheap file-level probe that skips the whole pass when nothing was written. Unparseable sessions record state (with a one-time warning) instead of being re-read on every tick.
 
 ### Changed
-- **Shared transcript parser** - the JSONL parsing core of `indexFile` is extracted into `indexSessionLines`, used by both file-backed and DB-backed sources; `index_state` keys for DB sessions use `<dbPath>#<sessionId>`.
+- **Shared transcript parser** - the JSONL parsing core of `indexFile` is extracted into `indexSessionLines`, used by both file-backed and DB-backed sources; `index_state` keys for DB sessions use `<dbPath>#<sessionId>`, and DB sources pass the store's `session_id` as the fallback session ID.
+- **Source preference** - when an agent has both a legacy JSONL sessions dir and a SQLite store, only the store is indexed; dual sources indexing the same session ID would clobber each other.
+- **Deduplicated live-update plumbing** - one shared `watchOpenClawDb` helper serves the server and CLI watchers, and the insights-recompute + SSE-notify block is extracted into `refreshInsightsAndNotify`.
 
 ## [2026.6.27] - 2026-06-27
 

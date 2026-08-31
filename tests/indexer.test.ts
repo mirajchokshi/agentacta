@@ -379,6 +379,54 @@ describe('indexer', () => {
     assert.strictEqual(updated.message_count, 3);
   });
 
+
+  it('prefers the OpenClaw sqlite store over the legacy sessions dir for the same agent', () => {
+    const originalHome = process.env.HOME;
+    const home = path.join(TMP, 'home-db-preference');
+    const legacy = path.join(home, '.openclaw', 'agents', 'main', 'sessions');
+    const agentDir = path.join(home, '.openclaw', 'agents', 'main', 'agent');
+    fs.mkdirSync(legacy, { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+    const storePath = path.join(agentDir, 'openclaw-agent.sqlite');
+    new Database(storePath).close();
+    process.env.HOME = home;
+    try {
+      const dirs: SessionDir[] = discoverSessionDirs({ sessionsPath: null } as never);
+      const dbDir = dirs.find(d => d.path === storePath);
+      assert.ok(dbDir);
+      assert.strictEqual(dbDir!.sourceType, 'openclaw-db');
+      assert.ok(!dirs.some(d => d.path === legacy), 'legacy sessions dir must be skipped when the sqlite store exists');
+    } finally {
+      process.env.HOME = originalHome;
+    }
+  });
+
+  it('uses the transcript_events session_id when a DB session header has no id', () => {
+    const dbp = path.join(TMP, 'openclaw-agent-noid.sqlite');
+    const src = new Database(dbp);
+    src.exec('CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, event_json TEXT, created_at INTEGER)');
+    const ins = src.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?)');
+    ins.run('db-sess-noid', 1, JSON.stringify({ type: 'session', version: 3, timestamp: '2026-08-31T01:00:00Z' }), 1);
+    ins.run('db-sess-noid', 2, JSON.stringify({ type: 'message', id: 'noid-msg-1', timestamp: '2026-08-31T01:01:00Z', message: { role: 'user', content: 'Header without id' } }), 2);
+    src.close();
+    const ids = indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never);
+    assert.deepStrictEqual(ids, ['db-sess-noid']);
+    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('db-sess-noid') as SessionRow;
+    assert.ok(sess, 'session must be stored under the transcript_events session_id, not a path-derived id');
+  });
+
+  it('records index state for unparseable DB sessions so they are not re-read every pass', () => {
+    const dbp = path.join(TMP, 'openclaw-agent-badjson.sqlite');
+    const src = new Database(dbp);
+    src.exec('CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, event_json TEXT, created_at INTEGER)');
+    src.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?)').run('db-sess-bad', 1, 'not json at all', 1);
+    src.close();
+    const ids = indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never);
+    assert.deepStrictEqual(ids, []);
+    const state = db.prepare('SELECT * FROM index_state WHERE file_path = ?').get(`${dbp}#db-sess-bad`);
+    assert.ok(state, 'skipped session must still record an index_state row');
+  });
+
   it('keeps codex discovery when override paths omit codex', () => {
     const originalHome = process.env.HOME;
     const home = path.join(TMP, 'home-codex-fallback');
