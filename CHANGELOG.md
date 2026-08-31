@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026.8.31] - 2026-08-31
+
+### Added
+- **OpenClaw SQLite session source** - OpenClaw ≥2026.8.1 stores session transcripts in per-agent SQLite databases (`~/.openclaw/agents/<agent>/agent/openclaw-agent.sqlite`, `transcript_events` table) instead of JSONL files. AgentActa now auto-discovers these stores, indexes each session's events through the existing parser, and live-watches the database for new activity (WAL-aware: watches the containing directory).
+- **Incremental DB session re-indexing** - DB-backed sessions are skipped when unchanged using a `seq:<max_seq>:<line_count>` change token in `index_state`, so appends re-index only the affected session.
+
+### Changed
+- **Shared transcript parser** - the JSONL parsing core of `indexFile` is extracted into `indexSessionLines`, used by both file-backed and DB-backed sources; `index_state` keys for DB sessions use `<dbPath>#<sessionId>`.
+
 ## [2026.6.27] - 2026-06-27
 
 ### Fixed
