@@ -5,9 +5,9 @@ import path from 'path';
 import os from 'os';
 
 import { open, init, createStmts } from '../src/db.js';
-import { discoverSessionDirs, listJsonlFiles, indexFile, indexCronRunFile } from '../src/indexer.js';
+import { discoverSessionDirs, listJsonlFiles, indexFile, indexCronRunFile, indexOpenClawDb } from '../src/indexer.js';
 import type { PreparedStatements, SessionRow, SessionDir, IndexResult } from '../src/types.js';
-import type Database from 'better-sqlite3';
+import Database from 'better-sqlite3';
 
 const TMP = path.join(os.tmpdir(), `agentacta-test-idx-${Date.now()}`);
 const TEST_DB = path.join(TMP, 'test.db');
@@ -346,6 +346,85 @@ describe('indexer', () => {
     const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('cron-preferred') as SessionRow;
     assert.strictEqual(sess.summary, 'Real transcript prompt');
     assert.strictEqual(sess.message_count, 1);
+  });
+
+
+  it('indexes OpenClaw sqlite transcript stores and skips unchanged sessions', () => {
+    const dbp = path.join(TMP, 'openclaw-agent.sqlite');
+    const src = new Database(dbp);
+    src.exec('CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, event_json TEXT, created_at INTEGER)');
+    const ins = src.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?)');
+    ins.run('db-sess-1', 1, JSON.stringify({ type: 'session', version: 3, id: 'db-sess-1', timestamp: '2026-08-31T00:00:00Z' }), 1);
+    ins.run('db-sess-1', 2, JSON.stringify({ type: 'message', id: 'db-msg-1', timestamp: '2026-08-31T00:01:00Z', message: { role: 'user', content: 'Hello from sqlite' } }), 2);
+    ins.run('db-sess-1', 3, JSON.stringify({ type: 'message', id: 'db-msg-2', timestamp: '2026-08-31T00:02:00Z', message: { role: 'assistant', content: 'Hi!', model: 'openai/gpt-5.6-sol' } }), 3);
+
+    const first = indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never);
+    assert.deepStrictEqual(first, ['db-sess-1']);
+    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('db-sess-1') as SessionRow;
+    assert.strictEqual(sess.agent, 'main');
+    assert.strictEqual(sess.summary, 'Hello from sqlite');
+    assert.strictEqual(sess.message_count, 2);
+    assert.strictEqual(sess.model, 'openai/gpt-5.6-sol');
+
+    // Unchanged store: nothing re-indexed
+    const second = indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never);
+    assert.deepStrictEqual(second, []);
+
+    // Appended event bumps max seq and triggers a re-index
+    ins.run('db-sess-1', 4, JSON.stringify({ type: 'message', id: 'db-msg-3', timestamp: '2026-08-31T00:03:00Z', message: { role: 'user', content: 'Follow-up' } }), 4);
+    src.close();
+    const third = indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never);
+    assert.deepStrictEqual(third, ['db-sess-1']);
+    const updated = db.prepare('SELECT * FROM sessions WHERE id = ?').get('db-sess-1') as SessionRow;
+    assert.strictEqual(updated.message_count, 3);
+  });
+
+
+  it('prefers the OpenClaw sqlite store over the legacy sessions dir for the same agent', () => {
+    const originalHome = process.env.HOME;
+    const home = path.join(TMP, 'home-db-preference');
+    const legacy = path.join(home, '.openclaw', 'agents', 'main', 'sessions');
+    const agentDir = path.join(home, '.openclaw', 'agents', 'main', 'agent');
+    fs.mkdirSync(legacy, { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+    const storePath = path.join(agentDir, 'openclaw-agent.sqlite');
+    new Database(storePath).close();
+    process.env.HOME = home;
+    try {
+      const dirs: SessionDir[] = discoverSessionDirs({ sessionsPath: null } as never);
+      const dbDir = dirs.find(d => d.path === storePath);
+      assert.ok(dbDir);
+      assert.strictEqual(dbDir!.sourceType, 'openclaw-db');
+      assert.ok(!dirs.some(d => d.path === legacy), 'legacy sessions dir must be skipped when the sqlite store exists');
+    } finally {
+      process.env.HOME = originalHome;
+    }
+  });
+
+  it('uses the transcript_events session_id when a DB session header has no id', () => {
+    const dbp = path.join(TMP, 'openclaw-agent-noid.sqlite');
+    const src = new Database(dbp);
+    src.exec('CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, event_json TEXT, created_at INTEGER)');
+    const ins = src.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?)');
+    ins.run('db-sess-noid', 1, JSON.stringify({ type: 'session', version: 3, timestamp: '2026-08-31T01:00:00Z' }), 1);
+    ins.run('db-sess-noid', 2, JSON.stringify({ type: 'message', id: 'noid-msg-1', timestamp: '2026-08-31T01:01:00Z', message: { role: 'user', content: 'Header without id' } }), 2);
+    src.close();
+    const ids = indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never);
+    assert.deepStrictEqual(ids, ['db-sess-noid']);
+    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('db-sess-noid') as SessionRow;
+    assert.ok(sess, 'session must be stored under the transcript_events session_id, not a path-derived id');
+  });
+
+  it('records index state for unparseable DB sessions so they are not re-read every pass', () => {
+    const dbp = path.join(TMP, 'openclaw-agent-badjson.sqlite');
+    const src = new Database(dbp);
+    src.exec('CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, event_json TEXT, created_at INTEGER)');
+    src.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?)').run('db-sess-bad', 1, 'not json at all', 1);
+    src.close();
+    const ids = indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never);
+    assert.deepStrictEqual(ids, []);
+    const state = db.prepare('SELECT * FROM index_state WHERE file_path = ?').get(`${dbp}#db-sess-bad`);
+    assert.ok(state, 'skipped session must still record an index_state row');
   });
 
   it('keeps codex discovery when override paths omit codex', () => {

@@ -28,7 +28,7 @@ import type {
 } from './types.js';
 import { loadConfig } from './config.js';
 import { open, init, createStmts } from './db.js';
-import { discoverSessionDirs, listJsonlFiles, indexFile, indexAll } from './indexer.js';
+import { discoverSessionDirs, listJsonlFiles, indexFile, indexOpenClawDb, watchOpenClawDb, indexAll } from './indexer.js';
 import { attributeSessionEvents, attributeEventDelta } from './project-attribution.js';
 import { loadDeltaAttributionContext } from './delta-attribution-context.js';
 import { analyzeSession, analyzeAll, getInsightsSummary } from './insights.js';
@@ -244,6 +244,15 @@ const sessionDirs: SessionDir[] = discoverSessionDirs(config);
 
 // Initial indexing pass
 for (const dir of sessionDirs) {
+  if (dir.sourceType === 'openclaw-db') {
+    try {
+      const ids: string[] = indexOpenClawDb(db, dir.path, dir.agent, stmts, ARCHIVE_MODE, config);
+      if (ids.length > 0) console.log(`Indexed ${ids.length} DB sessions from ${path.basename(dir.path)} (${dir.agent})`);
+    } catch (err: unknown) {
+      console.error(`Error indexing ${path.basename(dir.path)}:`, (err as Error).message);
+    }
+    continue;
+  }
   const files: string[] = listJsonlFiles(dir.path, !!dir.recursive);
   for (const filePath of files) {
     try {
@@ -270,22 +279,28 @@ const _reindexTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 const REINDEX_DEBOUNCE_MS: number = 2000;
 const RECURSIVE_RESCAN_MS: number = 15000;
 
+// Recompute insights for re-indexed sessions and push SSE updates to clients
+function refreshInsightsAndNotify(sessionIds: string[]): void {
+  if (sessionIds.length === 0) return;
+  const upsert: Database.Statement = db.prepare('INSERT OR REPLACE INTO session_insights (session_id, signals, confusion_score, flagged, computed_at) VALUES (?, ?, ?, ?, ?)');
+  for (const sessionId of sessionIds) {
+    try {
+      const insight: InsightResult | null = analyzeSession(db, sessionId);
+      if (insight) upsert.run(insight.session_id, JSON.stringify(insight.signals), insight.confusion_score, insight.flagged ? 1 : 0, insight.computed_at);
+    } catch { /* ignore */ }
+    sseEmitter.emit('session-update', sessionId);
+  }
+}
+
 function reindexRecursiveDir(dir: SessionDir): void {
   try {
     const files: string[] = listJsonlFiles(dir.path, true);
     let changed: number = 0;
-    const upsert: Database.Statement = db.prepare('INSERT OR REPLACE INTO session_insights (session_id, signals, confusion_score, flagged, computed_at) VALUES (?, ?, ?, ?, ?)');
     for (const filePath of files) {
       const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
       if (!result.skipped) {
         changed++;
-        if (result.sessionId) {
-          try {
-            const insight: InsightResult | null = analyzeSession(db, result.sessionId);
-            if (insight) upsert.run(insight.session_id, JSON.stringify(insight.signals), insight.confusion_score, insight.flagged ? 1 : 0, insight.computed_at);
-          } catch { /* ignore */ }
-          sseEmitter.emit('session-update', result.sessionId);
-        }
+        if (result.sessionId) refreshInsightsAndNotify([result.sessionId]);
       }
     }
     if (changed > 0) console.log(`Live re-indexed ${changed} files (${dir.agent})`);
@@ -294,8 +309,25 @@ function reindexRecursiveDir(dir: SessionDir): void {
   }
 }
 
+function reindexOpenClawDb(dir: SessionDir): void {
+  try {
+    const ids: string[] = indexOpenClawDb(db, dir.path, dir.agent, stmts, ARCHIVE_MODE, config);
+    if (ids.length > 0) {
+      console.log(`Live re-indexed ${ids.length} DB sessions (${dir.agent})`);
+      refreshInsightsAndNotify(ids);
+    }
+  } catch (err: unknown) {
+    console.error(`Error re-indexing ${dir.path}:`, (err as Error).message);
+  }
+}
+
 for (const dir of sessionDirs) {
   try {
+    if (dir.sourceType === 'openclaw-db') {
+      watchOpenClawDb(dir.path, { debounceMs: REINDEX_DEBOUNCE_MS, persistent: false }, () => reindexOpenClawDb(dir));
+      console.log(`  Watching: ${dir.path}`);
+      continue;
+    }
     fs.watch(dir.path, { persistent: false }, (_eventType: string, filename: string | null) => {
       if (dir.recursive) {
         if (_reindexTimers.has(dir.path)) clearTimeout(_reindexTimers.get(dir.path));
@@ -318,14 +350,7 @@ for (const dir of sessionDirs) {
           const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
           if (!result.skipped) {
             console.log(`Live re-indexed: ${filename} (${dir.agent})`);
-            if (result.sessionId) {
-              try {
-                const upsert: Database.Statement = db.prepare('INSERT OR REPLACE INTO session_insights (session_id, signals, confusion_score, flagged, computed_at) VALUES (?, ?, ?, ?, ?)');
-                const insight: InsightResult | null = analyzeSession(db, result.sessionId);
-                if (insight) upsert.run(insight.session_id, JSON.stringify(insight.signals), insight.confusion_score, insight.flagged ? 1 : 0, insight.computed_at);
-              } catch { /* ignore */ }
-              sseEmitter.emit('session-update', result.sessionId);
-            }
+            if (result.sessionId) refreshInsightsAndNotify([result.sessionId]);
           }
         } catch (err: unknown) {
           console.error(`Error re-indexing ${filename}:`, (err as Error).message);

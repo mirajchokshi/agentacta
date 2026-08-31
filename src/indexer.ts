@@ -101,10 +101,18 @@ function discoverSessionDirs(config: AgentActaConfig): SessionDir[] {
 
   if (process.env.AGENTACTA_DEMO_MODE) return dirs;
 
-  // Auto-discover: ~/.openclaw/agents/*/sessions/
+  // Auto-discover OpenClaw agents. ≥2026.8.1 stores transcripts in a per-agent
+  // SQLite store; the legacy JSONL dir is only registered when no store exists,
+  // because both sources indexing the same session_id clobber each other
+  // (delete-then-reinsert commits, last writer wins).
   const oclawAgents = path.join(home, '.openclaw/agents');
   if (fs.existsSync(oclawAgents)) {
     for (const agent of fs.readdirSync(oclawAgents)) {
+      const dbp = path.join(oclawAgents, agent, 'agent', 'openclaw-agent.sqlite');
+      if (fs.existsSync(dbp) && fs.statSync(dbp).isFile()) {
+        addDir({ path: dbp, agent, sourceType: 'openclaw-db' });
+        continue;
+      }
       const sp = path.join(oclawAgents, agent, 'sessions');
       if (fs.existsSync(sp) && fs.statSync(sp).isDirectory()) {
         addDir({ path: sp, agent });
@@ -398,6 +406,13 @@ function indexFile(db: Database.Database, filePath: string, agentName: string, s
   const lines = raw.trim().split('\n').filter(Boolean);
   if (lines.length === 0) return { skipped: true };
 
+  return indexSessionLines(db, filePath, lines, agentName, stmts, archiveMode, config, mtime);
+}
+
+// Core parser shared by file-backed sessions (indexFile) and DB-backed sessions
+// (indexOpenClawDb). sourceKey identifies the source in index_state (a file path,
+// or dbPath#sessionId); stateToken is the change marker stored as last_modified.
+function indexSessionLines(db: Database.Database, sourceKey: string, lines: string[], agentName: string, stmts: PreparedStatements, archiveMode: boolean, config: AgentActaConfig, stateToken: string, fallbackSessionId?: string): IndexResult {
   let sessionId: string | null = null;
   let sessionStart: string | null = null;
   let sessionEnd: string | null = null;
@@ -435,7 +450,7 @@ function indexFile(db: Database.Database, filePath: string, agentName: string, s
 
   if (firstLine.type === 'session') {
     // OpenClaw format
-    sessionId = firstLine.id || null;
+    sessionId = firstLine.id || fallbackSessionId || null;
     sessionStart = firstLine.timestamp || null;
     if (firstLine.agent) agent = firstLine.agent;
     if (firstLine.sessionType) sessionType = firstLine.sessionType;
@@ -457,15 +472,15 @@ function indexFile(db: Database.Database, filePath: string, agentName: string, s
       }
     }
     if (!sessionId) {
-      // Fallback: use filename as session ID
-      sessionId = path.basename(filePath, '.jsonl');
+      // Fallback: caller-provided ID (DB sources), else filename
+      sessionId = fallbackSessionId || path.basename(sourceKey, '.jsonl');
       sessionStart = new Date(firstLine.timestamp || Date.now()).toISOString();
     }
   } else if (firstLine.type === 'session_meta') {
     // Codex CLI format
     isCodexCli = true;
     const meta = (firstLine.payload || {}) as CodexSessionMeta;
-    sessionId = meta.id || path.basename(filePath, '.jsonl');
+    sessionId = meta.id || fallbackSessionId || path.basename(sourceKey, '.jsonl');
     sessionStart = meta.timestamp || firstLine.timestamp || new Date().toISOString();
     sessionType = 'codex-direct';
     agent = 'codex-cli';
@@ -766,12 +781,118 @@ function indexFile(db: Database.Database, filePath: string, agentName: string, s
       }
     }
 
-    stmts.upsertState.run(filePath, lines.length, mtime);
+    stmts.upsertState.run(sourceKey, lines.length, stateToken);
   });
 
   commitIndex();
 
   return { sessionId: sessionId as string, msgCount, toolCount };
+}
+
+// OpenClaw ≥2026.8.1 stores session transcripts in a per-agent SQLite database
+// (transcript_events) instead of JSONL files. Each event_json row is exactly one
+// line of the old JSONL format (including the {type:"session"} header), so each
+// session's rows are reassembled into lines and fed through the shared parser.
+
+// Warn-once registries so an unreadable store or unparseable session does not
+// spam the log on every watch tick.
+const warnedDbOpens = new Set<string>();
+const warnedDbSessions = new Set<string>();
+// Cheap file-level probe (db + -wal size/mtime) so watch ticks skip the
+// per-session aggregate entirely when nothing was written since the last pass.
+const dbProbeTokens = new Map<string, string>();
+
+function openClawDbProbeToken(dbPath: string): string | null {
+  try {
+    const st = fs.statSync(dbPath);
+    let wal = '';
+    try {
+      const w = fs.statSync(dbPath + '-wal');
+      wal = `${w.size}:${w.mtimeMs}`;
+    } catch { /* no WAL file */ }
+    return `${st.size}:${st.mtimeMs}:${wal}`;
+  } catch {
+    return null;
+  }
+}
+
+function indexOpenClawDb(db: Database.Database, dbPath: string, agentName: string, stmts: PreparedStatements, archiveMode: boolean, config: AgentActaConfig): string[] {
+  // Probe before reading: a write that lands mid-pass leaves a stale stored
+  // probe, so the next tick re-runs rather than missing the update.
+  const probe = openClawDbProbeToken(dbPath);
+  if (!REINDEX && probe && dbProbeTokens.get(dbPath) === probe) return [];
+
+  let src: Database.Database;
+  try {
+    src = new Database(dbPath, { readonly: true, fileMustExist: true });
+  } catch (err: unknown) {
+    if (!warnedDbOpens.has(dbPath)) {
+      warnedDbOpens.add(dbPath);
+      console.error(`Cannot open OpenClaw session store ${dbPath}:`, (err as Error).message);
+    }
+    return [];
+  }
+  warnedDbOpens.delete(dbPath);
+  const indexedIds: string[] = [];
+  try {
+    const sessions = src.prepare(
+      'SELECT session_id, COUNT(*) AS line_count, MAX(seq) AS max_seq, TOTAL(LENGTH(event_json)) AS byte_count FROM transcript_events GROUP BY session_id'
+    ).all() as Array<{ session_id: string; line_count: number; max_seq: number; byte_count: number }>;
+    const selectLines = src.prepare('SELECT event_json FROM transcript_events WHERE session_id = ? ORDER BY seq');
+    for (const s of sessions) {
+      const sourceKey = `${dbPath}#${s.session_id}`;
+      // Change marker: appends bump max_seq, rewrites change the count, and
+      // in-place row updates virtually always change total byte length.
+      const stateToken = `seq:${s.max_seq}:${s.line_count}:${s.byte_count}`;
+      if (!REINDEX) {
+        const state = stmts.getState.get(sourceKey) as IndexStateRow | undefined;
+        if (state && state.last_modified === stateToken) continue;
+      }
+      const lines = (selectLines.all(s.session_id) as Array<{ event_json: string }>).map(r => r.event_json).filter(Boolean);
+      const result: IndexResult = lines.length === 0
+        ? { skipped: true }
+        : indexSessionLines(db, sourceKey, lines, agentName, stmts, archiveMode, config, stateToken, s.session_id);
+      if (result.skipped) {
+        // Record state anyway so an unparseable session is not re-read on every
+        // tick; any later change to its rows changes the token and retries it.
+        stmts.upsertState.run(sourceKey, lines.length, stateToken);
+        if (!warnedDbSessions.has(sourceKey)) {
+          warnedDbSessions.add(sourceKey);
+          console.error(`Skipping unparseable or empty OpenClaw DB session ${s.session_id} in ${dbPath}`);
+        }
+        continue;
+      }
+      if (result.sessionId) indexedIds.push(result.sessionId);
+    }
+    if (probe) dbProbeTokens.set(dbPath, probe);
+  } finally {
+    src.close();
+  }
+  return indexedIds;
+}
+
+// Watches an OpenClaw sqlite store for commits. WAL commits touch the -wal/-shm
+// siblings rather than the db file, so watch the containing directory filtered
+// to the store's basename. Trailing-edge debounce with a max wait so a
+// continuously busy store still flushes instead of being starved.
+function watchOpenClawDb(dbPath: string, opts: { debounceMs: number; maxWaitMs?: number; persistent?: boolean }, onChange: () => void): fs.FSWatcher {
+  const dbDir = path.dirname(dbPath);
+  const dbBase = path.basename(dbPath);
+  const maxWait = opts.maxWaitMs ?? opts.debounceMs * 8;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let firstArmedAt = 0;
+  return fs.watch(dbDir, { persistent: opts.persistent ?? false }, (_eventType: string, filename: string | null) => {
+    if (filename && !filename.startsWith(dbBase)) return;
+    const now = Date.now();
+    if (!firstArmedAt) firstArmedAt = now;
+    if (timer) clearTimeout(timer);
+    const wait = Math.min(opts.debounceMs, Math.max(0, firstArmedAt + maxWait - now));
+    timer = setTimeout(() => {
+      timer = null;
+      firstArmedAt = 0;
+      onChange();
+    }, wait);
+  });
 }
 
 function run(): void {
@@ -796,6 +917,7 @@ function run(): void {
 
   let allFiles: FileEntry[] = [];
   for (const dir of sessionDirs) {
+    if (dir.sourceType === 'openclaw-db') continue;
     const files: FileEntry[] = listJsonlFiles(dir.path, !!dir.recursive)
       .map(filePath => ({ path: filePath, agent: dir.agent, sourceType: dir.sourceType || 'transcript' }));
     allFiles.push(...files);
@@ -817,7 +939,15 @@ function run(): void {
     return indexed;
   });
 
-  const count = indexMany();
+  let count = indexMany();
+  for (const dir of sessionDirs) {
+    if (dir.sourceType !== 'openclaw-db') continue;
+    try {
+      count += indexOpenClawDb(db, dir.path, dir.agent, stmts, archiveMode, config).length;
+    } catch (err: unknown) {
+      console.error(`Error indexing ${dir.path}:`, (err as Error).message);
+    }
+  }
   console.log(`\nIndexed ${count} sessions`);
 
   const stats = db.prepare('SELECT COUNT(*) as sessions FROM sessions').get() as { sessions: number };
@@ -829,6 +959,17 @@ function run(): void {
     const rescanTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
     for (const dir of sessionDirs) {
+      if (dir.sourceType === 'openclaw-db') {
+        watchOpenClawDb(dir.path, { debounceMs: 500, persistent: true }, () => {
+          try {
+            const ids = indexOpenClawDb(db, dir.path, dir.agent, stmts, archiveMode, config);
+            if (ids.length > 0) console.log(`Re-indexed ${ids.length} DB sessions (${dir.agent})`);
+          } catch (err: unknown) {
+            console.error(`Error rescanning ${dir.path}:`, (err as Error).message);
+          }
+        });
+        continue;
+      }
       fs.watch(dir.path, { persistent: true }, (_eventType: string, filename: string | null) => {
         // Recursive sources (e.g. ~/.codex/sessions/YYYY/MM/DD/*.jsonl):
         // fs.watch on Linux does not watch nested dirs recursively, so on any root event
@@ -882,6 +1023,14 @@ function indexAll(db: Database.Database, config: AgentActaConfig): IndexAllResul
   const stmts = createStmts(db);
   let totalSessions = 0;
   for (const dir of sessionDirs) {
+    if (dir.sourceType === 'openclaw-db') {
+      try {
+        totalSessions += indexOpenClawDb(db, dir.path, dir.agent, stmts, archiveMode, config).length;
+      } catch (err: unknown) {
+        console.error(`Error indexing ${path.basename(dir.path)}:`, (err as Error).message);
+      }
+      continue;
+    }
     const files = listJsonlFiles(dir.path, !!dir.recursive);
     for (const filePath of files) {
       try {
@@ -899,6 +1048,6 @@ function indexAll(db: Database.Database, config: AgentActaConfig): IndexAllResul
   return { sessions: stats.sessions, events: evStats.events, newSessions: totalSessions };
 }
 
-export { discoverSessionDirs, listJsonlFiles, indexFile, indexCronRunFile, indexAll };
+export { discoverSessionDirs, listJsonlFiles, indexFile, indexCronRunFile, indexOpenClawDb, watchOpenClawDb, indexAll };
 
 if (require.main === module) run();
