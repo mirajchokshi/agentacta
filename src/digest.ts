@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import type { AlertWithSession, InsightSignal } from './types.js';
+import type { AlertWithSession } from './types.js';
 
 // ─── Digest ──────────────────────────────────────────────────────────
 // The digest is the proactive summary of "what happened and what needs a
@@ -126,13 +126,6 @@ export function getDigest(db: Database.Database, windowHours: number = 24): Dige
 
   const alerts = listAlerts(db, { since, limit: 50 });
 
-  const flaggedSessions = db.prepare(`
-    SELECT s.id, s.summary, s.agent, s.start_time, si.confusion_score, si.signals
-    FROM session_insights si JOIN sessions s ON s.id = si.session_id
-    WHERE si.flagged = 1 AND s.start_time >= ?
-    ORDER BY si.confusion_score DESC LIMIT 10
-  `).all(since) as Array<{ id: string; summary: string | null; agent: string | null; start_time: string; confusion_score: number; signals: string }>;
-
   const failingTools = db.prepare(`
     SELECT tool_name, SUM(is_error) AS errors, COUNT(*) AS total
     FROM events WHERE type = 'tool_result' AND tool_name IS NOT NULL AND tool_name != '' AND timestamp >= ?
@@ -194,17 +187,6 @@ export function getDigest(db: Database.Database, windowHours: number = 24): Dige
       session_id: a.session_id, href: `#session/${a.session_id}`, at: a.created_at,
     });
   }
-  const alertedSessions = new Set(alerts.map(a => a.session_id));
-  for (const s of flaggedSessions) {
-    if (alertedSessions.has(s.id)) continue;
-    const signals = JSON.parse(s.signals || '[]') as InsightSignal[];
-    const names = signals.map(sig => sig.type.replace(/_/g, ' ')).slice(0, 3).join(', ');
-    attention.push({
-      kind: 'flagged_session', severity: s.confusion_score >= 60 ? 'warning' : 'info',
-      title: `Session scored ${100 - s.confusion_score}/100 reliability${names ? ` (${names})` : ''}`,
-      detail: s.summary, session_id: s.id, href: `#session/${s.id}`, at: s.start_time, score: s.confusion_score,
-    });
-  }
   for (const t of failingTools) {
     const rate = Math.round((t.errors / t.total) * 100);
     if (rate < 25) continue;
@@ -241,7 +223,7 @@ export function getDigest(db: Database.Database, windowHours: number = 24): Dige
     if (warningCount) bits.push(`${warningCount} warning${warningCount === 1 ? '' : 's'}`);
     parts.push(`${bits.join(' and ')} to review.`);
   } else if (cur.sessions > 0) {
-    parts.push(cur.flagged ? `${cur.flagged} flagged for low reliability, nothing critical.` : 'Nothing needs attention.');
+    parts.push('Nothing needs attention.');
   }
 
   return {

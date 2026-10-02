@@ -1263,7 +1263,7 @@ async function viewOverview() {
     return `<div class="metric"><div class="metric-label">${label}</div><div class="metric-value">${fmt(met.current)}</div><div class="metric-delta${cls}">${deltaText}</div></div>`;
   };
 
-  const agentRows = (digest.agents || []).map(a => `<tr><td>${escHtml(normalizeAgentLabel(a.agent))}</td><td>${a.sessions}</td><td>${a.flagged || 0}</td><td>${a.tool_calls.toLocaleString()}</td><td>${fmtTokens(a.tokens)}</td></tr>`).join('');
+  const agentRows = (digest.agents || []).map(a => `<tr><td>${escHtml(normalizeAgentLabel(a.agent))}</td><td>${a.sessions}</td><td>${a.tool_calls.toLocaleString()}</td><td>${fmtTokens(a.tokens)}</td></tr>`).join('');
   const troubleRows = [
     ...(digest.failing_tools || []).map(t => `<tr><td><a href="#search/${encodeURIComponent(t.tool_name)}">${escHtml(fmtToolName(t.tool_name))}</a></td><td class="muted">tool</td><td>${t.rate}% failed</td><td>${t.errors} of ${t.total} calls</td></tr>`),
     ...(digest.churned_files || []).map(f => `<tr><td><a href="#file/${encodeURIComponent(f.file_path)}" title="${escHtml(f.file_path)}">${escHtml(f.file_path.split('/').pop())}</a></td><td class="muted">file</td><td>${f.edits} edits</td><td>${f.sessions} session${f.sessions === 1 ? '' : 's'}</td></tr>`),
@@ -1283,7 +1283,6 @@ async function viewOverview() {
       ${metric('Tool calls', m.tool_calls)}
       ${metric('Tool errors', m.errors, (v) => v.toLocaleString(), true)}
       ${metric('Tokens', m.tokens, fmtTokens)}
-      ${metric('Flagged sessions', m.flagged, (v) => v.toLocaleString(), true)}
     </div>
 
     <div class="section-row">
@@ -1297,7 +1296,7 @@ async function viewOverview() {
     <div class="overview-tables">
       <div>
         <div class="section-label">By agent</div>
-        ${agentRows ? `<table class="plain-table"><thead><tr><th>Agent</th><th>Sessions</th><th>Flagged</th><th>Tool calls</th><th>Tokens</th></tr></thead><tbody>${agentRows}</tbody></table>` : `<p class="muted-note">No sessions in this window.</p>`}
+        ${agentRows ? `<table class="plain-table"><thead><tr><th>Agent</th><th>Sessions</th><th>Tool calls</th><th>Tokens</th></tr></thead><tbody>${agentRows}</tbody></table>` : `<p class="muted-note">No sessions in this window.</p>`}
       </div>
       <div>
         <div class="section-label">Trouble spots</div>
