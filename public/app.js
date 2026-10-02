@@ -714,20 +714,11 @@ async function viewSession(id) {
         </div>
       ` : ''}
     </div>
-    <div class="session-panels">
-      <div class="panel panel-trace" id="sessionTracePanel">
-        <div class="panel-head"><span class="panel-title">Task trace</span></div>
-        <div class="loading">Loading trace…</div>
-      </div>
-      <div class="panel panel-health" id="sessionInsightsPanel">
-        <div class="panel-head"><span class="panel-title">Health</span></div>
-        <div class="loading">Loading insights…</div>
-      </div>
-      <div class="panel panel-brief" id="sessionBriefPanel">
-        <div class="panel-head"><span class="panel-title">AI brief</span><span class="panel-sub">your ChatGPT plan</span></div>
-        <div class="loading">…</div>
-      </div>
-    </div>
+    <div class="section-label">Task trace</div>
+    <div class="trace-block" id="sessionTracePanel"><p class="muted-note">Loading trace…</p></div>
+    <div class="section-label">Health</div>
+    <div class="health-block" id="sessionInsightsPanel"><p class="muted-note">Loading insights…</p></div>
+    <div id="sessionBriefPanel"></div>
     <div class="section-label" id="sessionEventsLabel">Events</div>
     <div id="eventsContainer"></div>
     <div class="empty" id="sessionEventsEmpty" style="display:none"><h2>No events</h2><p>This session has no events to display.</p></div>
@@ -1113,13 +1104,13 @@ async function viewSession(id) {
   api(`/sessions/${id}/tasks`).then(trace => {
     const panel = document.getElementById('sessionTracePanel');
     if (!panel) return;
-    panel.innerHTML = trace._error ? `<div class="panel-head"><span class="panel-title">Task trace</span></div><p class="panel-empty">Trace unavailable.</p>` : renderTracePanel(trace, data.children || []);
+    panel.innerHTML = trace._error ? `<p class="muted-note">Trace unavailable.</p>` : renderTracePanel(trace, data.children || []);
     panel.querySelectorAll('[data-jump]').forEach(el => el.addEventListener('click', (e) => {
       if (e.target.closest('a')) return;
       window._sessionJumpTo(el.dataset.jump);
     }));
   });
-  mountBriefPanel('sessionBriefPanel', 'session', id);
+  api('/chatgpt/status').then(st => { if (st && st.connected) mountBriefPanel('sessionBriefPanel', 'session', id, st); });
 }
 
 async function viewTimeline(date) {
@@ -1256,73 +1247,66 @@ async function viewOverview() {
   const recentSessions = sessions.filter(s => !activeIds.has(s.id) && s.session_type !== 'subagent').slice(0, 6);
 
   const m = digest.metrics;
-  const series = digest.series || [];
-  const trend = (key) => series.map(p => p[key] || 0);
   const alertsOpen = (digest.alerts || []).length;
-  const criticalOpen = (digest.alerts || []).filter(a => a.severity === 'critical').length;
+  const connected = !!(chatgpt && chatgpt.connected);
 
-  const statCard = (label, metric, accent, seriesKey, fmt = (v) => v.toLocaleString(), invert = false) => `
-    <div class="stat-card stat-card-trend accent-${accent}">
-      <div class="stat-card-top"><div class="label">${label}</div>${fmtDelta(metric.delta_pct, invert)}</div>
-      <div class="value">${fmt(metric.current)}</div>
-      <div class="stat-card-foot">${sparkline(trend(seriesKey), `var(--${accent === 'blue' ? 'accent' : accent})`)}<span class="stat-prev">prev ${fmt(metric.previous)}</span></div>
-    </div>`;
+  const metric = (label, met, fmt = (v) => v.toLocaleString(), badWhenUp = false) => {
+    const d = met.delta_pct;
+    let deltaText = '';
+    let cls = '';
+    if (d === null || d === undefined) deltaText = met.previous ? '' : 'no prior period';
+    else if (d === 0) deltaText = 'unchanged';
+    else {
+      deltaText = `${d > 0 ? '+' : '−'}${Math.abs(d)}% from ${fmt(met.previous)}`;
+      if (badWhenUp && d > 0) cls = ' metric-bad';
+    }
+    return `<div class="metric"><div class="metric-label">${label}</div><div class="metric-value">${fmt(met.current)}</div><div class="metric-delta${cls}">${deltaText}</div></div>`;
+  };
 
-  const agentsTable = (digest.agents || []).length ? `
-    <div class="mini-table-wrap"><table class="mini-table">
-      <thead><tr><th>Agent</th><th>Sessions</th><th>Flagged</th><th>Tool calls</th><th>Tokens</th></tr></thead>
-      <tbody>${digest.agents.map(a => `<tr><td><span class="session-agent">${escHtml(normalizeAgentLabel(a.agent))}</span></td><td>${a.sessions}</td><td class="${a.flagged ? 'cell-warn' : ''}">${a.flagged}</td><td>${a.tool_calls.toLocaleString()}</td><td>${fmtTokens(a.tokens)}</td></tr>`).join('')}</tbody>
-    </table></div>` : `<p class="panel-empty">No sessions in this window.</p>`;
-
-  const troubleList = [
-    ...(digest.failing_tools || []).map(t => `<a class="trouble-row" href="#search/${encodeURIComponent(t.tool_name)}"><span class="trouble-name">${escHtml(fmtToolName(t.tool_name))}</span><span class="trouble-bar"><span style="width:${t.rate}%"></span></span><span class="trouble-val">${t.rate}% failed · ${t.errors}/${t.total}</span></a>`),
-    ...(digest.churned_files || []).map(f => `<a class="trouble-row" href="#file/${encodeURIComponent(f.file_path)}" title="${escHtml(f.file_path)}"><span class="trouble-name">${escHtml(f.file_path.split('/').pop())}</span><span class="trouble-bar"><span style="width:${Math.min(100, f.edits * 10)}%"></span></span><span class="trouble-val">${f.edits} edits · ${f.sessions} session${f.sessions === 1 ? '' : 's'}</span></a>`),
-  ];
+  const agentRows = (digest.agents || []).map(a => `<tr><td>${escHtml(normalizeAgentLabel(a.agent))}</td><td>${a.sessions}</td><td>${a.flagged || 0}</td><td>${a.tool_calls.toLocaleString()}</td><td>${fmtTokens(a.tokens)}</td></tr>`).join('');
+  const troubleRows = [
+    ...(digest.failing_tools || []).map(t => `<tr><td><a href="#search/${encodeURIComponent(t.tool_name)}">${escHtml(fmtToolName(t.tool_name))}</a></td><td class="muted">tool</td><td>${t.rate}% failed</td><td>${t.errors} of ${t.total} calls</td></tr>`),
+    ...(digest.churned_files || []).map(f => `<tr><td><a href="#file/${encodeURIComponent(f.file_path)}" title="${escHtml(f.file_path)}">${escHtml(f.file_path.split('/').pop())}</a></td><td class="muted">file</td><td>${f.edits} edits</td><td>${f.sessions} session${f.sessions === 1 ? '' : 's'}</td></tr>`),
+  ].join('');
 
   let html = `
     <div class="overview-head">
-      <div class="overview-head-text">
-        <div class="page-title" style="margin-bottom:6px">Overview</div>
-        <p class="overview-headline">${escHtml(digest.headline)}</p>
+      <div class="page-title">Overview</div>
+      <div class="window-toggle" id="digestWindow">
+        <button data-win="24h" class="${win === '24h' ? 'active' : ''}">24h</button><span>/</span><button data-win="7d" class="${win === '7d' ? 'active' : ''}">7d</button>
       </div>
-      <div class="segmented" id="digestWindow" role="tablist">
-        <button data-win="24h" class="${win === '24h' ? 'active' : ''}">24h</button>
-        <button data-win="7d" class="${win === '7d' ? 'active' : ''}">7d</button>
-      </div>
+    </div>
+    <p class="overview-headline">${escHtml(digest.headline)}</p>
+
+    <div class="metrics">
+      ${metric('Sessions', m.sessions)}
+      ${metric('Tool calls', m.tool_calls)}
+      ${metric('Tool errors', m.errors, (v) => v.toLocaleString(), true)}
+      ${metric('Tokens', m.tokens, fmtTokens)}
+      ${metric('Flagged sessions', m.flagged, (v) => v.toLocaleString(), true)}
     </div>
 
     <div class="section-row">
-      <div class="section-label">Needs attention${digest.attention.length ? ` <span class="count-pill ${criticalOpen ? 'pill-critical' : ''}">${digest.attention.length}</span>` : ''}</div>
-      ${alertsOpen ? `<button class="text-btn" id="ackAllAlerts">Dismiss ${alertsOpen} alert${alertsOpen === 1 ? '' : 's'}</button>` : ''}
+      <div class="section-label">Needs attention${digest.attention.length ? ` · ${digest.attention.length}` : ''}</div>
+      ${alertsOpen ? `<button class="text-btn" id="ackAllAlerts">Dismiss alerts</button>` : ''}
     </div>
     ${renderAttention(digest.attention)}
 
-    <div class="section-label">Trends <span class="section-hint">vs the previous ${win === '7d' ? '7 days' : '24 hours'} · 14-day bars</span></div>
-    <div class="stat-grid stat-grid-trend">
-      ${statCard('Sessions', m.sessions, 'blue', 'sessions')}
-      ${statCard('Tool calls', m.tool_calls, 'teal', 'tool_calls')}
-      ${statCard('Tool errors', m.errors, 'red', 'errors', (v) => v.toLocaleString(), true)}
-      ${statCard('Tokens', m.tokens, 'purple', 'tokens', fmtTokens)}
-      ${statCard('Flagged sessions', m.flagged, 'amber', 'flagged', (v) => v.toLocaleString(), true)}
-    </div>
+    ${connected ? `<div id="digestBriefPanel" class="brief-block"></div>` : ''}
 
-    <div class="overview-columns">
-      <div class="panel">
-        <div class="panel-head"><span class="panel-title">By agent</span></div>
-        ${agentsTable}
+    <div class="overview-tables">
+      <div>
+        <div class="section-label">By agent</div>
+        ${agentRows ? `<table class="plain-table"><thead><tr><th>Agent</th><th>Sessions</th><th>Flagged</th><th>Tool calls</th><th>Tokens</th></tr></thead><tbody>${agentRows}</tbody></table>` : `<p class="muted-note">No sessions in this window.</p>`}
       </div>
-      <div class="panel">
-        <div class="panel-head"><span class="panel-title">Trouble spots</span><span class="panel-sub">failing tools · churned files</span></div>
-        ${troubleList.length ? `<div class="trouble-list">${troubleList.join('')}</div>` : `<p class="panel-empty">No failing tools or churned files in this window.</p>`}
-      </div>
-      <div class="panel panel-brief" id="digestBriefPanel">
-        <div class="panel-head"><span class="panel-title">AI briefing</span><span class="panel-sub">your ChatGPT plan</span></div>
-        <div class="loading">…</div>
+      <div>
+        <div class="section-label">Trouble spots</div>
+        ${troubleRows ? `<table class="plain-table"><thead><tr><th>Name</th><th></th><th>Rate</th><th>Volume</th></tr></thead><tbody>${troubleRows}</tbody></table>` : `<p class="muted-note">No failing tools or churned files in this window.</p>`}
       </div>
     </div>
 
-    <div class="section-label">Active now${activeNow.length ? ` <span class="count-pill pill-live">${activeNow.length}</span>` : ''}</div>
-    ${activeNow.length ? activeNow.map(renderSessionItem).join('') : `<div class="empty empty-compact"><p>No active sessions right now</p></div>`}
+    <div class="section-label">Active now${activeNow.length ? ` · ${activeNow.length}` : ''}</div>
+    ${activeNow.length ? activeNow.map(renderSessionItem).join('') : `<p class="muted-note">No active sessions right now.</p>`}
 
     <div class="section-label">Recent sessions</div>
     ${recentSessions.map(renderSessionItem).join('')}
@@ -1342,7 +1326,7 @@ async function viewOverview() {
     refreshAlertBadge();
     viewOverview();
   });
-  mountBriefPanel('digestBriefPanel', 'digest', String(hours), chatgpt);
+  if (connected) mountBriefPanel('digestBriefPanel', 'digest', String(hours), chatgpt);
 }
 
 async function viewStats() {
@@ -2158,7 +2142,7 @@ function relTime(ts) {
 }
 
 function fmtMs(ms) {
-  if (ms === null || ms === undefined || !Number.isFinite(ms)) return '—';
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return '';
   if (ms < 1000) return `${Math.round(ms)}ms`;
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;
@@ -2166,24 +2150,6 @@ function fmtMs(ms) {
   if (m < 60) return `${m}m ${s % 60}s`;
   const h = Math.floor(m / 60);
   return `${h}h ${m % 60}m`;
-}
-
-function fmtDelta(deltaPct, invert = false) {
-  if (deltaPct === null || deltaPct === undefined) return '<span class="delta delta-flat">new</span>';
-  if (deltaPct === 0) return '<span class="delta delta-flat">±0%</span>';
-  const up = deltaPct > 0;
-  const good = invert ? !up : up;
-  return `<span class="delta ${good ? 'delta-good' : 'delta-bad'}">${up ? '↑' : '↓'} ${Math.abs(deltaPct)}%</span>`;
-}
-
-function sparkline(values, color = 'var(--accent)', w = 112, h = 26) {
-  const max = Math.max(1, ...values);
-  const n = Math.max(1, values.length);
-  const bw = w / n;
-  return `<svg class="spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" preserveAspectRatio="none" aria-hidden="true">${values.map((v, i) => {
-    const bh = v > 0 ? Math.max(2, (v / max) * (h - 2)) : 1.5;
-    return `<rect x="${(i * bw + 0.8).toFixed(1)}" y="${(h - bh).toFixed(1)}" width="${Math.max(1, bw - 1.6).toFixed(1)}" height="${bh.toFixed(1)}" rx="1" fill="${color}" opacity="${i === n - 1 ? 1 : v > 0 ? 0.45 : 0.18}"/>`;
-  }).join('')}</svg>`;
 }
 
 function mdLite(text) {
@@ -2203,43 +2169,35 @@ function mdLite(text) {
   return out;
 }
 
-const ATTENTION_ICONS = {
-  alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
-  flagged_session: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><path d="M4 22v-7"/></svg>',
-  failing_tool: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>',
-  churned_file: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
-  active_session: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
-};
-
 function renderAttention(items) {
   if (!items || !items.length) {
-    return `<div class="attention-empty"><span class="attention-ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span><div><strong>All clear.</strong><span>No alerts, flagged sessions or failing tools in this window.</span></div></div>`;
+    return `<p class="muted-note">All clear. No alerts, flagged sessions or failing tools in this window.</p>`;
   }
   return `<div class="attention-list">${items.map(it => `
     <a class="attention-item sev-${it.severity}" href="${escHtml(it.href)}">
-      <span class="attention-icon">${ATTENTION_ICONS[it.kind] || ATTENTION_ICONS.alert}</span>
+      <span class="attention-sev">${it.severity}</span>
       <span class="attention-body">
         <span class="attention-title">${escHtml(it.title)}</span>
         ${it.detail ? `<span class="attention-detail">${escHtml(truncate(it.detail, 120))}</span>` : ''}
       </span>
-      <span class="attention-meta"><span class="sev-label">${it.severity}</span>${it.at ? `<span>${escHtml(relTime(it.at))}</span>` : ''}</span>
+      <span class="attention-time">${it.at ? escHtml(relTime(it.at)) : ''}</span>
     </a>`).join('')}</div>`;
 }
 
 function renderInsightsPanel(insights) {
-  if (!insights) return `<div class="panel-head"><span class="panel-title">Health</span></div><p class="panel-empty">Insights unavailable.</p>`;
+  if (!insights) return `<p class="muted-note">Insights unavailable.</p>`;
   const score = 100 - (insights.confusion_score || 0);
-  const tone = score >= 80 ? 'good' : score >= 50 ? 'warn' : 'bad';
+  const tone = score >= 80 ? '' : score >= 50 ? ' score-warn' : ' score-bad';
   const signals = insights.signals || [];
   const seen = new Set();
   const rows = signals.filter(sig => { if (seen.has(sig.type)) return false; seen.add(sig.type); return true; });
   return `
-    <div class="panel-head"><span class="panel-title">Health</span><span class="health-score score-${tone}" title="Reliability score: higher means fewer issues">${score}<small>/100</small></span></div>
+    <div class="health-score-row"><span class="health-score${tone}">${score}</span><span class="muted">reliability, out of 100</span></div>
     ${rows.length ? `<ul class="health-list">${rows.map(sig => `
       <li class="health-row">
-        <span class="signal-dot signal-${SIGNAL_COLORS[sig.type] || 'muted'}"></span>
-        <span class="health-text"><strong>${escHtml(SIGNAL_LABELS[sig.type] || sig.type)}</strong><span>${escHtml(signalDetail(sig))}</span></span>
-      </li>`).join('')}</ul>` : `<div class="health-clean"><span class="attention-ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>No issues detected</div>`}
+        <span class="health-name">${escHtml(SIGNAL_LABELS[sig.type] || sig.type)}</span>
+        <span class="health-detail">${escHtml(signalDetail(sig))}</span>
+      </li>`).join('')}</ul>` : `<p class="muted-note">No issues detected.</p>`}
   `;
 }
 
@@ -2260,12 +2218,7 @@ function signalDetail(sig) {
   }
 }
 
-const TRACE_STATUS_ICON = {
-  completed: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
-  in_progress: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="9" stroke-dasharray="14 8"/></svg>',
-  pending: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="9"/></svg>',
-  deleted: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
-};
+const TRACE_GLYPH = { completed: '✓', in_progress: '◐', pending: '○', deleted: '×' };
 
 function renderTracePanel(trace, children) {
   const sum = trace.summary || {};
@@ -2286,51 +2239,51 @@ function renderTracePanel(trace, children) {
   };
   const dot = (at, cls, title) => `<span class="trace-dot ${cls}" style="left:${pct(at).toFixed(2)}%" title="${escHtml(title)}"></span>`;
 
-  const chips = [
-    sum.total ? `<span class="trace-chip chip-tasks">${sum.completed}/${sum.total} tasks done</span>` : '',
-    sum.in_progress ? `<span class="trace-chip chip-progress">${sum.in_progress} in progress</span>` : '',
-    sum.pending ? `<span class="trace-chip chip-pending">${sum.pending} pending</span>` : '',
-    sum.subagents ? `<span class="trace-chip chip-sub">${sum.subagents} subagent${sum.subagents === 1 ? '' : 's'}</span>` : '',
-    `<span class="trace-chip">${sum.turns || 0} turn${sum.turns === 1 ? '' : 's'}</span>`,
-    sum.unattributed_tool_calls && sum.total ? `<span class="trace-chip chip-muted" title="Tool calls made while no task was in progress">${sum.unattributed_tool_calls} unplanned calls</span>` : '',
-  ].filter(Boolean).join('');
+  const summaryBits = [
+    sum.total ? `${sum.completed} of ${sum.total} tasks done` : '',
+    sum.in_progress ? `${sum.in_progress} in progress` : '',
+    sum.pending ? `${sum.pending} pending` : '',
+    sum.subagents ? `${sum.subagents} subagent${sum.subagents === 1 ? '' : 's'}` : '',
+    `${sum.turns || 0} turn${sum.turns === 1 ? '' : 's'}`,
+    sum.unattributed_tool_calls && sum.total ? `${sum.unattributed_tool_calls} tool calls outside any task` : '',
+  ].filter(Boolean).join(' · ');
 
   const rows = [];
   for (const turn of trace.turns) {
     rows.push(`<div class="trace-row trace-turn" data-jump="${escHtml(turn.event_id)}" title="${escHtml(turn.prompt)}">
-      <span class="trace-name"><span class="trace-kind">Turn ${turn.index}</span><span class="trace-title">${escHtml(truncate(turn.prompt, 70))}</span></span>
+      <span class="trace-name"><span class="trace-kind">turn ${turn.index}</span><span class="trace-title">${escHtml(truncate(turn.prompt, 70))}</span></span>
       <span class="trace-track">${bar(turn.started_at, turn.ended_at, 'bar-turn', `Turn ${turn.index}: ${turn.tool_calls} tool calls`)}</span>
-      <span class="trace-stat">${turn.tool_calls} calls${turn.errors ? ` <em>${turn.errors} err</em>` : ''}</span>
+      <span class="trace-stat">${turn.tool_calls} calls${turn.errors ? `, <em>${turn.errors} err</em>` : ''}</span>
     </div>`);
   }
   for (const task of trace.tasks) {
-    const title = `${task.title} — ${task.status.replace('_', ' ')}${task.duration_ms ? `, ${fmtMs(task.duration_ms)}` : ''}`;
+    const title = `${task.title}: ${task.status.replace('_', ' ')}${task.duration_ms ? `, ${fmtMs(task.duration_ms)}` : ''}`;
     const track = task.started_at
       ? bar(task.started_at, task.completed_at || (task.status === 'in_progress' ? null : task.updated_at), `bar-${task.status}`, title)
       : dot(task.created_at, `dot-${task.status}`, title);
     rows.push(`<div class="trace-row trace-task status-${task.status}" data-jump="${escHtml(task.first_event_id)}">
-      <span class="trace-name"><span class="trace-status">${TRACE_STATUS_ICON[task.status] || ''}</span><span class="trace-title">${escHtml(truncate(task.title, 70))}</span></span>
+      <span class="trace-name"><span class="trace-glyph">${TRACE_GLYPH[task.status] || ''}</span><span class="trace-title">${escHtml(truncate(task.title, 70))}</span></span>
       <span class="trace-track">${track}</span>
-      <span class="trace-stat">${task.started_at ? fmtMs(task.duration_ms) : 'not started'}${task.tool_calls ? ` · ${task.tool_calls} calls` : ''}${task.errors ? ` <em>${task.errors} err</em>` : ''}</span>
+      <span class="trace-stat">${task.started_at ? fmtMs(task.duration_ms) : 'not started'}${task.tool_calls ? `, ${task.tool_calls} calls` : ''}${task.errors ? `, <em>${task.errors} err</em>` : ''}</span>
     </div>`);
   }
   for (const sub of trace.subagents) {
     const label = `${sub.title}${sub.subagent_type ? ` (${sub.subagent_type})` : ''}`;
     const link = sub.child_session_id ? `<a class="trace-link" href="#session/${encodeURIComponent(sub.child_session_id)}">open</a>` : '';
     rows.push(`<div class="trace-row trace-sub status-${sub.status}" data-jump="${escHtml(sub.event_id)}">
-      <span class="trace-name"><span class="trace-kind">Agent</span><span class="trace-title" title="${escHtml(label)}">${escHtml(truncate(sub.title, 64))}</span>${link}</span>
+      <span class="trace-name"><span class="trace-kind">agent</span><span class="trace-title" title="${escHtml(label)}">${escHtml(truncate(sub.title, 64))}</span>${link}</span>
       <span class="trace-track">${bar(sub.started_at, sub.ended_at, `bar-sub bar-sub-${sub.status}`, `${label}: ${sub.status}${sub.duration_ms ? `, ${fmtMs(sub.duration_ms)}` : ''}`)}</span>
-      <span class="trace-stat">${sub.ended_at ? fmtMs(sub.duration_ms) : sub.status}${sub.tool_calls !== null && sub.tool_calls !== undefined ? ` · ${sub.tool_calls} calls` : ''}</span>
+      <span class="trace-stat">${sub.ended_at ? fmtMs(sub.duration_ms) : sub.status}${sub.tool_calls !== null && sub.tool_calls !== undefined ? `, ${sub.tool_calls} calls` : ''}</span>
     </div>`);
   }
 
   const orphanChildren = (children || []).filter(c => !trace.subagents.some(s => s.child_session_id === c.id));
-  const childList = orphanChildren.length ? `<div class="trace-children">${orphanChildren.map(c => `<a class="session-link" href="#session/${encodeURIComponent(c.id)}">↓ ${escHtml(truncate(cleanSessionSummary(c.summary, ''), 60) || c.id)}</a>`).join('')}</div>` : '';
+  const childList = orphanChildren.length ? `<p class="muted-note">Child sessions: ${orphanChildren.map(c => `<a href="#session/${encodeURIComponent(c.id)}">${escHtml(truncate(cleanSessionSummary(c.summary, ''), 60) || c.id)}</a>`).join(', ')}</p>` : '';
 
   const empty = !trace.tasks.length && !trace.subagents.length;
   return `
-    <div class="panel-head"><span class="panel-title">Task trace</span><span class="trace-chips">${chips}</span></div>
-    ${empty ? `<p class="panel-empty">No planned tasks or subagents in this session${trace.turns.length > 1 ? `, ${trace.turns.length} turns` : ''}. Agents that use a todo list, task tools or <code>update_plan</code> show their plan here.</p>` : ''}
+    <p class="trace-summary">${escHtml(summaryBits)}</p>
+    ${empty ? `<p class="muted-note">No planned tasks or subagents in this session. Agents that keep a todo list, use task tools or <code>update_plan</code> show their plan here.</p>` : ''}
     ${rows.length ? `<div class="trace-grid"><div class="trace-axis"><span>${fmtTimeOnly(trace.start_time)}</span><span>${fmtMs(span)}</span><span>${fmtTimeOnly(new Date(lastTs).toISOString())}</span></div>${rows.join('')}</div>` : ''}
     ${childList}
   `;
@@ -2343,17 +2296,12 @@ async function mountBriefPanel(panelId, scope, key, status) {
     status ? Promise.resolve(status) : api('/chatgpt/status'),
     api(`/ai/brief?scope=${scope}&${scope === 'session' ? `id=${encodeURIComponent(key)}` : `hours=${encodeURIComponent(key)}`}`),
   ]);
-  if (!document.getElementById(panelId)) return;
-  const title = scope === 'session' ? 'AI brief' : 'AI briefing';
+  if (!document.getElementById(panelId) || !st || !st.connected) return;
+  const title = scope === 'session' ? 'Brief' : 'Briefing';
   const render = (brief, note = '') => {
-    const connected = !!(st && st.connected);
     panel.innerHTML = `
-      <div class="panel-head"><span class="panel-title">${title}</span><span class="panel-sub">${connected ? escHtml(st.email || 'ChatGPT connected') : 'your ChatGPT plan'}</span></div>
-      ${brief && brief.brief ? `<div class="brief-body">${mdLite(brief.brief)}</div><div class="brief-meta">${brief.model ? escHtml(brief.model) + ' · ' : ''}${escHtml(relTime(brief.created_at))}${brief.cached ? '' : ' · fresh'}</div>` : `<p class="panel-empty">${connected ? (scope === 'session' ? 'Get a written summary of what was asked, what happened, risks and follow-ups.' : 'Get a short written briefing for this window.') : 'Connect your ChatGPT account in Settings to get written briefs with your own plan. Nothing leaves this machine until you ask.'}</p>`}
-      <div class="brief-actions">
-        ${connected ? `<button class="export-btn brief-btn" id="${panelId}Btn">${brief && brief.brief ? 'Rewrite' : 'Write brief'}</button>` : `<a class="export-btn" href="#stats">Connect ChatGPT</a>`}
-        <span class="brief-note">${escHtml(note)}</span>
-      </div>`;
+      <div class="section-row"><div class="section-label">${title}</div><button class="text-btn" id="${panelId}Btn">${brief && brief.brief ? 'Rewrite' : 'Write with ChatGPT'}</button></div>
+      ${brief && brief.brief ? `<div class="brief-body">${mdLite(brief.brief)}</div><p class="brief-meta">${brief.model ? escHtml(brief.model) + ', ' : ''}${escHtml(relTime(brief.created_at))}${note ? ` · ${escHtml(note)}` : ''}</p>` : `<p class="muted-note">${note ? escHtml(note) : (scope === 'session' ? 'No brief written yet.' : 'No briefing written yet.')}</p>`}`;
     const btn = document.getElementById(`${panelId}Btn`);
     if (btn) btn.addEventListener('click', async () => {
       btn.disabled = true;
@@ -2426,7 +2374,7 @@ function showToast(alert) {
   const el = document.createElement('a');
   el.className = `toast sev-${alert.severity}`;
   el.href = `#session/${encodeURIComponent(alert.session_id)}`;
-  el.innerHTML = `<span class="toast-sev">${escHtml(alert.severity)}</span><span class="toast-body"><strong>${escHtml(alert.title)}</strong>${alert.summary ? `<span>${escHtml(truncate(cleanSessionSummary(alert.summary, ''), 90))}</span>` : ''}</span><button class="toast-close" aria-label="Dismiss">×</button>`;
+  el.innerHTML = `<span class="toast-body"><strong>${escHtml(alert.title)}</strong>${alert.summary ? `<span>${escHtml(truncate(cleanSessionSummary(alert.summary, ''), 90))}</span>` : ''}</span><button class="toast-close" aria-label="Dismiss">\u00d7</button>`;
   el.querySelector('.toast-close').addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); el.remove(); });
   host.appendChild(el);
   requestAnimationFrame(() => el.classList.add('show'));

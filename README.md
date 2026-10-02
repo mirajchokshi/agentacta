@@ -17,10 +17,7 @@ npx agentacta
 ```
 
 <p align="center">
-  <img src="screenshots/overview.png" alt="AgentActa overview: needs-attention feed, trends and agent breakdown" width="800">
-</p>
-<p align="center">
-  <img src="screenshots/task-trace.png" alt="Task trace: planned tasks, subagent spans and turns on one timeline" width="800">
+  <img src="screenshots/demo.gif" alt="AgentActa demo" width="800">
 </p>
 
 ## Why this exists

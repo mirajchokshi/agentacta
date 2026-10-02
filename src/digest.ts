@@ -230,10 +230,14 @@ export function getDigest(db: Database.Database, windowHours: number = 24): Dige
   const label = hours === 24 ? 'the last 24 hours' : hours === 24 * 7 ? 'the last 7 days' : `the last ${hours} hours`;
   const sessionsDelta = pct(cur.sessions, prev.sessions);
   const parts: string[] = [];
-  parts.push(`${cur.sessions} session${cur.sessions === 1 ? '' : 's'} in ${label}${sessionsDelta !== null && sessionsDelta !== 0 ? ` (${sessionsDelta > 0 ? '+' : ''}${sessionsDelta}% vs the period before)` : ''}.`);
+  let trend = '';
+  if (sessionsDelta !== null && sessionsDelta !== 0 && prev.sessions > 0) {
+    trend = sessionsDelta > 0 ? `, up from ${prev.sessions}` : `, down from ${prev.sessions}`;
+  }
+  parts.push(`${cur.sessions} session${cur.sessions === 1 ? '' : 's'} in ${label}${trend}.`);
   if (criticalCount || warningCount) {
     const bits: string[] = [];
-    if (criticalCount) bits.push(`${criticalCount} critical`);
+    if (criticalCount) bits.push(`${criticalCount} critical alert${criticalCount === 1 ? '' : 's'}`);
     if (warningCount) bits.push(`${warningCount} warning${warningCount === 1 ? '' : 's'}`);
     parts.push(`${bits.join(' and ')} to review.`);
   } else if (cur.sessions > 0) {
