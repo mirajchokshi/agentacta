@@ -116,6 +116,32 @@ export function init(dbPath?: string): void {
 
     CREATE INDEX IF NOT EXISTS idx_insights_flagged ON session_insights(flagged);
     CREATE INDEX IF NOT EXISTS idx_insights_score ON session_insights(confusion_score DESC);
+
+    CREATE TABLE IF NOT EXISTS alerts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      title TEXT NOT NULL,
+      detail TEXT,
+      created_at TEXT NOT NULL,
+      acknowledged INTEGER DEFAULT 0,
+      UNIQUE(session_id, type),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_alerts_ack ON alerts(acknowledged);
+
+    CREATE TABLE IF NOT EXISTS ai_briefs (
+      scope TEXT NOT NULL,
+      scope_key TEXT NOT NULL,
+      input_hash TEXT NOT NULL,
+      model TEXT,
+      brief TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (scope, scope_key)
+    );
   `);
 
   // Add columns if missing (migration)
@@ -134,6 +160,12 @@ export function init(dbPath?: string): void {
   if (!colNames.includes('first_message_timestamp')) db.exec("ALTER TABLE sessions ADD COLUMN first_message_timestamp TEXT");
   if (!colNames.includes('models')) db.exec("ALTER TABLE sessions ADD COLUMN models TEXT");
   if (!colNames.includes('projects')) db.exec("ALTER TABLE sessions ADD COLUMN projects TEXT");
+  if (!colNames.includes('parent_session_id')) db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)");
+
+  const eventCols: PragmaColumnRow[] = db.prepare("PRAGMA table_info(events)").all() as PragmaColumnRow[];
+  const eventColNames: string[] = eventCols.map((c: PragmaColumnRow) => c.name);
+  if (!eventColNames.includes('is_error')) db.exec("ALTER TABLE events ADD COLUMN is_error INTEGER DEFAULT 0");
 
   db.close();
 }
@@ -146,6 +178,8 @@ export function createStmts(db: Database.Database): PreparedStatements {
     deleteSession: db.prepare('DELETE FROM sessions WHERE id = ?'),
     deleteFileActivity: db.prepare('DELETE FROM file_activity WHERE session_id = ?'),
     insertEvent: db.prepare(`INSERT OR REPLACE INTO events (id, session_id, timestamp, type, role, content, tool_name, tool_args, tool_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+    insertEventWithError: db.prepare(`INSERT OR REPLACE INTO events (id, session_id, timestamp, type, role, content, tool_name, tool_args, tool_result, is_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+    setParentSession: db.prepare('UPDATE sessions SET parent_session_id = ? WHERE id = ?'),
     upsertSession: db.prepare(`INSERT OR REPLACE INTO sessions (id, start_time, end_time, message_count, tool_count, model, summary, agent, session_type, total_cost, total_tokens, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, initial_prompt, first_message_id, first_message_timestamp, models, projects) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     upsertState: db.prepare(`INSERT OR REPLACE INTO index_state (file_path, last_offset, last_modified) VALUES (?, ?, ?)`),
     insertFileActivity: db.prepare(`INSERT INTO file_activity (session_id, file_path, operation, timestamp) VALUES (?, ?, ?, ?)`),

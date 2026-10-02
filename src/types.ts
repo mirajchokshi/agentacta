@@ -8,6 +8,8 @@ export interface AgentActaConfig {
   dbPath: string;
   projectAliases: Record<string, string>;
   authToken?: string | null;
+  aiModel?: string | null;
+  chatgptProfilePath?: string | null;
 }
 
 // ─── Database row types ──────────────────────────────────────────────
@@ -32,6 +34,7 @@ export interface SessionRow {
   first_message_timestamp: string | null;
   models: string | null;
   projects: string | null;
+  parent_session_id?: string | null;
 }
 
 export interface EventRow {
@@ -44,6 +47,7 @@ export interface EventRow {
   tool_name: string | null;
   tool_args: string | null;
   tool_result: string | null;
+  is_error?: number | null;
 }
 
 export interface FileActivityRow {
@@ -92,6 +96,8 @@ export interface PreparedStatements {
   deleteSession: Database.Statement;
   deleteFileActivity: Database.Statement;
   insertEvent: Database.Statement;
+  insertEventWithError: Database.Statement;
+  setParentSession: Database.Statement;
   upsertSession: Database.Statement;
   upsertState: Database.Statement;
   insertFileActivity: Database.Statement;
@@ -132,6 +138,7 @@ export interface ExtractedToolResult {
   toolCallId: string;
   toolName: string;
   content: string;
+  isError?: boolean;
 }
 
 // ─── JSONL parsing types ─────────────────────────────────────────────
@@ -149,6 +156,8 @@ export interface JsonlLine {
   payload?: Record<string, unknown>;
   content?: unknown;
   role?: string;
+  isSidechain?: boolean;
+  agentId?: string;
 }
 
 export interface MessagePayload {
@@ -217,12 +226,55 @@ export interface NoCompletionSignal {
   last_tool: string | null;
 }
 
+export interface DestructiveCommandSignal {
+  type: 'destructive_command';
+  count: number;
+  commands: string[];
+}
+
+export interface SecretExposureSignal {
+  type: 'secret_exposure';
+  count: number;
+  kinds: string[];
+}
+
+export interface FileChurnSignal {
+  type: 'file_churn';
+  file: string;
+  edits: number;
+}
+
+export interface TokenOutlierSignal {
+  type: 'token_outlier';
+  tokens: number;
+  median: number;
+  multiple: number;
+}
+
+export interface UnfinishedTasksSignal {
+  type: 'unfinished_tasks';
+  total: number;
+  unfinished: number;
+  titles: string[];
+}
+
+export interface SubagentStormSignal {
+  type: 'subagent_storm';
+  count: number;
+}
+
 export type InsightSignal =
   | ToolRetryLoopSignal
   | SessionBailSignal
   | HighErrorRateSignal
   | LongPromptShortSessionSignal
-  | NoCompletionSignal;
+  | NoCompletionSignal
+  | DestructiveCommandSignal
+  | SecretExposureSignal
+  | FileChurnSignal
+  | TokenOutlierSignal
+  | UnfinishedTasksSignal
+  | SubagentStormSignal;
 
 export type SignalType = InsightSignal['type'];
 
@@ -231,8 +283,33 @@ export const SIGNAL_WEIGHTS: Record<SignalType, number> = {
   session_bail: 25,
   high_error_rate: 20,
   long_prompt_short_session: 15,
-  no_completion: 10
+  no_completion: 10,
+  destructive_command: 25,
+  secret_exposure: 30,
+  file_churn: 15,
+  token_outlier: 15,
+  unfinished_tasks: 15,
+  subagent_storm: 10
 };
+
+export type AlertSeverity = 'critical' | 'warning' | 'info';
+
+export interface AlertRow {
+  id: number;
+  session_id: string;
+  type: string;
+  severity: AlertSeverity;
+  title: string;
+  detail: string | null;
+  created_at: string;
+  acknowledged: number;
+}
+
+export interface AlertWithSession extends AlertRow {
+  summary: string | null;
+  agent: string | null;
+  start_time: string;
+}
 
 export interface InsightResult {
   session_id: string;

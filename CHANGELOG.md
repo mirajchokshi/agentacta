@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Proactive digest** - `GET /api/digest?hours=24|168` summarises a window in plain English: headline, ranked attention feed (alerts, flagged sessions, failing tools, churned files), metrics with deltas vs the previous period, by-agent breakdown and a 14-day daily series. The Overview is now built on it, with a 24h/7d switch and sparkline trend cards.
+- **Alerts** - durable, deduplicated per `(session, signal)` in a new `alerts` table, streamed over `GET /api/alerts/stream` as sessions re-index, shown as in-app toasts and a nav badge, acknowledged via `POST /api/alerts/ack`, and optionally surfaced as desktop notifications (Settings → Notifications). Alerts whose signal clears on re-analysis are retracted unless acknowledged.
+- **Task tracing** - `GET /api/sessions/:id/tasks` reconstructs planned tasks (Claude Code `TodoWrite`, `TaskCreate`/`TaskUpdate`; Codex `update_plan`), spawned subagents (`Agent`/`Task`, linked to child transcripts) and user turns, with status transitions, durations, tool-call and error attribution and files touched. The session page renders it as a waterfall above the events; rows jump to their event.
+- **Six new health signals** - `destructive_command`, `secret_exposure`, `unfinished_tasks`, `token_outlier`, `file_churn`, `subagent_storm`, each with severity-scaled weights, plain-language descriptions and per-session detail text.
+- **Sign in with ChatGPT** - optional, dependency-free implementation of OpenAI's open-source-app flow (`src/chatgpt-auth.ts`): PKCE + `127.0.0.1` loopback callback, dynamic client registration, discovery/JWKS-based ID-token verification, refresh, 0600 profile storage. New routes `GET /api/chatgpt/status`, `POST /api/chatgpt/signin`, `POST /api/chatgpt/signout`, `GET /api/chatgpt/models`.
+- **AI briefs** - `GET|POST /api/ai/brief?scope=session&id=…` and `scope=digest&hours=…` generate written session briefs / daily briefings via the Responses API using the connected ChatGPT plan, grounded in a compact structured input and cached by input hash in `ai_briefs`.
+- **Claude Code subagent transcripts** - `~/.claude/projects/<project>/<session>/subagents/agent-*.jsonl` are indexed as their own `subagent` sessions with a new `sessions.parent_session_id` link (previously they were skipped, and would have clobbered the parent if scanned).
+- **Demo** - the seeded demo now includes a Claude Code-format session with a todo plan, a subagent, a failing tool call, a destructive command and a leaked-looking key, so the new panels and alerts show up out of the box.
+- Hash routes `#search/<query>` and `#file/<path>` for deep links from the attention feed.
+
+### Changed
+- **Claude Code tool results are now captured** - `tool_result` content blocks (with `is_error`) become `tool_result` events with the tool name resolved from the `tool_use` id. New `events.is_error` column; Codex `function_call_output` sets it from a non-zero `metadata.exit_code`, OpenClaw from `isError`.
+- `high_error_rate` prefers `is_error` and uses a much stricter text heuristic; `tool_retry_loop` now requires near-identical arguments, not just the same tool name.
+- Claude Code transcripts are labelled `claude-code` regardless of the directory they were found in.
+- Session detail response includes `parent` and `children`; the session page links between them.
+- Insights panel moved above the event list, redesigned with a reliability score and per-signal detail.
+- New config keys `aiModel` / `AGENTACTA_AI_MODEL` and `chatgptProfilePath` / `AGENTACTA_CHATGPT_PROFILE`; `AGENTACTA_CHATGPT_ISSUER` / `AGENTACTA_OPENAI_API_BASE` for testing against a mock.
+
 ## [2026.8.31] - 2026-08-31
 
 ### Added

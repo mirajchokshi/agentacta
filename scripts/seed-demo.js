@@ -661,5 +661,104 @@ function writeSession(filename, lines) {
   console.log(`Session 7: ${sid} — Add unit tests (${lines.length} events)`);
 })();
 
+
+// ─── Claude Code format sessions ─────────────────────────────────────
+// Session 8: a Claude Code run (today) with a task plan, a spawned subagent,
+// a failing tool call, a destructive shell command and a leaked-looking key.
+// Exercises task tracing, the new insight signals and alerts in the demo.
+
+function ccLine(type, sessionId, timestamp, message, extra = {}) {
+  const uuid = uid();
+  return { uuid, line: JSON.stringify({ type, uuid, parentUuid: extra.parentUuid || null, sessionId, timestamp, cwd: '/home/demo/weather-app', version: '2.1.0', gitBranch: 'main', ...extra, message }) };
+}
+
+const CC_USAGE = { input_tokens: 12, output_tokens: 180, cache_read_input_tokens: 24000, cache_creation_input_tokens: 1800 };
+
+(function sessionClaudeCode() {
+  const sid = uid();
+  const base = daysAgo(0, 7, 5);
+  const model = 'claude-sonnet-4-5';
+  const lines = [];
+  let pid = null;
+  const push = (entry) => { lines.push(entry.line); pid = entry.uuid; return entry.uuid; };
+  const user = (text, t) => push(ccLine('user', sid, ts(base, t), { role: 'user', content: text }, { parentUuid: pid }));
+  const assistant = (blocks, t) => push(ccLine('assistant', sid, ts(base, t), { role: 'assistant', model, content: blocks, usage: CC_USAGE }, { parentUuid: pid }));
+  const result = (toolUseId, content, t, isError = false) => push(ccLine('user', sid, ts(base, t), { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content, ...(isError ? { is_error: true } : {}) }] }, { parentUuid: pid }));
+  const tid = () => `toolu_${shortId()}${shortId()}`;
+
+  const todos = (items) => ({ type: 'tool_use', id: tid(), name: 'TodoWrite', input: { todos: items.map(([content, status]) => ({ content, status, activeForm: content })) } });
+
+  user('Add rate limiting to the weather API, clean up the old build artifacts, and make sure the deploy script still works. Spin off a subagent to audit the Dockerfile while you work.', 0);
+
+  let t = todos([['Add express-rate-limit middleware to /api/weather', 'in_progress'], ['Remove stale dist/ build artifacts', 'pending'], ['Verify deploy script end to end', 'pending'], ['Audit Dockerfile (subagent)', 'pending']]);
+  assistant([{ type: 'text', text: "I'll plan this as four tasks and start with the rate limiter." }, t], 0.5);
+  result(t.id, 'Todos have been modified successfully.', 0.6);
+
+  const agentCall = { type: 'tool_use', id: tid(), name: 'Agent', input: { subagent_type: 'Explore', description: 'Audit Dockerfile for weather-app', prompt: 'Audit /home/demo/weather-app/Dockerfile for security and size issues. Report findings only, do not edit.' } };
+  assistant([agentCall], 1);
+  result(agentCall.id, 'Async agent launched successfully. agentId: a7f3c2d1e4b5 (internal ID)', 1.1);
+
+  let c = { type: 'tool_use', id: tid(), name: 'Bash', input: { command: 'cd weather-app && npm install express-rate-limit' } };
+  assistant([c], 1.5);
+  result(c.id, 'added 2 packages, and audited 214 packages in 2s\nfound 0 vulnerabilities', 2.2);
+
+  c = { type: 'tool_use', id: tid(), name: 'Edit', input: { file_path: '/home/demo/weather-app/routes/weather.js', old_string: "const router = express.Router();", new_string: "const rateLimit = require('express-rate-limit');\nconst router = express.Router();\nrouter.use(rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true }));" } };
+  assistant([{ type: 'text', text: 'Adding a 60 requests/minute limiter on the weather router.' }, c], 2.5);
+  result(c.id, 'The file /home/demo/weather-app/routes/weather.js has been updated successfully.', 2.6);
+
+  c = { type: 'tool_use', id: tid(), name: 'Bash', input: { command: 'cd weather-app && npx jest tests/routes.test.js' } };
+  assistant([c], 3);
+  result(c.id, 'FAIL tests/routes.test.js\n  ● Weather Routes › GET /api/weather/:city returns weather data\n\n    TypeError: rateLimit is not a function\n\n      at Object.<anonymous> (routes/weather.js:3:12)\n\nTests: 3 failed, 3 total\nexit code 1', 3.4, true);
+
+  c = { type: 'tool_use', id: tid(), name: 'Edit', input: { file_path: '/home/demo/weather-app/routes/weather.js', old_string: "const rateLimit = require('express-rate-limit');", new_string: "const { rateLimit } = require('express-rate-limit');" } };
+  assistant([{ type: 'text', text: 'v7 exports a named function; fixing the import.' }, c], 3.8);
+  result(c.id, 'The file /home/demo/weather-app/routes/weather.js has been updated successfully.', 3.9);
+
+  c = { type: 'tool_use', id: tid(), name: 'Bash', input: { command: 'cd weather-app && npx jest tests/routes.test.js' } };
+  assistant([c], 4.2);
+  result(c.id, 'PASS tests/routes.test.js\n  Weather Routes\n    ✓ GET /api/weather/:city returns weather data (41 ms)\n    ✓ GET /api/weather/:city/forecast returns forecast (11 ms)\n    ✓ returns 404 for unknown city (7 ms)\n\nTests: 3 passed, 3 total', 4.7);
+
+  t = todos([['Add express-rate-limit middleware to /api/weather', 'completed'], ['Remove stale dist/ build artifacts', 'in_progress'], ['Verify deploy script end to end', 'pending'], ['Audit Dockerfile (subagent)', 'pending']]);
+  assistant([{ type: 'text', text: 'Rate limiting is in and tested. Now the stale build artifacts.' }, t], 5);
+  result(t.id, 'Todos have been modified successfully.', 5.1);
+
+  c = { type: 'tool_use', id: tid(), name: 'Bash', input: { command: 'cd weather-app && rm -rf dist/ .cache/ && ls -la' } };
+  assistant([c], 5.3);
+  result(c.id, 'total 48\ndrwxr-xr-x  9 demo demo 4096 .\n-rw-r--r--  1 demo demo  612 .env\n-rw-r--r--  1 demo demo 1187 package.json\ndrwxr-xr-x  2 demo demo 4096 routes\n-rw-r--r--  1 demo demo  921 server.js\ndrwxr-xr-x  2 demo demo 4096 tests', 5.6);
+
+  t = todos([['Add express-rate-limit middleware to /api/weather', 'completed'], ['Remove stale dist/ build artifacts', 'completed'], ['Verify deploy script end to end', 'in_progress'], ['Audit Dockerfile (subagent)', 'pending']]);
+  assistant([t], 6);
+  result(t.id, 'Todos have been modified successfully.', 6.1);
+
+  c = { type: 'tool_use', id: tid(), name: 'Bash', input: { command: 'cd weather-app && cat .env && ./deploy.sh --dry-run' } };
+  assistant([{ type: 'text', text: 'Checking the deploy environment before a dry run.' }, c], 6.4);
+  result(c.id, 'OPENWEATHER_API_KEY=sk-proj-9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1\nPORT=3000\nNODE_ENV=production\n\n[deploy] dry run: would build image weather-app:2026.10.02\n[deploy] dry run: would push to registry.example.com/weather-app\n[deploy] ok', 7, false);
+
+  user('Looks good. Leave the Dockerfile audit for the subagent and wrap up.', 8);
+  assistant([{ type: 'text', text: 'Done:\n\n- **Rate limiting**: 60 req/min on `/api/weather` via express-rate-limit (named import fixed after the first test run failed).\n- **Cleanup**: removed `dist/` and `.cache/`.\n- **Deploy**: dry run passes.\n\nThe Dockerfile audit is still running in the subagent; its findings will land in its own session. Note: `cat .env` printed the OpenWeather key into this transcript, so consider rotating it.' }], 8.5);
+
+  writeSession(`${sid}.jsonl`, lines);
+  console.log(`Session 8: ${sid} — Claude Code: rate limiting + cleanup (${lines.length} events)`);
+
+  // Subagent transcript (Claude Code writes these under <session>/subagents/;
+  // the demo keeps it flat and relies on the isSidechain/agentId markers).
+  const agentId = 'a7f3c2d1e4b5';
+  const sub = [];
+  let spid = null;
+  const spush = (entry) => { sub.push(entry.line); spid = entry.uuid; };
+  const sbase = new Date(base.getTime() + 66 * 1000);
+  const sextra = () => ({ parentUuid: spid, isSidechain: true, agentId });
+  spush(ccLine('user', sid, ts(sbase, 0), { role: 'user', content: agentCall.input.prompt }, { ...sextra(), parentUuid: null }));
+  let sc = { type: 'tool_use', id: tid(), name: 'Read', input: { file_path: '/home/demo/weather-app/Dockerfile' } };
+  spush(ccLine('assistant', sid, ts(sbase, 0.3), { role: 'assistant', model: 'claude-haiku-4-5', content: [sc], usage: CC_USAGE }, sextra()));
+  spush(ccLine('user', sid, ts(sbase, 0.4), { role: 'user', content: [{ type: 'tool_result', tool_use_id: sc.id, content: 'FROM node:18\nWORKDIR /app\nCOPY . .\nRUN npm install\nEXPOSE 3000\nCMD ["node", "server.js"]' }] }, sextra()));
+  sc = { type: 'tool_use', id: tid(), name: 'Grep', input: { pattern: 'npm (install|ci)', path: '/home/demo/weather-app' } };
+  spush(ccLine('assistant', sid, ts(sbase, 0.8), { role: 'assistant', model: 'claude-haiku-4-5', content: [sc], usage: CC_USAGE }, sextra()));
+  spush(ccLine('user', sid, ts(sbase, 0.9), { role: 'user', content: [{ type: 'tool_result', tool_use_id: sc.id, content: 'Dockerfile:4:RUN npm install\ndeploy.sh:12:npm ci --omit=dev' }] }, sextra()));
+  spush(ccLine('assistant', sid, ts(sbase, 1.6), { role: 'assistant', model: 'claude-haiku-4-5', content: [{ type: 'text', text: 'Findings for Dockerfile:\n1. `FROM node:18` is unpinned and EOL soon; use `node:22-alpine` with a digest.\n2. `COPY . .` before `npm install` busts the layer cache and copies `.env` into the image. Add a `.dockerignore` and copy `package*.json` first.\n3. `npm install` should be `npm ci --omit=dev` to match deploy.sh.\n4. The container runs as root; add `USER node`.' }], usage: CC_USAGE }, sextra()));
+  writeSession(`agent-${agentId}.jsonl`, sub);
+  console.log(`Session 8a: agent-${agentId} — Claude Code subagent: Dockerfile audit (${sub.length} events)`);
+})();
+
 console.log(`\nDone! Demo files written to ${DEMO_DIR}`);
 console.log(`Files: ${fs.readdirSync(DEMO_DIR).filter(f => f.endsWith('.jsonl')).length} sessions`);

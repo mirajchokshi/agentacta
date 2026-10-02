@@ -28,7 +28,9 @@ const DEFAULTS: AgentActaConfig = {
   sessionsPath: null,
   dbPath: './agentacta.db',
   projectAliases: {},
-  authToken: null
+  authToken: null,
+  aiModel: null,
+  chatgptProfilePath: null
 };
 
 function detectSessionDirs(): string[] | null {
@@ -119,6 +121,9 @@ function loadConfig(): AgentActaConfig {
   if (process.env.AGENTACTA_SESSIONS_PATH) config.sessionsPath = normalizeSessionsPath(process.env.AGENTACTA_SESSIONS_PATH);
   if (process.env.AGENTACTA_DB_PATH) config.dbPath = process.env.AGENTACTA_DB_PATH;
   if (process.env.AGENTACTA_AUTH_TOKEN) config.authToken = process.env.AGENTACTA_AUTH_TOKEN;
+  if (process.env.AGENTACTA_AI_MODEL) config.aiModel = process.env.AGENTACTA_AI_MODEL;
+  if (process.env.AGENTACTA_CHATGPT_PROFILE) config.chatgptProfilePath = process.env.AGENTACTA_CHATGPT_PROFILE;
+  if (!config.chatgptProfilePath) config.chatgptProfilePath = path.join(path.dirname(CONFIG_FILE), 'chatgpt-profile.json');
   if (process.env.AGENTACTA_PROJECT_ALIASES_JSON) {
     try {
       config.projectAliases = JSON.parse(process.env.AGENTACTA_PROJECT_ALIASES_JSON) as Record<string, string>;

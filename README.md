@@ -17,7 +17,10 @@ npx agentacta
 ```
 
 <p align="center">
-  <img src="screenshots/demo.gif" alt="AgentActa demo" width="800">
+  <img src="screenshots/overview.png" alt="AgentActa overview: needs-attention feed, trends and agent breakdown" width="800">
+</p>
+<p align="center">
+  <img src="screenshots/task-trace.png" alt="Task trace: planned tasks, subagent spans and turns on one timeline" width="800">
 </p>
 
 ## Why this exists
@@ -40,7 +43,10 @@ AgentActa gives you one place to inspect the full trail.
 - 📊 Stats for sessions, messages, tools, and tokens
 - ⚡ Live indexing via file watching
 - 📱 Mobile-optimized UI with floating navigation
-- 🏥 Session health scoring - reliability scores, issue detection, and per-signal breakdowns
+- 🏥 Session health scoring - 11 signals (destructive commands, leaked secrets, retry loops, unfinished tasks, token spikes, …) rolled into a reliability score
+- 🚨 Proactive digest and alerts - a plain-English "what happened, what needs you" overview with trends, live alert toasts, optional desktop notifications
+- 🧵 Task tracing - every session's plan (todo lists, task tools, Codex plans), subagents and turns as a waterfall timeline
+- 🤖 Optional Sign in with ChatGPT - written session briefs and daily briefings using your own ChatGPT plan, only when you ask
 - 💡 Search suggestions based on real data
 - ⌨️ Command palette (⌘K / Ctrl+K) for quick navigation
 - 🎨 Theme settings (system, light, dark, OLED)
@@ -161,6 +167,8 @@ It accepts a string, a colon-delimited string, or a JSON array.
 | `AGENTACTA_DB_PATH` | `./agentacta.db` | Database path |
 | `AGENTACTA_STORAGE` | `reference` | `reference` or `archive` |
 | `AGENTACTA_PROJECT_ALIASES_JSON` | unset | Rename inferred project labels |
+| `AGENTACTA_AI_MODEL` | auto | Model used for AI briefs (defaults to the best `gpt-5*` your plan exposes) |
+| `AGENTACTA_CHATGPT_PROFILE` | `<config dir>/chatgpt-profile.json` | Where the ChatGPT tokens are stored (0600) |
 
 ## API
 
@@ -179,7 +187,53 @@ It accepts a string, a colon-delimited string, or a JSON array.
 | `POST /api/maintenance` | VACUUM + WAL checkpoint (returns size before/after) |
 | `GET /api/health` | Server status, version, uptime, session count |
 | `GET /api/insights` | Session health summary - reliability scores, issue counts, top flagged sessions |
+| `GET /api/insights/session/:id` | Signals and reliability score for one session |
+| `GET /api/sessions/:id/tasks` | Task trace: planned tasks, subagent spans, turns, with durations and tool-call attribution |
+| `GET /api/digest?hours=24` | Proactive digest: headline, attention feed, metrics vs the previous period, failing tools, churned files, 14-day series |
+| `GET /api/alerts` | Open alerts (`?all=1` includes acknowledged) |
+| `POST /api/alerts/ack` | Acknowledge alerts: `{"ids":[1,2]}` or `{"ids":"all"}` |
+| `GET /api/alerts/stream` | SSE stream of new alerts as sessions are re-indexed |
+| `GET /api/chatgpt/status` | Sign in with ChatGPT connection state |
+| `POST /api/chatgpt/signin` | Start a sign-in; returns the URL to open in the browser |
+| `POST /api/chatgpt/signout` | Forget the stored ChatGPT profile |
+| `GET,POST /api/ai/brief?scope=session&id=<id>` | Read the cached brief / write a new one (`scope=digest&hours=24` for the briefing) |
 | `GET /api/export/search?q=<query>&format=md` | Export search results |
+
+### Health signals
+
+Every session is scored on 11 signals. The first two raise a **critical** alert, the next four a **warning**:
+
+| Signal | Fires when |
+|---|---|
+| `destructive_command` | A shell command deletes data or rewrites history: `rm -rf`, `git push --force`, `git reset --hard`, `DROP TABLE`, `kubectl delete`, `terraform destroy`, … |
+| `secret_exposure` | An API key, GitHub/Slack/AWS token, JWT or private key shows up in tool arguments or output |
+| `high_error_rate` | More than 30% of tool results are errors (Claude Code `is_error`, Codex non-zero exit codes, or error-shaped text) |
+| `tool_retry_loop` | The same call with the same arguments repeats 3+ times in a row |
+| `unfinished_tasks` | The agent kept a plan (TodoWrite, TaskCreate, `update_plan`) and left items pending or in progress |
+| `token_outlier` | The session used 4× the median tokens for its agent |
+| `file_churn` | One file was rewritten six or more times |
+| `subagent_storm` | Six or more subagents were spawned |
+| `session_bail` | 20+ tool calls without a single write or edit |
+| `long_prompt_short_session` | A sub-15-word prompt led to 30+ tool calls |
+| `no_completion` | The session ended on a tool call instead of a message |
+
+Alerts are stored once per session and signal, retracted automatically if a live session recovers, and streamed to the UI (and, if you opt in under Settings, to desktop notifications).
+
+### Task tracing
+
+`GET /api/sessions/:id/tasks` rebuilds what the agent *planned* from the tools it called and lines it up against what it *did*:
+
+- **Tasks** from Claude Code `TodoWrite` / `TaskCreate` / `TaskUpdate` and Codex `update_plan`: status transitions, start and completion times, tool calls and errors attributed to the task while it was in progress, files touched.
+- **Subagents** from `Agent` / `Task` spawns, linked to their own indexed transcript (`<session>/subagents/agent-*.jsonl`) so you get their duration and tool counts.
+- **Turns** (user prompts) with tool-call and error counts.
+
+The session page renders this as a waterfall; click any row to jump to the event.
+
+### Sign in with ChatGPT (optional)
+
+AgentActa works fully offline. If you want written briefs, open **Settings → Sign in with ChatGPT**. It uses [OpenAI's flow for open-source local apps](https://developers.openai.com/siwc): a PKCE authorization in your browser with a loopback callback on this machine, dynamic client registration (no API key, no client secret), ID-token verification against OpenAI's JWKS, and tokens stored with owner-only permissions next to your config. Requires a ChatGPT Plus or Pro plan for plan-funded requests.
+
+Once connected, **Write brief** on a session page sends a compact, structured digest of that session (requests, plan, tools, error samples, signals) to the Responses API and returns what was asked, what happened, risks and follow-ups. The Overview's **AI briefing** does the same for the digest window. Nothing is sent until you click, and briefs are cached until the underlying data changes.
 
 ### Context API
 

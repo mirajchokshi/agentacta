@@ -78,7 +78,9 @@ function discoverSessionDirs(config: AgentActaConfig): SessionDir[] {
         const projDir = path.join(p, proj);
         if (fs.statSync(projDir).isDirectory()) {
           const hasJsonl = fs.readdirSync(projDir).some(f => f.endsWith('.jsonl'));
-          if (hasJsonl) addDir({ path: projDir, agent: 'claude-code' });
+          // Recursive: Claude Code ≥2.1 stores subagent transcripts under
+          // <project>/<sessionId>/subagents/agent-<id>.jsonl
+          if (hasJsonl) addDir({ path: projDir, agent: 'claude-code', recursive: true });
         }
       }
     } else if (normalized === normalizedCodex) {
@@ -202,9 +204,38 @@ function extractToolResult(msg: unknown): ExtractedToolResult | null {
     const content = Array.isArray(m.content)
       ? (m.content as ContentBlock[]).map(b => b.text || '').join('\n')
       : (typeof m.content === 'string' ? m.content : '');
-    return { toolCallId: (m.toolCallId as string) || '', toolName: (m.toolName as string) || '', content: content.slice(0, 10000) };
+    const isError = m.isError === true || m.is_error === true;
+    return { toolCallId: (m.toolCallId as string) || '', toolName: (m.toolName as string) || '', content: content.slice(0, 10000), isError };
   }
   return null;
+}
+
+// Claude Code delivers tool results as user messages whose content array holds
+// {type:'tool_result', tool_use_id, content, is_error} blocks. Returns one
+// result per block; tool names are resolved by the caller from the tool_use id.
+function extractClaudeToolResults(msg: unknown): ExtractedToolResult[] {
+  if (!msg || typeof msg !== 'object') return [];
+  const m = msg as Record<string, unknown>;
+  if (m.role !== 'user' || !Array.isArray(m.content)) return [];
+  const out: ExtractedToolResult[] = [];
+  for (const b of m.content as Array<Record<string, unknown>>) {
+    if (!b || b.type !== 'tool_result') continue;
+    let text = '';
+    if (typeof b.content === 'string') text = b.content;
+    else if (Array.isArray(b.content)) {
+      text = (b.content as Array<Record<string, unknown>>)
+        .map(part => (part && typeof part.text === 'string') ? part.text : '')
+        .filter(Boolean)
+        .join('\n');
+    }
+    out.push({
+      toolCallId: (b.tool_use_id as string) || '',
+      toolName: '',
+      content: text.slice(0, 10000),
+      isError: b.is_error === true,
+    });
+  }
+  return out;
 }
 
 function extractCodexMessageText(content: unknown): string {
@@ -447,6 +478,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
 
   let isClaudeCode = false;
   let isCodexCli = false;
+  let parentSessionId: string | null = null;
 
   if (firstLine.type === 'session') {
     // OpenClaw format
@@ -476,6 +508,16 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
       sessionId = fallbackSessionId || path.basename(sourceKey, '.jsonl');
       sessionStart = new Date(firstLine.timestamp || Date.now()).toISOString();
     }
+    // Subagent transcripts carry the PARENT's sessionId on every line. Give them
+    // their own id (Claude Code's agent-<id> filename) and link to the parent,
+    // otherwise indexing the child would delete and replace the parent session.
+    const normalizedSource = sourceKey.replace(/\\/g, '/');
+    const sidechainAgentId = typeof firstLine.agentId === 'string' ? firstLine.agentId : null;
+    if (normalizedSource.includes('/subagents/') || (firstLine.isSidechain && sidechainAgentId)) {
+      parentSessionId = sessionId;
+      sessionId = sidechainAgentId ? `agent-${sidechainAgentId}` : path.basename(sourceKey, '.jsonl');
+      sessionType = 'subagent';
+    }
   } else if (firstLine.type === 'session_meta') {
     // Codex CLI format
     isCodexCli = true;
@@ -497,7 +539,8 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
   }
 
   // --- Parse the entire file BEFORE any DB operations ---
-  const pendingEvents: Array<[string, string, string, string, string, string | null, string | null, string | null, string | null]> = [];
+  const pendingEvents: Array<[string, string, string, string, string, string | null, string | null, string | null, string | null, number]> = [];
+  const toolNamesById: Map<string, string> = new Map();
   const fileActivities: Array<[string, string, string, string]> = [];
   const projectCounts: Map<string, number> = new Map();
 
@@ -550,7 +593,8 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
           const toolName = p.name || p.tool_name || '';
           const toolArgs = typeof p.arguments === 'string' ? p.arguments : JSON.stringify(p.arguments || {});
           const callBaseId = p.call_id || p.id || eventId;
-          pendingEvents.push([`${callBaseId}:call`, sessionId as string, ts, 'tool_call', 'assistant', null, toolName, toolArgs, null]);
+          pendingEvents.push([`${callBaseId}:call`, sessionId as string, ts, 'tool_call', 'assistant', null, toolName, toolArgs, null, 0]);
+          toolNamesById.set(String(callBaseId), toolName);
           toolCount++;
 
           const fps = extractFilePaths(toolName, toolArgs);
@@ -566,7 +610,15 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
         if (p.type === 'function_call_output') {
           const output = (typeof p.output === 'string' ? p.output : JSON.stringify(p.output || '')).slice(0, 10000);
           const resultBaseId = p.call_id || p.id || eventId;
-          pendingEvents.push([`${resultBaseId}:result`, sessionId as string, ts, 'tool_result', 'tool', output, p.name || p.tool_name || '', null, output]);
+          // Codex wraps shell output as JSON with metadata.exit_code; treat a
+          // non-zero exit code as an error result.
+          let codexIsError = 0;
+          try {
+            const parsed = JSON.parse(output) as { metadata?: { exit_code?: number } };
+            if (parsed && parsed.metadata && typeof parsed.metadata.exit_code === 'number' && parsed.metadata.exit_code !== 0) codexIsError = 1;
+          } catch { /* plain text output */ }
+          const codexToolName = p.name || p.tool_name || toolNamesById.get(String(resultBaseId)) || '';
+          pendingEvents.push([`${resultBaseId}:result`, sessionId as string, ts, 'tool_result', 'tool', output, codexToolName, null, output, codexIsError]);
           sessionEnd = ts;
           continue;
         }
@@ -576,7 +628,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
           const role = rawRole === 'assistant' ? 'assistant' : 'user';
           const content = extractCodexMessageText(p.content);
           if (content) {
-            pendingEvents.push([p.id || eventId, sessionId as string, ts, 'message', role, content, null, null, null]);
+            pendingEvents.push([p.id || eventId, sessionId as string, ts, 'message', role, content, null, null, null, 0]);
             msgCount++;
             if (!summary && role === 'user' && isSummaryCandidate(content)) summary = content.slice(0, 200);
             if (!initialPrompt && role === 'user' && isSummaryCandidate(content)) {
@@ -596,14 +648,14 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
         const eventId = `evt-${p.type || 'event'}-${Date.parse(ts) || Math.random()}`;
 
         if (p.type === 'agent_message' && p.message) {
-          pendingEvents.push([eventId, sessionId as string, ts, 'message', 'assistant', p.message, null, null, null]);
+          pendingEvents.push([eventId, sessionId as string, ts, 'message', 'assistant', p.message, null, null, null, 0]);
           msgCount++;
           sessionEnd = ts;
           continue;
         }
 
         if (p.type === 'user_message' && p.message) {
-          pendingEvents.push([eventId, sessionId as string, ts, 'message', 'user', p.message, null, null, null]);
+          pendingEvents.push([eventId, sessionId as string, ts, 'message', 'user', p.message, null, null, null, 0]);
           msgCount++;
           if (!summary && isSummaryCandidate(p.message)) summary = p.message.slice(0, 200);
           if (!initialPrompt && isSummaryCandidate(p.message)) {
@@ -678,15 +730,27 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
 
       const tr = extractToolResult(msg);
       if (tr) {
-        pendingEvents.push([eventId, sessionId as string, ts as string, 'tool_result', 'tool', tr.content, tr.toolName, null, tr.content]);
+        pendingEvents.push([eventId, sessionId as string, ts as string, 'tool_result', 'tool', tr.content, tr.toolName, null, tr.content, tr.isError ? 1 : 0]);
         continue;
+      }
+
+      if (isClaudeCode) {
+        const claudeResults = extractClaudeToolResults(msg);
+        if (claudeResults.length > 0) {
+          for (const r of claudeResults) {
+            const resultId = r.toolCallId ? `${r.toolCallId}:result` : `${eventId}:result`;
+            const toolName = (r.toolCallId && toolNamesById.get(r.toolCallId)) || null;
+            pendingEvents.push([resultId, sessionId as string, ts as string, 'tool_result', 'tool', r.content, toolName, null, r.content, r.isError ? 1 : 0]);
+          }
+          continue;
+        }
       }
 
       const content = extractContent(msg);
       const role = (msg.role as string) || 'unknown';
 
       if (content) {
-        pendingEvents.push([eventId, sessionId as string, ts as string, 'message', role, content, null, null, null]);
+        pendingEvents.push([eventId, sessionId as string, ts as string, 'message', role, content, null, null, null, 0]);
         msgCount++;
         // Better summary: skip heartbeat/boilerplate messages
         if (!summary && role === 'user' && isSummaryCandidate(content)) {
@@ -702,7 +766,8 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
 
       const tools = extractToolCalls(msg);
       for (const tool of tools) {
-        pendingEvents.push([tool.id || `${eventId}-${tool.name}`, sessionId as string, ts as string, 'tool_call', role, null, tool.name, tool.args, null]);
+        pendingEvents.push([tool.id || `${eventId}-${tool.name}`, sessionId as string, ts as string, 'tool_call', role, null, tool.name, tool.args, null, 0]);
+        if (tool.id) toolNamesById.set(tool.id, tool.name);
         toolCount++;
 
         // File activity tracking
@@ -719,6 +784,10 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
       }
     }
   }
+
+  // Claude Code transcripts are always claude-code, whatever directory they
+  // were found in (custom sessionsPath entries otherwise inherit a folder name).
+  if (isClaudeCode && !/^claude/i.test(agent)) agent = 'claude-code';
 
   // Classify snapshot-only Claude files explicitly (avoid heartbeat mislabel)
   if (isClaudeCode && sawSnapshotRecord && !sawNonSnapshotRecord) {
@@ -771,7 +840,8 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
     stmts.deleteSession.run(sessionId);
 
     stmts.upsertSession.run(sessionId, sessionStart, sessionEnd, msgCount, toolCount, model, summary, agent, sessionType, totalCost, totalTokens, totalInputTokens, totalOutputTokens, totalCacheReadTokens, totalCacheWriteTokens, initialPrompt, firstMessageId, firstMessageTimestamp, modelsJson, projectsJson);
-    for (const ev of pendingEvents) stmts.insertEvent.run(...ev);
+    for (const ev of pendingEvents) stmts.insertEventWithError.run(...ev);
+    if (parentSessionId) stmts.setParentSession.run(parentSessionId, sessionId);
     for (const fa of fileActivities) stmts.insertFileActivity.run(...fa);
 
     // Archive mode: store raw JSONL lines

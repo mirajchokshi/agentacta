@@ -261,6 +261,20 @@ function handleRoute() {
     const id = decodeURIComponent(raw.slice('session/'.length));
     if (id) { viewSession(id); return; }
   }
+  if (raw.startsWith('search/')) {
+    const q = decodeURIComponent(raw.slice('search/'.length));
+    window._lastView = 'overview';
+    updateNavActive('overview'); updateMobileNavActive('overview');
+    viewSearch(q);
+    return;
+  }
+  if (raw.startsWith('file/')) {
+    const fp = decodeURIComponent(raw.slice('file/'.length));
+    window._lastView = 'files';
+    updateNavActive('files'); updateMobileNavActive('files');
+    viewFileDetail(fp);
+    return;
+  }
 
   const normalized = raw === 'search' ? 'overview' : raw;
   const view = normalized === 'overview' || normalized === 'sessions' || normalized === 'timeline' || normalized === 'files' || normalized === 'stats' || normalized === 'insights' ? normalized : 'overview';
@@ -681,6 +695,7 @@ async function viewSession(id) {
       <div class="session-header" style="margin-bottom:12px">
         <span class="session-time">${fmtDate(s.start_time)} \u00b7 ${fmtTimeShort(s.start_time)} \u2013 ${fmtTimeShort(s.end_time)}</span>
         <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          ${data.parent ? `<a class="session-link" href="#session/${encodeURIComponent(data.parent.id)}" title="${escHtml(data.parent.summary || data.parent.id)}">↑ parent session</a>` : ''}
           ${s.agent && s.agent !== 'main' ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
           ${s.session_type && s.session_type !== normalizeAgentLabel(s.agent || '') ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
           ${renderModelTags(s)}
@@ -699,10 +714,23 @@ async function viewSession(id) {
         </div>
       ` : ''}
     </div>
+    <div class="session-panels">
+      <div class="panel panel-trace" id="sessionTracePanel">
+        <div class="panel-head"><span class="panel-title">Task trace</span></div>
+        <div class="loading">Loading trace…</div>
+      </div>
+      <div class="panel panel-health" id="sessionInsightsPanel">
+        <div class="panel-head"><span class="panel-title">Health</span></div>
+        <div class="loading">Loading insights…</div>
+      </div>
+      <div class="panel panel-brief" id="sessionBriefPanel">
+        <div class="panel-head"><span class="panel-title">AI brief</span><span class="panel-sub">your ChatGPT plan</span></div>
+        <div class="loading">…</div>
+      </div>
+    </div>
     <div class="section-label" id="sessionEventsLabel">Events</div>
     <div id="eventsContainer"></div>
     <div class="empty" id="sessionEventsEmpty" style="display:none"><h2>No events</h2><p>This session has no events to display.</p></div>
-    <div id="sessionInsightsPanel" class="loading" style="margin-top:var(--space-xl)">Loading insights...</div>
   `;
 
   const PAGE_SIZE = 50;
@@ -1059,11 +1087,39 @@ async function viewSession(id) {
     if (ind) ind.remove();
   };
 
-  // Load insights panel
+  // Jump to any event by id (renders remaining batches first). Used by the trace.
+  window._sessionJumpTo = async (eventId) => {
+    if (!eventId) return;
+    if (activeProjectFilter !== 'all' && !getFilteredEvents().some(ev => ev.id === eventId)) setProjectFilter('all');
+    let loops = 0;
+    while (rendered < getFilteredEvents().length && !document.querySelector(`[data-event-id="${CSS.escape(eventId)}"]`)) {
+      renderBatch();
+      loops += 1;
+      if (loops % 2 === 0) await new Promise(requestAnimationFrame);
+    }
+    const el = document.querySelector(`[data-event-id="${CSS.escape(eventId)}"]`);
+    if (!el) return;
+    const top = Math.max(0, el.getBoundingClientRect().top + window.scrollY - window.innerHeight * 0.3);
+    window.scrollTo({ top, behavior: 'smooth' });
+    el.classList.add('event-highlight');
+    setTimeout(() => el.classList.remove('event-highlight'), 2000);
+  };
+
+  // Load the three panels in parallel; each degrades independently.
   api(`/insights/session/${id}`).then(insights => {
     const panel = document.getElementById('sessionInsightsPanel');
-    if (panel) panel.outerHTML = renderInsightsPanel(insights._error ? null : insights);
+    if (panel) panel.innerHTML = renderInsightsPanel(insights._error ? null : insights);
   });
+  api(`/sessions/${id}/tasks`).then(trace => {
+    const panel = document.getElementById('sessionTracePanel');
+    if (!panel) return;
+    panel.innerHTML = trace._error ? `<div class="panel-head"><span class="panel-title">Task trace</span></div><p class="panel-empty">Trace unavailable.</p>` : renderTracePanel(trace, data.children || []);
+    panel.querySelectorAll('[data-jump]').forEach(el => el.addEventListener('click', (e) => {
+      if (e.target.closest('a')) return;
+      window._sessionJumpTo(el.dataset.jump);
+    }));
+  });
+  mountBriefPanel('sessionBriefPanel', 'session', id);
 }
 
 async function viewTimeline(date) {
@@ -1174,50 +1230,119 @@ async function viewTimeline(date) {
 
 async function viewOverview() {
   clearJumpUi();
+  const win = lsGet(DIGEST_WINDOW_KEY) === '7d' ? '7d' : '24h';
+  const hours = win === '7d' ? 168 : 24;
   content.innerHTML = `<div class="page-title">Overview</div><div class="stat-grid">${skeletonRows(5, 'stats')}</div>`;
   transitionView();
-  const data = await api('/stats');
-  const sessionsRes = await api('/sessions?limit=30');
-  if (data._error || sessionsRes._error) {
+  const [digest, sessionsRes, chatgpt] = await Promise.all([
+    api(`/digest?hours=${hours}`),
+    api('/sessions?limit=30'),
+    api('/chatgpt/status'),
+  ]);
+  if (digest._error || sessionsRes._error) {
     content.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
     return;
   }
 
   const sessions = sessionsRes.sessions || [];
   const nowMs = Date.now();
-  const ACTIVE_WINDOW_MIN = 15;
-  const activeNow = sessions
-    .filter(s => {
-      const t = s.end_time || s.start_time;
-      if (!t) return false;
-      const ageMin = (nowMs - new Date(t).getTime()) / 60000;
-      return ageMin >= 0 && ageMin <= ACTIVE_WINDOW_MIN;
-    })
-    .slice(0, 4);
+  const activeNow = sessions.filter(s => {
+    const t = s.end_time || s.start_time;
+    if (!t) return false;
+    const ageMin = (nowMs - new Date(t).getTime()) / 60000;
+    return ageMin >= 0 && ageMin <= 15;
+  }).slice(0, 4);
   const activeIds = new Set(activeNow.map(s => s.id));
-  const recentSessions = sessions.filter(s => !activeIds.has(s.id)).slice(0, 6);
-  const uniqueTools = new Set((data.tools || []).filter(t => t).map(t => fmtToolGroup(t)));
+  const recentSessions = sessions.filter(s => !activeIds.has(s.id) && s.session_type !== 'subagent').slice(0, 6);
 
-  let html = `<div class="page-title">Overview</div>
+  const m = digest.metrics;
+  const series = digest.series || [];
+  const trend = (key) => series.map(p => p[key] || 0);
+  const alertsOpen = (digest.alerts || []).length;
+  const criticalOpen = (digest.alerts || []).filter(a => a.severity === 'critical').length;
 
-    <div class="section-label">Key Metrics</div>
-    <div class="stat-grid">
-      <div class="stat-card accent-blue"><div class="label">Sessions</div><div class="value">${data.sessions}</div></div>
-      <div class="stat-card accent-green"><div class="label">Messages</div><div class="value">${data.messages.toLocaleString()}</div></div>
-      <div class="stat-card accent-amber"><div class="label">Tool Calls</div><div class="value">${data.toolCalls.toLocaleString()}</div></div>
-      <div class="stat-card accent-teal"><div class="label">Total Tokens</div><div class="value">${(data.totalTokens || 0).toLocaleString()}</div></div>
+  const statCard = (label, metric, accent, seriesKey, fmt = (v) => v.toLocaleString(), invert = false) => `
+    <div class="stat-card stat-card-trend accent-${accent}">
+      <div class="stat-card-top"><div class="label">${label}</div>${fmtDelta(metric.delta_pct, invert)}</div>
+      <div class="value">${fmt(metric.current)}</div>
+      <div class="stat-card-foot">${sparkline(trend(seriesKey), `var(--${accent === 'blue' ? 'accent' : accent})`)}<span class="stat-prev">prev ${fmt(metric.previous)}</span></div>
+    </div>`;
+
+  const agentsTable = (digest.agents || []).length ? `
+    <div class="mini-table-wrap"><table class="mini-table">
+      <thead><tr><th>Agent</th><th>Sessions</th><th>Flagged</th><th>Tool calls</th><th>Tokens</th></tr></thead>
+      <tbody>${digest.agents.map(a => `<tr><td><span class="session-agent">${escHtml(normalizeAgentLabel(a.agent))}</span></td><td>${a.sessions}</td><td class="${a.flagged ? 'cell-warn' : ''}">${a.flagged}</td><td>${a.tool_calls.toLocaleString()}</td><td>${fmtTokens(a.tokens)}</td></tr>`).join('')}</tbody>
+    </table></div>` : `<p class="panel-empty">No sessions in this window.</p>`;
+
+  const troubleList = [
+    ...(digest.failing_tools || []).map(t => `<a class="trouble-row" href="#search/${encodeURIComponent(t.tool_name)}"><span class="trouble-name">${escHtml(fmtToolName(t.tool_name))}</span><span class="trouble-bar"><span style="width:${t.rate}%"></span></span><span class="trouble-val">${t.rate}% failed · ${t.errors}/${t.total}</span></a>`),
+    ...(digest.churned_files || []).map(f => `<a class="trouble-row" href="#file/${encodeURIComponent(f.file_path)}" title="${escHtml(f.file_path)}"><span class="trouble-name">${escHtml(f.file_path.split('/').pop())}</span><span class="trouble-bar"><span style="width:${Math.min(100, f.edits * 10)}%"></span></span><span class="trouble-val">${f.edits} edits · ${f.sessions} session${f.sessions === 1 ? '' : 's'}</span></a>`),
+  ];
+
+  let html = `
+    <div class="overview-head">
+      <div class="overview-head-text">
+        <div class="page-title" style="margin-bottom:6px">Overview</div>
+        <p class="overview-headline">${escHtml(digest.headline)}</p>
+      </div>
+      <div class="segmented" id="digestWindow" role="tablist">
+        <button data-win="24h" class="${win === '24h' ? 'active' : ''}">24h</button>
+        <button data-win="7d" class="${win === '7d' ? 'active' : ''}">7d</button>
+      </div>
     </div>
 
-    <div class="section-label">Active Now (${activeNow.length})</div>
-    ${activeNow.length ? activeNow.map(renderSessionItem).join('') : `<div class="empty" style="margin-bottom:var(--space-xl)"><p>No active sessions right now</p></div>`}
+    <div class="section-row">
+      <div class="section-label">Needs attention${digest.attention.length ? ` <span class="count-pill ${criticalOpen ? 'pill-critical' : ''}">${digest.attention.length}</span>` : ''}</div>
+      ${alertsOpen ? `<button class="text-btn" id="ackAllAlerts">Dismiss ${alertsOpen} alert${alertsOpen === 1 ? '' : 's'}</button>` : ''}
+    </div>
+    ${renderAttention(digest.attention)}
 
-    <div class="section-label">Recent Sessions</div>
+    <div class="section-label">Trends <span class="section-hint">vs the previous ${win === '7d' ? '7 days' : '24 hours'} · 14-day bars</span></div>
+    <div class="stat-grid stat-grid-trend">
+      ${statCard('Sessions', m.sessions, 'blue', 'sessions')}
+      ${statCard('Tool calls', m.tool_calls, 'teal', 'tool_calls')}
+      ${statCard('Tool errors', m.errors, 'red', 'errors', (v) => v.toLocaleString(), true)}
+      ${statCard('Tokens', m.tokens, 'purple', 'tokens', fmtTokens)}
+      ${statCard('Flagged sessions', m.flagged, 'amber', 'flagged', (v) => v.toLocaleString(), true)}
+    </div>
+
+    <div class="overview-columns">
+      <div class="panel">
+        <div class="panel-head"><span class="panel-title">By agent</span></div>
+        ${agentsTable}
+      </div>
+      <div class="panel">
+        <div class="panel-head"><span class="panel-title">Trouble spots</span><span class="panel-sub">failing tools · churned files</span></div>
+        ${troubleList.length ? `<div class="trouble-list">${troubleList.join('')}</div>` : `<p class="panel-empty">No failing tools or churned files in this window.</p>`}
+      </div>
+      <div class="panel panel-brief" id="digestBriefPanel">
+        <div class="panel-head"><span class="panel-title">AI briefing</span><span class="panel-sub">your ChatGPT plan</span></div>
+        <div class="loading">…</div>
+      </div>
+    </div>
+
+    <div class="section-label">Active now${activeNow.length ? ` <span class="count-pill pill-live">${activeNow.length}</span>` : ''}</div>
+    ${activeNow.length ? activeNow.map(renderSessionItem).join('') : `<div class="empty empty-compact"><p>No active sessions right now</p></div>`}
+
+    <div class="section-label">Recent sessions</div>
     ${recentSessions.map(renderSessionItem).join('')}
   `;
 
   content.innerHTML = html;
   transitionView();
   $$('.session-item').forEach(item => item.addEventListener('click', () => viewSession(item.dataset.id)));
+  $$('#digestWindow button').forEach(btn => btn.addEventListener('click', () => {
+    lsSet(DIGEST_WINDOW_KEY, btn.dataset.win);
+    viewOverview();
+  }));
+  const ackBtn = $('#ackAllAlerts');
+  if (ackBtn) ackBtn.addEventListener('click', async () => {
+    ackBtn.disabled = true;
+    await api('/alerts/ack', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: 'all' }) });
+    refreshAlertBadge();
+    viewOverview();
+  });
+  mountBriefPanel('digestBriefPanel', 'digest', String(hours), chatgpt);
 }
 
 async function viewStats() {
@@ -1266,6 +1391,21 @@ async function viewStats() {
           <option value="trueblack" ${darkVariant==='trueblack'?'selected':''}>True Black</option>
         </select>
       </div>
+    </div>
+
+    <div class="section-label">Sign in with ChatGPT</div>
+    <div class="config-card settings-chatgpt" id="chatgptCard" style="margin-bottom:var(--space-sm)">
+      <div class="loading">Checking connection…</div>
+    </div>
+    <p class="settings-help" style="margin-bottom:var(--space-xl)">Optional. Connect your ChatGPT account (Plus or Pro) to generate written session briefs and daily briefings with your own plan. Nothing is sent until you click “Write brief”; the sign-in uses OpenAI’s open-source app flow with a loopback callback on this machine, and tokens are stored locally with owner-only permissions.</p>
+
+    <div class="section-label">Notifications</div>
+    <div class="config-card" style="margin-bottom:var(--space-xl)">
+      <label class="switch-row">
+        <input type="checkbox" id="notifyToggle" ${lsGet(NOTIFY_KEY) === '1' ? 'checked' : ''}>
+        <span class="switch-text"><strong>Desktop notifications for new alerts</strong><span class="settings-help" style="margin:0">Critical and warning alerts (destructive commands, leaked secrets, failing runs) pop up even when this tab is in the background. In-app toasts are always on.</span></span>
+      </label>
+      <div id="notifyStatus" class="settings-maintenance-status" style="margin-top:6px"></div>
     </div>
 
     ${data.sessionDirs && data.sessionDirs.length ? (() => {
@@ -1326,6 +1466,21 @@ async function viewStats() {
       lsSet(THEME_DARK_VARIANT_KEY, darkVariantSelect.value);
       window._themeDarkVariant = darkVariantSelect.value;
       applyThemeFromPrefs();
+    });
+  }
+
+  mountChatGPTCard();
+
+  const notifyToggle = $('#notifyToggle');
+  const notifyStatus = $('#notifyStatus');
+  if (notifyToggle) {
+    notifyToggle.addEventListener('change', async () => {
+      if (!notifyToggle.checked) { lsSet(NOTIFY_KEY, '0'); notifyStatus.textContent = 'Off'; return; }
+      if (!('Notification' in window)) { notifyToggle.checked = false; notifyStatus.textContent = 'This browser does not support notifications.'; return; }
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') { notifyToggle.checked = false; lsSet(NOTIFY_KEY, '0'); notifyStatus.textContent = 'Permission denied in the browser.'; return; }
+      lsSet(NOTIFY_KEY, '1');
+      notifyStatus.textContent = 'On';
     });
   }
 
@@ -1572,24 +1727,42 @@ async function viewFileDetail(filePath) {
 
 // --- Insights helpers ---
 const SIGNAL_LABELS = {
-  tool_retry_loop: 'Repeated Actions',
-  session_bail: 'No Output Produced',
+  destructive_command: 'Destructive Command',
+  secret_exposure: 'Secret in Transcript',
   high_error_rate: 'Frequent Errors',
+  tool_retry_loop: 'Repeated Actions',
+  unfinished_tasks: 'Unfinished Tasks',
+  token_outlier: 'Token Spike',
+  file_churn: 'File Churn',
+  subagent_storm: 'Subagent Fan-out',
+  session_bail: 'No Output Produced',
   long_prompt_short_session: 'Vague Instructions',
   no_completion: 'Incomplete Session'
 };
 
 const SIGNAL_DESCRIPTIONS = {
-  tool_retry_loop: 'The agent called the same tool many times in a row, suggesting it was stuck in a retry loop',
-  session_bail: 'The agent ran many actions but never wrote or edited any files',
+  destructive_command: 'A shell command that deletes data or rewrites history ran (rm -rf, force push, DROP TABLE, …)',
+  secret_exposure: 'A credential-shaped string (API key, token, private key) appeared in tool arguments or output',
   high_error_rate: 'More than 30% of tool calls returned errors',
+  tool_retry_loop: 'The same call with the same arguments repeated 3+ times in a row, suggesting a retry loop',
+  unfinished_tasks: 'The agent planned tasks (todo list / plan) and left some pending or in progress when the session went quiet',
+  token_outlier: 'This session used at least 4× the median tokens for its agent',
+  file_churn: 'One file was rewritten six or more times in a single session',
+  subagent_storm: 'Six or more subagents were spawned from one session',
+  session_bail: 'The agent ran many actions but never wrote or edited any files',
   long_prompt_short_session: 'A very short prompt led to a long session, suggesting the agent lacked sufficient context',
   no_completion: 'The session ended mid-action instead of finishing with a response'
 };
 
 const SIGNAL_COLORS = {
-  tool_retry_loop: 'amber',
+  destructive_command: 'red',
+  secret_exposure: 'red',
   high_error_rate: 'red',
+  tool_retry_loop: 'amber',
+  unfinished_tasks: 'amber',
+  token_outlier: 'purple',
+  file_churn: 'teal',
+  subagent_storm: 'purple',
   no_completion: 'purple',
   session_bail: 'teal',
   long_prompt_short_session: 'accent'
@@ -1612,29 +1785,6 @@ function renderIssueRateBadge(signals) {
   const uniqueTypes = new Set((signals || []).map(s => s.type)).size;
   const rate = Math.round((uniqueTypes / TOTAL_SIGNAL_TYPES) * 100);
   return `<span class="insight-score-value" title="${uniqueTypes} of ${TOTAL_SIGNAL_TYPES} issue types detected">${rate}%</span>`;
-}
-
-function renderInsightsPanel(insights) {
-  if (!insights || !insights.signals || !insights.signals.length) {
-    return `<div class="insights-panel insights-clean"><span style="color:var(--text-tertiary);font-size:13px">No issues detected</span></div>`;
-  }
-  return `<div class="insights-panel">
-    <div class="section-label" style="margin-top:0">Session Health ${renderReliabilityBadge(insights.confusion_score)}</div>
-    <div class="insights-signals">
-      ${insights.signals.map(sig => {
-        let detail = '';
-        if (sig.type === 'tool_retry_loop') detail = `${escHtml(sig.tool)} called ${sig.count}x consecutively`;
-        else if (sig.type === 'session_bail') detail = `${sig.tool_calls} tool calls with no file writes`;
-        else if (sig.type === 'high_error_rate') detail = `${sig.rate}% error rate (${sig.error_count}/${sig.total})`;
-        else if (sig.type === 'long_prompt_short_session') detail = `${sig.prompt_words} word prompt, ${sig.tool_calls} tool calls`;
-        else if (sig.type === 'no_completion') detail = `Ended on ${escHtml(sig.last_event_type)}${sig.last_tool ? ': ' + escHtml(sig.last_tool) : ''}`;
-        return `<div class="insight-callout">
-          ${renderSignalTag(sig)}
-          <span class="insight-detail">${detail}</span>
-        </div>`;
-      }).join('')}
-    </div>
-  </div>`;
 }
 
 async function viewInsights() {
@@ -1991,6 +2141,341 @@ function openCmdk() {
 
   loadCmdkHome();
 }
+
+
+// ─── Proactive layer: helpers, trace, briefs, alerts ─────────────────
+const DIGEST_WINDOW_KEY = 'agentacta_digest_window';
+const NOTIFY_KEY = 'agentacta_notify_desktop';
+
+function relTime(ts) {
+  if (!ts) return '';
+  const diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+  if (!Number.isFinite(diff)) return '';
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
+function fmtMs(ms) {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return '—';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+function fmtDelta(deltaPct, invert = false) {
+  if (deltaPct === null || deltaPct === undefined) return '<span class="delta delta-flat">new</span>';
+  if (deltaPct === 0) return '<span class="delta delta-flat">±0%</span>';
+  const up = deltaPct > 0;
+  const good = invert ? !up : up;
+  return `<span class="delta ${good ? 'delta-good' : 'delta-bad'}">${up ? '↑' : '↓'} ${Math.abs(deltaPct)}%</span>`;
+}
+
+function sparkline(values, color = 'var(--accent)', w = 112, h = 26) {
+  const max = Math.max(1, ...values);
+  const n = Math.max(1, values.length);
+  const bw = w / n;
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" preserveAspectRatio="none" aria-hidden="true">${values.map((v, i) => {
+    const bh = v > 0 ? Math.max(2, (v / max) * (h - 2)) : 1.5;
+    return `<rect x="${(i * bw + 0.8).toFixed(1)}" y="${(h - bh).toFixed(1)}" width="${Math.max(1, bw - 1.6).toFixed(1)}" height="${bh.toFixed(1)}" rx="1" fill="${color}" opacity="${i === n - 1 ? 1 : v > 0 ? 0.45 : 0.18}"/>`;
+  }).join('')}</svg>`;
+}
+
+function mdLite(text) {
+  const lines = escHtml(text || '').split('\n');
+  let out = '';
+  let inList = false;
+  for (const raw of lines) {
+    const line = raw.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/`([^`]+)`/g, '<code>$1</code>');
+    const li = line.match(/^\s*(?:[-*•]|\d+\.)\s+(.*)$/);
+    if (li) { if (!inList) { out += '<ul>'; inList = true; } out += `<li>${li[1]}</li>`; continue; }
+    if (inList) { out += '</ul>'; inList = false; }
+    if (!line.trim()) continue;
+    const h = line.match(/^#{1,3}\s+(.*)$/);
+    out += h ? `<div class="md-h">${h[1]}</div>` : `<p>${line}</p>`;
+  }
+  if (inList) out += '</ul>';
+  return out;
+}
+
+const ATTENTION_ICONS = {
+  alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
+  flagged_session: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><path d="M4 22v-7"/></svg>',
+  failing_tool: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>',
+  churned_file: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
+  active_session: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+};
+
+function renderAttention(items) {
+  if (!items || !items.length) {
+    return `<div class="attention-empty"><span class="attention-ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span><div><strong>All clear.</strong><span>No alerts, flagged sessions or failing tools in this window.</span></div></div>`;
+  }
+  return `<div class="attention-list">${items.map(it => `
+    <a class="attention-item sev-${it.severity}" href="${escHtml(it.href)}">
+      <span class="attention-icon">${ATTENTION_ICONS[it.kind] || ATTENTION_ICONS.alert}</span>
+      <span class="attention-body">
+        <span class="attention-title">${escHtml(it.title)}</span>
+        ${it.detail ? `<span class="attention-detail">${escHtml(truncate(it.detail, 120))}</span>` : ''}
+      </span>
+      <span class="attention-meta"><span class="sev-label">${it.severity}</span>${it.at ? `<span>${escHtml(relTime(it.at))}</span>` : ''}</span>
+    </a>`).join('')}</div>`;
+}
+
+function renderInsightsPanel(insights) {
+  if (!insights) return `<div class="panel-head"><span class="panel-title">Health</span></div><p class="panel-empty">Insights unavailable.</p>`;
+  const score = 100 - (insights.confusion_score || 0);
+  const tone = score >= 80 ? 'good' : score >= 50 ? 'warn' : 'bad';
+  const signals = insights.signals || [];
+  const seen = new Set();
+  const rows = signals.filter(sig => { if (seen.has(sig.type)) return false; seen.add(sig.type); return true; });
+  return `
+    <div class="panel-head"><span class="panel-title">Health</span><span class="health-score score-${tone}" title="Reliability score: higher means fewer issues">${score}<small>/100</small></span></div>
+    ${rows.length ? `<ul class="health-list">${rows.map(sig => `
+      <li class="health-row">
+        <span class="signal-dot signal-${SIGNAL_COLORS[sig.type] || 'muted'}"></span>
+        <span class="health-text"><strong>${escHtml(SIGNAL_LABELS[sig.type] || sig.type)}</strong><span>${escHtml(signalDetail(sig))}</span></span>
+      </li>`).join('')}</ul>` : `<div class="health-clean"><span class="attention-ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>No issues detected</div>`}
+  `;
+}
+
+function signalDetail(sig) {
+  switch (sig.type) {
+    case 'destructive_command': return `${sig.count} command${sig.count === 1 ? '' : 's'}: ${(sig.commands || []).join(', ')}`;
+    case 'secret_exposure': return `${sig.count} match${sig.count === 1 ? '' : 'es'}: ${(sig.kinds || []).join(', ')}`;
+    case 'high_error_rate': return `${sig.error_count} of ${sig.total} tool results failed (${sig.rate}%)`;
+    case 'tool_retry_loop': return `${fmtToolName(sig.tool)} repeated ${sig.count}× with the same arguments`;
+    case 'unfinished_tasks': return `${sig.unfinished} of ${sig.total} planned tasks never completed`;
+    case 'token_outlier': return `${fmtTokens(sig.tokens)} tokens, ${sig.multiple}× the agent median (${fmtTokens(sig.median)})`;
+    case 'file_churn': return `${sig.file.split('/').pop()} rewritten ${sig.edits}×`;
+    case 'subagent_storm': return `${sig.count} subagents spawned`;
+    case 'session_bail': return `${sig.tool_calls} tool calls without a single write or edit`;
+    case 'long_prompt_short_session': return `${sig.prompt_words}-word prompt, ${sig.tool_calls} tool calls`;
+    case 'no_completion': return `Ended on a ${sig.last_tool ? fmtToolName(sig.last_tool) + ' ' : ''}${sig.last_event_type === 'tool_call' ? 'call' : 'result'} with no closing message`;
+    default: return SIGNAL_DESCRIPTIONS[sig.type] || '';
+  }
+}
+
+const TRACE_STATUS_ICON = {
+  completed: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+  in_progress: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="9" stroke-dasharray="14 8"/></svg>',
+  pending: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="9"/></svg>',
+  deleted: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+};
+
+function renderTracePanel(trace, children) {
+  const sum = trace.summary || {};
+  const t0 = Date.parse(trace.start_time);
+  const lastTs = Math.max(
+    Date.parse(trace.end_time || trace.start_time) || t0,
+    ...trace.tasks.map(t => Date.parse(t.completed_at || t.updated_at || t.created_at) || t0),
+    ...trace.subagents.map(s => Date.parse(s.ended_at || s.started_at) || t0),
+    ...trace.turns.map(t => Date.parse(t.ended_at) || t0),
+  );
+  const span = Math.max(1000, lastTs - t0);
+  const pct = (ts) => Math.min(100, Math.max(0, ((Date.parse(ts) - t0) / span) * 100));
+  const bar = (from, to, cls, title) => {
+    const left = pct(from);
+    const right = to ? pct(to) : 100;
+    const width = Math.max(0.8, right - left);
+    return `<span class="trace-bar ${cls}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%" title="${escHtml(title)}"></span>`;
+  };
+  const dot = (at, cls, title) => `<span class="trace-dot ${cls}" style="left:${pct(at).toFixed(2)}%" title="${escHtml(title)}"></span>`;
+
+  const chips = [
+    sum.total ? `<span class="trace-chip chip-tasks">${sum.completed}/${sum.total} tasks done</span>` : '',
+    sum.in_progress ? `<span class="trace-chip chip-progress">${sum.in_progress} in progress</span>` : '',
+    sum.pending ? `<span class="trace-chip chip-pending">${sum.pending} pending</span>` : '',
+    sum.subagents ? `<span class="trace-chip chip-sub">${sum.subagents} subagent${sum.subagents === 1 ? '' : 's'}</span>` : '',
+    `<span class="trace-chip">${sum.turns || 0} turn${sum.turns === 1 ? '' : 's'}</span>`,
+    sum.unattributed_tool_calls && sum.total ? `<span class="trace-chip chip-muted" title="Tool calls made while no task was in progress">${sum.unattributed_tool_calls} unplanned calls</span>` : '',
+  ].filter(Boolean).join('');
+
+  const rows = [];
+  for (const turn of trace.turns) {
+    rows.push(`<div class="trace-row trace-turn" data-jump="${escHtml(turn.event_id)}" title="${escHtml(turn.prompt)}">
+      <span class="trace-name"><span class="trace-kind">Turn ${turn.index}</span><span class="trace-title">${escHtml(truncate(turn.prompt, 70))}</span></span>
+      <span class="trace-track">${bar(turn.started_at, turn.ended_at, 'bar-turn', `Turn ${turn.index}: ${turn.tool_calls} tool calls`)}</span>
+      <span class="trace-stat">${turn.tool_calls} calls${turn.errors ? ` <em>${turn.errors} err</em>` : ''}</span>
+    </div>`);
+  }
+  for (const task of trace.tasks) {
+    const title = `${task.title} — ${task.status.replace('_', ' ')}${task.duration_ms ? `, ${fmtMs(task.duration_ms)}` : ''}`;
+    const track = task.started_at
+      ? bar(task.started_at, task.completed_at || (task.status === 'in_progress' ? null : task.updated_at), `bar-${task.status}`, title)
+      : dot(task.created_at, `dot-${task.status}`, title);
+    rows.push(`<div class="trace-row trace-task status-${task.status}" data-jump="${escHtml(task.first_event_id)}">
+      <span class="trace-name"><span class="trace-status">${TRACE_STATUS_ICON[task.status] || ''}</span><span class="trace-title">${escHtml(truncate(task.title, 70))}</span></span>
+      <span class="trace-track">${track}</span>
+      <span class="trace-stat">${task.started_at ? fmtMs(task.duration_ms) : 'not started'}${task.tool_calls ? ` · ${task.tool_calls} calls` : ''}${task.errors ? ` <em>${task.errors} err</em>` : ''}</span>
+    </div>`);
+  }
+  for (const sub of trace.subagents) {
+    const label = `${sub.title}${sub.subagent_type ? ` (${sub.subagent_type})` : ''}`;
+    const link = sub.child_session_id ? `<a class="trace-link" href="#session/${encodeURIComponent(sub.child_session_id)}">open</a>` : '';
+    rows.push(`<div class="trace-row trace-sub status-${sub.status}" data-jump="${escHtml(sub.event_id)}">
+      <span class="trace-name"><span class="trace-kind">Agent</span><span class="trace-title" title="${escHtml(label)}">${escHtml(truncate(sub.title, 64))}</span>${link}</span>
+      <span class="trace-track">${bar(sub.started_at, sub.ended_at, `bar-sub bar-sub-${sub.status}`, `${label}: ${sub.status}${sub.duration_ms ? `, ${fmtMs(sub.duration_ms)}` : ''}`)}</span>
+      <span class="trace-stat">${sub.ended_at ? fmtMs(sub.duration_ms) : sub.status}${sub.tool_calls !== null && sub.tool_calls !== undefined ? ` · ${sub.tool_calls} calls` : ''}</span>
+    </div>`);
+  }
+
+  const orphanChildren = (children || []).filter(c => !trace.subagents.some(s => s.child_session_id === c.id));
+  const childList = orphanChildren.length ? `<div class="trace-children">${orphanChildren.map(c => `<a class="session-link" href="#session/${encodeURIComponent(c.id)}">↓ ${escHtml(truncate(cleanSessionSummary(c.summary, ''), 60) || c.id)}</a>`).join('')}</div>` : '';
+
+  const empty = !trace.tasks.length && !trace.subagents.length;
+  return `
+    <div class="panel-head"><span class="panel-title">Task trace</span><span class="trace-chips">${chips}</span></div>
+    ${empty ? `<p class="panel-empty">No planned tasks or subagents in this session${trace.turns.length > 1 ? `, ${trace.turns.length} turns` : ''}. Agents that use a todo list, task tools or <code>update_plan</code> show their plan here.</p>` : ''}
+    ${rows.length ? `<div class="trace-grid"><div class="trace-axis"><span>${fmtTimeOnly(trace.start_time)}</span><span>${fmtMs(span)}</span><span>${fmtTimeOnly(new Date(lastTs).toISOString())}</span></div>${rows.join('')}</div>` : ''}
+    ${childList}
+  `;
+}
+
+async function mountBriefPanel(panelId, scope, key, status) {
+  const panel = document.getElementById(panelId);
+  if (!panel) return;
+  const [st, cached] = await Promise.all([
+    status ? Promise.resolve(status) : api('/chatgpt/status'),
+    api(`/ai/brief?scope=${scope}&${scope === 'session' ? `id=${encodeURIComponent(key)}` : `hours=${encodeURIComponent(key)}`}`),
+  ]);
+  if (!document.getElementById(panelId)) return;
+  const title = scope === 'session' ? 'AI brief' : 'AI briefing';
+  const render = (brief, note = '') => {
+    const connected = !!(st && st.connected);
+    panel.innerHTML = `
+      <div class="panel-head"><span class="panel-title">${title}</span><span class="panel-sub">${connected ? escHtml(st.email || 'ChatGPT connected') : 'your ChatGPT plan'}</span></div>
+      ${brief && brief.brief ? `<div class="brief-body">${mdLite(brief.brief)}</div><div class="brief-meta">${brief.model ? escHtml(brief.model) + ' · ' : ''}${escHtml(relTime(brief.created_at))}${brief.cached ? '' : ' · fresh'}</div>` : `<p class="panel-empty">${connected ? (scope === 'session' ? 'Get a written summary of what was asked, what happened, risks and follow-ups.' : 'Get a short written briefing for this window.') : 'Connect your ChatGPT account in Settings to get written briefs with your own plan. Nothing leaves this machine until you ask.'}</p>`}
+      <div class="brief-actions">
+        ${connected ? `<button class="export-btn brief-btn" id="${panelId}Btn">${brief && brief.brief ? 'Rewrite' : 'Write brief'}</button>` : `<a class="export-btn" href="#stats">Connect ChatGPT</a>`}
+        <span class="brief-note">${escHtml(note)}</span>
+      </div>`;
+    const btn = document.getElementById(`${panelId}Btn`);
+    if (btn) btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = 'Writing…';
+      const res = await api(`/ai/brief?scope=${scope}&${scope === 'session' ? `id=${encodeURIComponent(key)}` : `hours=${encodeURIComponent(key)}`}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force: true }),
+      });
+      if (res._error || res.error) render(brief, res.error || 'Request failed');
+      else render(res);
+    });
+  };
+  render(cached && cached.brief ? cached : null);
+}
+
+async function mountChatGPTCard() {
+  const card = document.getElementById('chatgptCard');
+  if (!card) return;
+  const st = await api('/chatgpt/status');
+  if (!document.getElementById('chatgptCard')) return;
+  if (st._error) { card.innerHTML = `<div class="config-label">Status</div><div class="config-value">Unavailable</div>`; return; }
+  const render = (status, note = '') => {
+    card.innerHTML = `
+      <div class="chatgpt-row">
+        <div>
+          <div class="config-label">Status</div>
+          <div class="config-value">${status.connected ? `<span class="status-dot dot-on"></span>Connected${status.email ? ` as ${escHtml(status.email)}` : ''}${status.sharing ? '' : ' <span class="muted">(identity only, plan usage not granted)</span>'}` : status.pending ? '<span class="status-dot dot-pending"></span>Waiting for the browser sign-in…' : '<span class="status-dot"></span>Not connected'}</div>
+          ${status.last_error ? `<div class="settings-help" style="color:var(--red);margin-top:4px">${escHtml(status.last_error)}</div>` : ''}
+          ${note ? `<div class="settings-help" style="margin-top:4px">${escHtml(note)}</div>` : ''}
+        </div>
+        <div class="chatgpt-actions">
+          ${status.connected
+            ? `<button class="export-btn" id="chatgptReauth">Reconnect</button><button class="export-btn export-btn-danger" id="chatgptSignout">Disconnect</button>`
+            : `<button class="export-btn export-btn-primary" id="chatgptSignin">Sign in with ChatGPT</button>`}
+        </div>
+      </div>`;
+    const start = async () => {
+      const res = await api('/chatgpt/signin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (res._error || res.error) { render(status, res.error || 'Could not start sign-in'); return; }
+      const popup = window.open(res.authorize_url, '_blank', 'noopener');
+      render({ ...status, pending: true }, popup ? 'Finish signing in in the browser tab that just opened.' : 'Pop-up blocked. Use the link below to continue.');
+      if (!popup) {
+        const note = card.querySelector('.settings-help:last-of-type');
+        if (note) note.innerHTML = `Pop-up blocked. <a href="${escHtml(res.authorize_url)}" target="_blank" rel="noopener">Open the ChatGPT sign-in</a> to continue.`;
+      }
+      const until = Date.now() + 10 * 60_000;
+      const poll = async () => {
+        if (!document.getElementById('chatgptCard')) return;
+        const next = await api('/chatgpt/status');
+        if (next._error) return;
+        if (next.connected && !next.pending) { render(next, 'Connected.'); return; }
+        if (!next.pending) { render(next); return; }
+        if (Date.now() < until) setTimeout(poll, 2000);
+      };
+      setTimeout(poll, 2000);
+    };
+    document.getElementById('chatgptSignin')?.addEventListener('click', start);
+    document.getElementById('chatgptReauth')?.addEventListener('click', start);
+    document.getElementById('chatgptSignout')?.addEventListener('click', async () => {
+      await api('/chatgpt/signout', { method: 'POST' });
+      render(await api('/chatgpt/status'));
+    });
+  };
+  render(st);
+}
+
+// Live alerts: in-app toasts, a nav badge, optional desktop notifications.
+function showToast(alert) {
+  let host = document.getElementById('toastHost');
+  if (!host) { host = document.createElement('div'); host.id = 'toastHost'; host.className = 'toast-host'; document.body.appendChild(host); }
+  const el = document.createElement('a');
+  el.className = `toast sev-${alert.severity}`;
+  el.href = `#session/${encodeURIComponent(alert.session_id)}`;
+  el.innerHTML = `<span class="toast-sev">${escHtml(alert.severity)}</span><span class="toast-body"><strong>${escHtml(alert.title)}</strong>${alert.summary ? `<span>${escHtml(truncate(cleanSessionSummary(alert.summary, ''), 90))}</span>` : ''}</span><button class="toast-close" aria-label="Dismiss">×</button>`;
+  el.querySelector('.toast-close').addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); el.remove(); });
+  host.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 300); }, 9000);
+}
+
+async function refreshAlertBadge() {
+  const res = await api('/alerts?limit=100');
+  const nav = document.querySelector('.nav-item[data-view="overview"]');
+  if (!nav || res._error) return;
+  let badge = nav.querySelector('.nav-badge');
+  const n = res.count || 0;
+  if (!n) { if (badge) badge.remove(); return; }
+  if (!badge) { badge = document.createElement('span'); badge.className = 'nav-badge'; nav.appendChild(badge); }
+  const critical = (res.alerts || []).some(a => a.severity === 'critical');
+  badge.classList.toggle('nav-badge-critical', critical);
+  badge.textContent = n > 99 ? '99+' : String(n);
+}
+
+function onLiveAlert(alert) {
+  showToast(alert);
+  refreshAlertBadge();
+  if (lsGet(NOTIFY_KEY) === '1' && 'Notification' in window && Notification.permission === 'granted' && document.visibilityState !== 'visible') {
+    try {
+      const n = new Notification(`AgentActa · ${alert.severity}`, { body: alert.title, tag: `agentacta-alert-${alert.id}` });
+      n.onclick = () => { window.focus(); window.location.hash = `session/${encodeURIComponent(alert.session_id)}`; };
+    } catch (err) { /* notifications blocked */ }
+  }
+}
+
+(function initAlertStream() {
+  if (!window.EventSource) return;
+  let es = null;
+  let retry = 5000;
+  const connect = () => {
+    try { es = new EventSource('/api/alerts/stream'); } catch (err) { return; }
+    es.addEventListener('alert', (e) => {
+      try { onLiveAlert(JSON.parse(e.data)); } catch (err) { /* ignore malformed */ }
+    });
+    es.onopen = () => { retry = 5000; };
+    es.onerror = () => {
+      es.close();
+      setTimeout(connect, retry);
+      retry = Math.min(retry * 2, 60000);
+    };
+  };
+  connect();
+  refreshAlertBadge();
+})();
 
 initTheme();
 document.getElementById('theme-toggle')?.addEventListener('click', toggleTheme);

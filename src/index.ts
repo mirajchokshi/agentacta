@@ -31,7 +31,11 @@ import { open, init, createStmts } from './db.js';
 import { discoverSessionDirs, listJsonlFiles, indexFile, indexOpenClawDb, watchOpenClawDb, indexAll } from './indexer.js';
 import { attributeSessionEvents, attributeEventDelta } from './project-attribution.js';
 import { loadDeltaAttributionContext } from './delta-attribution-context.js';
-import { analyzeSession, analyzeAll, getInsightsSummary } from './insights.js';
+import { analyzeSession, analyzeAll, getInsightsSummary, syncAlerts, invalidateBaselines } from './insights.js';
+import { getSessionTrace } from './tasks.js';
+import { getDigest, listAlerts, acknowledgeAlerts } from './digest.js';
+import { ChatGPTAuth } from './chatgpt-auth.js';
+import { AiBriefs, generateBrief, getCachedBrief } from './ai.js';
 import { isValidDateKey, resolveStaticPath } from './http-utils.js';
 
 // --version / -v flag: print version and exit
@@ -144,6 +148,26 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): boole
   return false;
 }
 
+function readJsonBody(req: http.IncomingMessage, limit: number = 64 * 1024): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > limit) { reject(new Error('Body too large')); req.destroy(); return; }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (!chunks.length) return resolve({});
+      try {
+        const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+        resolve(parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {});
+      } catch (err) { reject(err as Error); }
+    });
+    req.on('error', reject);
+  });
+}
+
 function parseQuery(url: string): ParsedQuery {
   const u: URL = new URL(url, 'http://localhost');
   const o: Record<string, string> = {};
@@ -233,6 +257,14 @@ function formatEventCursor(row: EventRow): string {
 init();
 const db: Database.Database = open();
 
+// Optional: Sign in with ChatGPT (used only for on-demand AI briefs)
+const chatgptAuth: ChatGPTAuth = new ChatGPTAuth({
+  profilePath: config.chatgptProfilePath || path.join(path.dirname(config.dbPath), 'chatgpt-profile.json'),
+  appName: 'AgentActa',
+  issuer: process.env.AGENTACTA_CHATGPT_ISSUER || undefined,
+});
+const aiBriefs: AiBriefs = new AiBriefs({ auth: chatgptAuth, model: config.aiModel || null, apiBase: process.env.AGENTACTA_OPENAI_API_BASE || undefined });
+
 // Live re-indexing setup
 const stmts: PreparedStatements = createStmts(db);
 
@@ -282,12 +314,22 @@ const RECURSIVE_RESCAN_MS: number = 15000;
 // Recompute insights for re-indexed sessions and push SSE updates to clients
 function refreshInsightsAndNotify(sessionIds: string[]): void {
   if (sessionIds.length === 0) return;
+  invalidateBaselines();
   const upsert: Database.Statement = db.prepare('INSERT OR REPLACE INTO session_insights (session_id, signals, confusion_score, flagged, computed_at) VALUES (?, ?, ?, ?, ?)');
   for (const sessionId of sessionIds) {
     try {
       const insight: InsightResult | null = analyzeSession(db, sessionId);
-      if (insight) upsert.run(insight.session_id, JSON.stringify(insight.signals), insight.confusion_score, insight.flagged ? 1 : 0, insight.computed_at);
-    } catch { /* ignore */ }
+      if (insight) {
+        upsert.run(insight.session_id, JSON.stringify(insight.signals), insight.confusion_score, insight.flagged ? 1 : 0, insight.computed_at);
+        const created = syncAlerts(db, insight);
+        for (const alert of created) {
+          const row = db.prepare('SELECT a.*, s.summary, s.agent, s.start_time FROM alerts a JOIN sessions s ON s.id = a.session_id WHERE a.id = ?').get(alert.id);
+          if (row) sseEmitter.emit('alert', row);
+        }
+      }
+    } catch (err: unknown) {
+      console.error(`Insight refresh failed for ${sessionId}:`, (err as Error).message);
+    }
     sseEmitter.emit('session-update', sessionId);
   }
 }
@@ -535,6 +577,12 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
         clearInterval(ping);
       });
     }
+    else if (pathname.match(/^\/api\/sessions\/[^/]+\/tasks$/)) {
+      const id: string = pathname.split('/')[3];
+      const trace = getSessionTrace(db, id);
+      if (!trace) return json(res, { error: 'Not found' }, 404);
+      return json(res, trace);
+    }
     else if (pathname.match(/^\/api\/sessions\/[^/]+$/) && !pathname.includes('export')) {
       const id: string = pathname.split('/')[3];
       const session: SessionRow | undefined = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as SessionRow | undefined;
@@ -543,7 +591,11 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
         const events: EventRow[] = db.prepare('SELECT * FROM events WHERE session_id = ? ORDER BY timestamp DESC').all(id) as EventRow[];
         const attributed: AttributionResult = attributeSessionEvents(session, events);
         const hasArchive: boolean = ARCHIVE_MODE && (db.prepare('SELECT COUNT(*) as c FROM archive WHERE session_id = ?').get(id) as CountRow).c > 0;
-        json(res, { session, events: attributed.events, projectFilters: attributed.projectFilters, hasArchive });
+        const children = db.prepare('SELECT id, summary, agent, session_type, start_time, end_time, tool_count, message_count FROM sessions WHERE parent_session_id = ? ORDER BY start_time ASC').all(id);
+        const parent = session.parent_session_id
+          ? db.prepare('SELECT id, summary, agent, start_time FROM sessions WHERE id = ?').get(session.parent_session_id) || null
+          : null;
+        json(res, { session, events: attributed.events, projectFilters: attributed.projectFilters, hasArchive, children, parent });
       }
     }
     else if (pathname.match(/^\/api\/archive\/session\/[^/]+$/)) {
@@ -699,6 +751,90 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
 
       req.on('close', () => {
         sseEmitter.off('session-update', onUpdate);
+        clearInterval(ping);
+      });
+    }
+    // --- Sign in with ChatGPT + AI briefs ---
+    else if (pathname === '/api/chatgpt/status') {
+      return json(res, chatgptAuth.status());
+    }
+    else if (pathname === '/api/chatgpt/signin') {
+      if (!requireMethod(req, res, 'POST')) return;
+      readJsonBody(req)
+        .then((body) => chatgptAuth.startSignIn({ loginHint: typeof body.login_hint === 'string' ? body.login_hint : undefined }))
+        .then((start) => json(res, start))
+        .catch((err: Error) => json(res, { error: err.message }, 500));
+      return;
+    }
+    else if (pathname === '/api/chatgpt/signout') {
+      if (!requireMethod(req, res, 'POST')) return;
+      const removed: boolean = chatgptAuth.signOut();
+      return json(res, { ok: true, removed });
+    }
+    else if (pathname === '/api/chatgpt/models') {
+      aiBriefs.listModels()
+        .then((models) => aiBriefs.resolveModel().then((selected) => json(res, { models, selected })))
+        .catch((err: Error) => json(res, { error: err.message }, 502));
+      return;
+    }
+    else if (pathname === '/api/ai/brief') {
+      const scope: string = query.scope || 'session';
+      if (scope !== 'session' && scope !== 'digest') return json(res, { error: 'scope must be session or digest' }, 400);
+      const key: string = scope === 'session' ? (query.id || '') : (query.hours || '24');
+      if (scope === 'session' && !key) return json(res, { error: 'id required' }, 400);
+      if (req.method === 'GET') {
+        const cached = getCachedBrief(db, scope, key);
+        return json(res, cached || { scope, scope_key: key, brief: null, cached: false });
+      }
+      if (!requireMethod(req, res, 'POST')) return;
+      if (!chatgptAuth.status().connected) return json(res, { error: 'Connect ChatGPT in Settings to generate briefs.' }, 409);
+      readJsonBody(req)
+        .then((body) => generateBrief(db, aiBriefs, scope, key, body.force === true || query.force === '1'))
+        .then((brief) => brief ? json(res, brief) : json(res, { error: 'Not found' }, 404))
+        .catch((err: Error) => json(res, { error: err.message }, 502));
+      return;
+    }
+    // --- Proactive layer: digest + alerts ---
+    else if (pathname === '/api/digest') {
+      const hoursRaw: number = parseFloat(query.hours || '');
+      const windowParam: string = (query.window || '').toLowerCase();
+      const hours: number = Number.isFinite(hoursRaw) && hoursRaw > 0 ? hoursRaw
+        : windowParam === '7d' ? 24 * 7 : windowParam === '30d' ? 24 * 30 : 24;
+      return json(res, getDigest(db, hours));
+    }
+    else if (pathname === '/api/alerts') {
+      const limit: number = Math.min(parseInt(query.limit || '50', 10) || 50, 500);
+      const rows = listAlerts(db, { since: query.since || undefined, includeAcknowledged: query.all === '1', limit });
+      return json(res, { alerts: rows, count: rows.length });
+    }
+    else if (pathname === '/api/alerts/ack') {
+      if (!requireMethod(req, res, 'POST')) return;
+      readJsonBody(req).then((body) => {
+        const ids: unknown = body.ids;
+        const n: number = ids === 'all'
+          ? acknowledgeAlerts(db, 'all')
+          : acknowledgeAlerts(db, Array.isArray(ids) ? ids.map((v) => parseInt(String(v), 10)).filter((v) => Number.isFinite(v)) : []);
+        json(res, { ok: true, acknowledged: n });
+      }).catch((err: Error) => json(res, { error: err.message }, 400));
+      return;
+    }
+    else if (pathname === '/api/alerts/stream') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no'
+      });
+      res.write(': connected\n\n');
+      const onAlert = (alert: unknown): void => {
+        try { res.write(`event: alert\ndata: ${JSON.stringify(alert)}\n\n`); } catch { /* ignore */ }
+      };
+      sseEmitter.on('alert', onAlert);
+      const ping: NodeJS.Timeout = setInterval(() => {
+        try { res.write(': ping\n\n'); } catch { /* ignore */ }
+      }, 30000);
+      req.on('close', () => {
+        sseEmitter.off('alert', onAlert);
         clearInterval(ping);
       });
     }
