@@ -295,7 +295,7 @@ window.addEventListener('popstate', () => {
 });
 
 function renderEvent(ev) {
-  const badge = `<span class="event-badge ${badgeClass(ev.type, ev.role)}">${ev.type === 'tool_call' ? 'tool' : ev.role || ev.type}</span>`;
+  const badge = `<span class="event-badge ${badgeClass(ev.type, ev.role)}">${ev.type === 'tool_call' ? 'tool' : ev.type === 'tool_result' ? 'result' : ev.role || ev.type}</span>`;
   let body = '';
 
   if (ev.type === 'tool_call') {
@@ -309,7 +309,7 @@ function renderEvent(ev) {
       }
     }
   } else if (ev.type === 'tool_result') {
-    body = `<span class="tool-name">\u2192 ${escHtml(fmtToolName(ev.tool_name))}</span>`;
+    body = `<span class="tool-name">${escHtml(fmtToolName(ev.tool_name))}</span>`;
     if (ev.content) {
       body += `<div class="tool-args">${escHtml(truncate(ev.content, 500))}</div>`;
     }
@@ -329,7 +329,7 @@ function renderTimelineEvent(ev) {
                     ev.role === 'user' ? 'type-user' :
                     ev.role === 'assistant' ? 'type-assistant' : '';
 
-  const badge = `<span class="event-badge ${badgeClass(ev.type, ev.role)}">${ev.type === 'tool_call' ? 'tool' : ev.role || ev.type}</span>`;
+  const badge = `<span class="event-badge ${badgeClass(ev.type, ev.role)}">${ev.type === 'tool_call' ? 'tool' : ev.type === 'tool_result' ? 'result' : ev.role || ev.type}</span>`;
   let body = '';
 
   if (ev.type === 'tool_call') {
@@ -343,7 +343,7 @@ function renderTimelineEvent(ev) {
       }
     }
   } else if (ev.type === 'tool_result') {
-    body = `<span class="tool-name">\u2192 ${escHtml(fmtToolName(ev.tool_name))}</span>`;
+    body = `<span class="tool-name">${escHtml(fmtToolName(ev.tool_name))}</span>`;
     if (ev.content) {
       body += `<div class="tool-args">${escHtml(truncate(ev.content, 500))}</div>`;
     }
@@ -466,7 +466,7 @@ function renderSessionItem(s) {
     <div class="session-item" data-id="${s.id}">
       <div class="session-header">
         <span class="session-time">${timeRange} \u00b7 ${duration}</span>
-        <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <span class="session-tags">
           ${renderProjectTags(s)}
           ${showAgentTag ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
           ${s.session_type && s.session_type !== normalizeAgentLabel(s.agent || '') ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
@@ -693,8 +693,8 @@ async function viewSession(id) {
     </div>
     <div class="session-detail-card">
       <div class="session-header" style="margin-bottom:12px">
-        <span class="session-time">${fmtDate(s.start_time)} \u00b7 ${fmtTimeShort(s.start_time)} \u2013 ${fmtTimeShort(s.end_time)}</span>
-        <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <span class="session-time">${fmtDate(s.start_time)} \u00b7 ${fmtTimeShort(s.start_time)} to ${fmtTimeShort(s.end_time)}</span>
+        <span class="session-tags">
           ${data.parent ? `<a class="session-link" href="#session/${encodeURIComponent(data.parent.id)}" title="${escHtml(data.parent.summary || data.parent.id)}">↑ parent session</a>` : ''}
           ${s.agent && s.agent !== 'main' ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
           ${s.session_type && s.session_type !== normalizeAgentLabel(s.agent || '') ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
@@ -1754,9 +1754,8 @@ const SIGNAL_COLORS = {
 
 function renderSignalTag(sig) {
   const label = SIGNAL_LABELS[sig.type] || sig.type;
-  const color = SIGNAL_COLORS[sig.type] || 'muted';
   const desc = SIGNAL_DESCRIPTIONS[sig.type] || '';
-  return `<span class="signal-tag signal-${color}"${desc ? ` title="${escHtml(desc)}"` : ''}><span class="signal-dot"></span>${escHtml(label)}</span>`;
+  return `<span class="signal-tag"${desc ? ` title="${escHtml(desc)}"` : ''}>${escHtml(label)}</span>`;
 }
 
 function renderReliabilityBadge(score) {
@@ -1794,32 +1793,24 @@ async function viewInsights() {
   const reliabilityScore = 100 - (data.avg_confusion_score || 0);
 
   let html = `<div class="page-title">Insights</div>
+    <p class="overview-headline">${data.flagged_count} of ${data.total_sessions} session${data.total_sessions === 1 ? '' : 's'} had at least one detected issue. Average reliability ${reliabilityScore} out of 100.</p>
 
-    <div class="stat-grid">
-      <div class="stat-card accent-amber"><div class="label">Issue Rate</div><div class="value">${issueRate}%</div><div class="stat-desc">${data.flagged_count} of ${data.total_sessions} sessions had at least one detected issue</div></div>
-      <div class="stat-card accent-purple"><div class="label">Reliability Score</div><div class="value">${reliabilityScore}</div><div class="stat-desc">How often the agent completed tasks cleanly, out of 100</div></div>
+    <div class="metrics metrics-2">
+      <div class="metric"><div class="metric-label">Issue rate</div><div class="metric-value">${issueRate}%</div><div class="metric-delta">${data.flagged_count} flagged</div></div>
+      <div class="metric"><div class="metric-label">Reliability</div><div class="metric-value">${reliabilityScore}</div><div class="metric-delta">out of 100, higher is better</div></div>
     </div>
 
-    <div class="section-label">Issue Types</div>
-    <div class="signal-chart">
+    <div class="section-label">Issue types</div>
+    <div class="signal-rows">
       ${signalTypes.map(type => {
         const count = data.signal_counts[type] || 0;
         const pct = Math.round((count / maxSignalCount) * 100);
-        const color = SIGNAL_COLORS[type] || 'muted';
         const desc = SIGNAL_DESCRIPTIONS[type] || '';
-        const barColor = color === 'muted' ? 'var(--text-tertiary)' : `var(--${color})`;
-        return `<div class="signal-lollipop-row${desc ? ' signal-lollipop-expandable' : ''}" data-desc="${escHtml(desc)}">
-          <div class="signal-lollipop-main">
-            <span class="signal-bar-label">${SIGNAL_LABELS[type]}</span>
-            <div class="signal-lollipop-track">
-              <svg width="100%" height="20" class="signal-lollipop-svg">
-                <line x1="0" y1="10" x2="${pct}%" y2="10" stroke="${barColor}" stroke-width="2"/>
-                <circle cx="${pct}%" cy="10" r="5" fill="${barColor}"/>
-              </svg>
-            </div>
-            <span class="signal-bar-count">${count}</span>
-          </div>
-          ${desc ? `<div class="signal-lollipop-desc">${escHtml(desc)}</div>` : ''}
+        return `<div class="signal-row" title="Click for a description">
+          <span class="signal-row-name">${SIGNAL_LABELS[type]}</span>
+          <span class="signal-row-track"><span style="width:${pct}%"></span></span>
+          <span class="signal-row-count">${count}</span>
+          ${desc ? `<span class="signal-row-desc">${escHtml(desc)}</span>` : ''}
         </div>`;
       }).join('')}
     </div>
@@ -1839,7 +1830,7 @@ async function viewInsights() {
           </div>
           <div class="session-summary">${escHtml(truncate(summary, 120))}</div>
           <div class="session-meta">
-            <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <span class="session-tags">
               ${s.agent ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
               ${s.model ? `<span class="session-model">${escHtml(s.model)}</span>` : ''}
             </span>
@@ -1857,10 +1848,8 @@ async function viewInsights() {
     item.addEventListener('click', () => viewSession(item.dataset.id));
   });
 
-  $$('.signal-lollipop-expandable', content).forEach(row => {
-    row.addEventListener('click', () => {
-      row.classList.toggle('signal-lollipop-open');
-    });
+  $$('.signal-row', content).forEach(row => {
+    row.addEventListener('click', () => row.classList.toggle('open'));
   });
 }
 
