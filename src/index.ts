@@ -1,6 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { EventEmitter } from 'node:events';
 import type Database from 'better-sqlite3';
 import type {
@@ -71,9 +72,22 @@ const MIME: Record<string, string> = {
   '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json'
 };
 
+function acceptsGzip(req: http.IncomingMessage | undefined): boolean {
+  const ae = req?.headers['accept-encoding'];
+  return typeof ae === 'string' && /\bgzip\b/.test(ae);
+}
+
+// Session payloads are large, repetitive JSON (a long session is several MB);
+// gzip cuts them ~10x, which is most of the wait on a phone over Wi-Fi.
 function json(res: http.ServerResponse, data: unknown, status: number = 200): void {
+  const body: string = JSON.stringify(data);
+  if (body.length > 1024 && acceptsGzip(res.req)) {
+    res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
+    res.end(zlib.gzipSync(body, { level: 4 }));
+    return;
+  }
   res.writeHead(status, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(data));
+  res.end(body);
 }
 
 function isLoopbackHost(host: string): boolean {
@@ -139,7 +153,13 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): boole
   if (!fp) { res.writeHead(403); res.end(); return true; }
   if (fs.existsSync(fp) && fs.statSync(fp).isFile()) {
     const ext: string = path.extname(fp);
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    const type: string = MIME[ext] || 'application/octet-stream';
+    if (/^(text\/|application\/(javascript|json|manifest\+json)|image\/svg)/.test(type) && acceptsGzip(req)) {
+      res.writeHead(200, { 'Content-Type': type, 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
+      fs.createReadStream(fp).pipe(zlib.createGzip({ level: 6 })).pipe(res);
+      return true;
+    }
+    res.writeHead(200, { 'Content-Type': type });
     fs.createReadStream(fp).pipe(res);
     return true;
   }

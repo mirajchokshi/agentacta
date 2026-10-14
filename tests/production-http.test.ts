@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { spawn, type ChildProcess } from 'node:child_process';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'agentacta-production-http-'));
@@ -158,5 +159,20 @@ describe('production HTTP routes', () => {
     const data = JSON.parse((await request('/api/files/sessions?path=' + encodeURIComponent('/tmp/touched.js'))).body) as { sessions: Array<{ id: string; touch_time: string }> };
     assert.deepStrictEqual(data.sessions.map(s => s.id), ['production-http-touches']);
     assert.strictEqual(data.sessions[0].touch_time, '2025-01-03T00:03:00Z');
+  });
+
+  it('gzips JSON responses when the client accepts it', async () => {
+    const res = await new Promise<{ encoding: string | undefined; body: Buffer }>((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port: PORT, path: '/api/sessions?limit=50', headers: { 'Accept-Encoding': 'gzip' } }, r => {
+        const chunks: Buffer[] = [];
+        r.on('data', (c: Buffer) => chunks.push(c));
+        r.on('end', () => resolve({ encoding: r.headers['content-encoding'], body: Buffer.concat(chunks) }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    assert.strictEqual(res.encoding, 'gzip');
+    const data = JSON.parse(zlib.gunzipSync(res.body).toString('utf8')) as { sessions: unknown[] };
+    assert.ok(data.sessions.length >= 1);
   });
 });
