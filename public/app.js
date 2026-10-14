@@ -442,16 +442,35 @@ function renderModelTags(s) {
   return models.map(m => `<span class="session-model">${escHtml(m)}</span>`).join('');
 }
 
+const expandedSessionGroups = new Set();
+
+function renderSessionStatus(s) {
+  if (s.status === 'live') return '<span class="session-status status-live" title="Activity in the last 15 minutes"><i></i>Live</span>';
+  if (s.status === 'stale') return '<span class="session-status status-stale" title="No end was recorded and it has been quiet for over 15 minutes">Stale</span>';
+  if (s.ended_reason === 'manual') return '<span class="session-status status-ended" title="Marked ended in AgentActa">Ended</span>';
+  if (s.ended_reason === 'source' && s.source_status && !/^(done|completed?)$/i.test(s.source_status)) {
+    return `<span class="session-status status-failed">${escHtml(s.source_status)}</span>`;
+  }
+  return '';
+}
+
+function canEndSession(s) {
+  return s.status === 'live' || s.status === 'stale';
+}
+
 function renderSessionItem(s) {
-  const duration = fmtDuration(s.start_time, s.end_time);
-  const timeRange = `${fmtTime(s.start_time)} \u2192 ${s.end_time ? fmtTimeOnly(s.end_time) : 'now'}`;
+  const isStale = s.status === 'stale';
+  const endLabel = s.end_time ? fmtTimeOnly(s.end_time) : (s.status === 'live' ? 'now' : '?');
+  const timeRange = `${fmtTime(s.start_time)} \u2192 ${endLabel}`;
+  const duration = isStale ? 'never closed' : fmtDuration(s.start_time, s.end_time || s.start_time);
   const isSubagent = s.session_type === 'subagent';
   const showAgentTag = s.agent && s.agent !== 'main' && !isSubagent;
+  const headline = s.label || cleanSessionSummary(s.summary, s.initial_prompt);
 
   return `
-    <div class="session-item" data-id="${s.id}">
+    <div class="session-item" data-id="${escHtml(s.id)}">
       <div class="session-header">
-        <span class="session-time">${timeRange} \u00b7 ${duration}</span>
+        <span class="session-time">${renderSessionStatus(s)}${timeRange} \u00b7 ${duration}</span>
         <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           ${renderProjectTags(s)}
           ${showAgentTag ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
@@ -459,16 +478,100 @@ function renderSessionItem(s) {
           ${renderModelTags(s)}
         </span>
       </div>
-      <div class="session-summary">${escHtml(truncate(cleanSessionSummary(s.summary, s.initial_prompt), 120))}</div>
+      <div class="session-summary">${escHtml(truncate(headline, 120))}</div>
       <div class="session-meta">
-        <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> ${s.message_count}</span>
-        <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> ${s.tool_count}</span>
+        <span style="display:flex;gap:var(--space-lg);align-items:center">
+          <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> ${s.message_count}</span>
+          <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> ${s.tool_count}</span>
+        </span>
+        ${canEndSession(s) ? `<button class="session-end-btn" data-end-session="${escHtml(s.id)}" title="Mark this session ended in AgentActa. This does not stop the agent process; new activity reopens it.">End</button>` : ''}
       </div>
     </div>
   `;
 }
 
-// --- Views ---
+function renderChildrenToggle(s, expanded) {
+  const n = s.child_count || 0;
+  const extra = (s.descendant_count || 0) > n ? ` \u00b7 ${s.descendant_count} total` : '';
+  const live = s.live_descendant_count ? ` \u00b7 <span class="children-live">${s.live_descendant_count} live</span>` : '';
+  return `<button class="session-children-toggle${expanded ? ' expanded' : ''}" data-toggle-children="${escHtml(s.id)}" aria-expanded="${expanded}">
+    <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>
+    ${n} subagent${n === 1 ? '' : 's'}${extra}${live}
+  </button>`;
+}
+
+// A session card plus its collapsible subagent tree. Groups with a live
+// descendant start expanded so running work is visible at a glance.
+function renderSessionTree(s, depth = 0) {
+  const kids = Array.isArray(s.children) ? s.children : [];
+  if (!kids.length) return renderSessionItem(s);
+  const expanded = expandedSessionGroups.has(s.id) || (!expandedSessionGroups.has('!' + s.id) && s.live_descendant_count > 0);
+  return `<div class="session-group" data-group-id="${escHtml(s.id)}">
+    ${renderSessionItem(s)}
+    ${renderChildrenToggle(s, expanded)}
+    <div class="session-children"${expanded ? '' : ' hidden'}>
+      ${kids.map(k => renderSessionTree(k, depth + 1)).join('')}
+    </div>
+  </div>`;
+}
+
+async function endSession(id, action = 'end') {
+  const res = await api(`/sessions/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
+  if (res._error) {
+    alertInline(res.error || 'Unable to update session');
+    return null;
+  }
+  return res.session;
+}
+
+function alertInline(msg) {
+  let el = document.getElementById('inlineToast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'inlineToast';
+    el.className = 'new-events-indicator';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.remove(), 3000);
+}
+
+// Delegated in the capture phase so these controls never also trigger the
+// card's own "open session" click handler.
+content.addEventListener('click', async (e) => {
+  const toggle = e.target.closest('[data-toggle-children]');
+  const endBtn = e.target.closest('[data-end-session]');
+  if (!toggle && !endBtn) return;
+  e.stopPropagation();
+  e.preventDefault();
+
+  if (toggle) {
+    const id = toggle.dataset.toggleChildren;
+    const group = toggle.closest('.session-group');
+    const kids = group && group.querySelector(':scope > .session-children');
+    if (!kids) return;
+    const open = kids.hasAttribute('hidden');
+    kids.toggleAttribute('hidden', !open);
+    toggle.classList.toggle('expanded', open);
+    toggle.setAttribute('aria-expanded', String(open));
+    if (open) { expandedSessionGroups.add(id); expandedSessionGroups.delete('!' + id); }
+    else { expandedSessionGroups.delete(id); expandedSessionGroups.add('!' + id); }
+    return;
+  }
+
+  endBtn.disabled = true;
+  const updated = await endSession(endBtn.dataset.endSession, 'end');
+  if (!updated) { endBtn.disabled = false; return; }
+  const item = endBtn.closest('.session-item');
+  if (item) {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = renderSessionItem(updated);
+    const fresh = tmp.firstElementChild;
+    item.replaceWith(fresh);
+    fresh.addEventListener('click', () => viewSession(updated.id));
+  }
+}, true);
 
 async function viewSearch(query = '') {
   clearJumpUi();
@@ -625,19 +728,32 @@ async function viewSessions() {
   window._currentSessionId = null;
   content.innerHTML = `<div class="page-title">Sessions</div>${skeletonRows(4, 'session')}`;
   transitionView();
-  const data = await api('/sessions?limit=200');
+  const data = await api('/sessions?limit=200&roots=1');
   if (data._error) {
     content.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
     return;
   }
 
   let html = `<div class="page-title">Sessions</div>`;
-  html += data.sessions.map(renderSessionItem).join('');
+  if (data.staleCount > 0) {
+    html += `<div class="stale-banner">
+      <span>${data.staleCount} session${data.staleCount === 1 ? '' : 's'} never recorded an end and ${data.staleCount === 1 ? 'has' : 'have'} been quiet for over 15 minutes.</span>
+      <button class="session-end-btn" id="endStaleBtn">Mark all ended</button>
+    </div>`;
+  }
+  html += data.sessions.map(s => renderSessionTree(s)).join('');
   content.innerHTML = html;
   transitionView();
 
   $$('.session-item').forEach(item => {
     item.addEventListener('click', () => viewSession(item.dataset.id));
+  });
+  const endStale = $('#endStaleBtn');
+  if (endStale) endStale.addEventListener('click', async () => {
+    endStale.disabled = true;
+    const res = await api('/sessions/end-stale', { method: 'POST' });
+    if (res._error) { endStale.disabled = false; alertInline(res.error || 'Unable to update sessions'); return; }
+    viewSessions();
   });
 }
 
@@ -662,9 +778,17 @@ async function viewSession(id) {
   const projectFilters = Array.isArray(data.projectFilters)
     ? data.projectFilters.filter(p => p && p.project && Number.isFinite(Number(p.eventCount)))
     : [];
+  const parent = data.parent || null;
+  const children = Array.isArray(data.children) ? data.children : [];
+  const childTotal = children.reduce((n, c) => n + 1 + (c.descendant_count || 0), 0);
+  const childrenCollapsed = children.length > 10 && !children.some(c => c.status === 'live');
   let html = `
     <div class="back-btn" id="backBtn">\u2190 Back</div>
-    <div class="page-title">Session</div>
+    ${parent ? `<button class="session-parent-link" id="parentSessionLink" title="Open parent session">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+      Subagent of <span>${escHtml(truncate(parent.label || cleanSessionSummary(parent.summary, parent.initial_prompt), 80))}</span>
+    </button>` : ''}
+    <div class="page-title">${s.label ? escHtml(s.label) : 'Session'}</div>
     <div class="session-id-row">
       <span class="session-id-label">ID</span>
       <span class="session-id-value" title="${escHtml(id)}">${escHtml(id)}</span>
@@ -672,6 +796,7 @@ async function viewSession(id) {
       <span class="session-id-copied" id="copyConfirm">Copied!</span>
     </div>
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+      <span id="sessionStatusSlot" style="display:contents"></span>
       ${s.first_message_id ? `<button class="jump-to-start-btn" id="jumpToStartBtn" title="Jump to initial prompt">Initial Prompt</button>` : ''}
       ${data.hasArchive ? `<a class="export-btn" href="#" onclick="dlExport('/api/archive/export/${id}','session.jsonl');return false">JSONL</a>` : ''}
       <a class="export-btn" href="#" onclick="dlExport('/api/export/session/${id}?format=md','session.md');return false">MD</a>
@@ -679,7 +804,7 @@ async function viewSession(id) {
     </div>
     <div class="session-detail-card">
       <div class="session-header" style="margin-bottom:12px">
-        <span class="session-time">${fmtDate(s.start_time)} \u00b7 ${fmtTimeShort(s.start_time)} \u2013 ${fmtTimeShort(s.end_time)}</span>
+        <span class="session-time">${fmtDate(s.start_time)} \u00b7 ${fmtTimeShort(s.start_time)} \u2013 ${s.end_time ? fmtTimeShort(s.end_time) : (s.status === 'live' ? 'now' : 'no end recorded')}</span>
         <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           ${s.agent && s.agent !== 'main' ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
           ${s.session_type && s.session_type !== normalizeAgentLabel(s.agent || '') ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
@@ -699,6 +824,17 @@ async function viewSession(id) {
         </div>
       ` : ''}
     </div>
+    ${children.length ? `
+      <div class="session-group detail-children" data-group-id="${escHtml(id)}">
+        <button class="section-label session-children-heading${childrenCollapsed ? '' : ' expanded'}" data-toggle-children="${escHtml(id)}" aria-expanded="${!childrenCollapsed}">
+          <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>
+          Subagents (${children.length}${childTotal > children.length ? ` \u00b7 ${childTotal} total` : ''})
+        </button>
+        <div class="session-children"${childrenCollapsed ? ' hidden' : ''}>
+          ${children.map(c => renderSessionTree(c)).join('')}
+        </div>
+      </div>
+    ` : ''}
     <div class="section-label" id="sessionEventsLabel">Events</div>
     <div id="eventsContainer"></div>
     <div class="empty" id="sessionEventsEmpty" style="display:none"><h2>No events</h2><p>This session has no events to display.</p></div>
@@ -821,6 +957,12 @@ async function viewSession(id) {
       setHash(view, true);
       handleRoute();
     }
+  });
+
+  const parentLink = $('#parentSessionLink');
+  if (parentLink) parentLink.addEventListener('click', () => viewSession(parent.id));
+  $$('.detail-children .session-item').forEach(item => {
+    item.addEventListener('click', () => viewSession(item.dataset.id));
   });
 
   $('#copySessionId').addEventListener('click', async () => {
@@ -997,8 +1139,11 @@ async function viewSession(id) {
   };
 
   // Subscribe to real-time updates via SSE, with polling as a fallback.
+  // "Following" is the client side of a live session: it can be paused, and it
+  // stops on its own when the session is marked ended.
   let lastSeenTs = allEvents.length ? allEvents[0].timestamp : new Date(0).toISOString();
   let lastSeenId = allEvents.length ? allEvents[0].id : '';
+  let sessionState = { status: s.status, ended_reason: s.ended_reason, ended_at: s.ended_at, source_status: s.source_status };
   const pollNewEvents = async () => {
     try {
       const latest = await api(`/sessions/${id}/events?after=${encodeURIComponent(lastSeenTs)}&afterId=${encodeURIComponent(lastSeenId)}&limit=50`);
@@ -1015,32 +1160,92 @@ async function viewSession(id) {
   };
 
   let pollInterval = null;
+  let eventSource = null;
+  let following = false;
+
   const startPolling = () => {
-    if (pollInterval) return;
+    if (pollInterval || !following) return;
     pollInterval = setInterval(pollNewEvents, 3000);
   };
 
-  let eventSource = null;
-  if ('EventSource' in window) {
-    eventSource = new EventSource(`/api/sessions/${encodeURIComponent(id)}/stream?after=${encodeURIComponent(lastSeenTs)}&afterId=${encodeURIComponent(lastSeenId)}`);
-    eventSource.onmessage = (event) => {
-      try {
-        const incoming = JSON.parse(event.data) || [];
-        if (incoming.length) {
-          const tail = incoming[incoming.length - 1];
-          lastSeenTs = tail.timestamp || lastSeenTs;
-          lastSeenId = tail.id || lastSeenId;
-          applyIncomingEvents(incoming);
+  const stopFollowing = () => {
+    following = false;
+    if (eventSource) { eventSource.close(); eventSource = null; }
+    if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+    renderStatusControls();
+  };
+
+  const startFollowing = () => {
+    if (following) return;
+    following = true;
+    if ('EventSource' in window) {
+      eventSource = new EventSource(`/api/sessions/${encodeURIComponent(id)}/stream?after=${encodeURIComponent(lastSeenTs)}&afterId=${encodeURIComponent(lastSeenId)}`);
+      eventSource.onmessage = (event) => {
+        try {
+          const incoming = JSON.parse(event.data) || [];
+          if (incoming.length) {
+            const tail = incoming[incoming.length - 1];
+            lastSeenTs = tail.timestamp || lastSeenTs;
+            lastSeenId = tail.id || lastSeenId;
+            applyIncomingEvents(incoming);
+            // New activity always means the session is live again.
+            if (sessionState.status !== 'live') { sessionState = { ...sessionState, status: 'live', ended_reason: null }; renderStatusControls(); }
+          }
+        } catch (err) {
+          // malformed SSE payload; fallback polling can recover on the next tick
+          startPolling();
         }
-      } catch (err) {
-        // malformed SSE payload; fallback polling can recover on the next tick
-        startPolling();
-      }
+      };
+      eventSource.addEventListener('status', (event) => {
+        try {
+          const next = JSON.parse(event.data);
+          sessionState = { ...sessionState, ...next };
+          if (next.status === 'ended' && next.ended_reason === 'manual') stopFollowing();
+          else renderStatusControls();
+        } catch { /* ignore */ }
+      });
+      eventSource.onerror = () => startPolling();
+    } else {
+      startPolling();
+    }
+    renderStatusControls();
+  };
+
+  function renderStatusControls() {
+    const slot = document.getElementById('sessionStatusSlot');
+    if (!slot) return;
+    const st = { ...s, ...sessionState };
+    slot.innerHTML = `
+      ${renderSessionStatus(st)}
+      ${canEndSession(st) ? `<button class="export-btn session-action-btn danger" id="endSessionBtn" title="Marks the session ended in AgentActa and stops following it. AgentActa cannot stop the agent process; new activity reopens it.">Mark ended</button>` : ''}
+      ${st.ended_reason === 'manual' ? `<button class="export-btn session-action-btn" id="reopenSessionBtn" title="Clear the ended mark">Reopen</button>` : ''}
+      <button class="export-btn session-action-btn" id="followToggleBtn" title="${following ? 'Stop streaming new events into this page' : 'Stream new events into this page as they are indexed'}">${following ? '<i class="follow-dot"></i>Following' : 'Follow live'}</button>
+    `;
+    const endBtn = document.getElementById('endSessionBtn');
+    if (endBtn) endBtn.onclick = async () => {
+      endBtn.disabled = true;
+      const updated = await endSession(id, 'end');
+      if (!updated) { endBtn.disabled = false; return; }
+      sessionState = { ...sessionState, status: updated.status, ended_reason: updated.ended_reason, ended_at: updated.ended_at };
+      stopFollowing();
     };
-    eventSource.onerror = () => startPolling();
-  } else {
-    startPolling();
+    const reopenBtn = document.getElementById('reopenSessionBtn');
+    if (reopenBtn) reopenBtn.onclick = async () => {
+      reopenBtn.disabled = true;
+      const updated = await endSession(id, 'reopen');
+      if (!updated) { reopenBtn.disabled = false; return; }
+      sessionState = { ...sessionState, status: updated.status, ended_reason: updated.ended_reason, ended_at: updated.ended_at };
+      startFollowing();
+      renderStatusControls();
+    };
+    const followBtn = document.getElementById('followToggleBtn');
+    if (followBtn) followBtn.onclick = () => (following ? stopFollowing() : startFollowing());
   }
+
+  // Sessions that were explicitly ended (by the user or their source) open
+  // without a live stream; everything else follows as before.
+  if (s.status === 'ended' && (s.ended_reason === 'manual' || s.ended_reason === 'source')) renderStatusControls();
+  else startFollowing();
 
   const sseScrollHandler = () => {
     if (window.scrollY < 100) {
@@ -1052,6 +1257,7 @@ async function viewSession(id) {
 
   window._sseCleanup = () => {
     if (onScroll) { window.removeEventListener('scroll', onScroll); onScroll = null; }
+    following = false;
     if (eventSource) eventSource.close();
     if (pollInterval) clearInterval(pollInterval);
     window.removeEventListener('scroll', sseScrollHandler);
@@ -1177,22 +1383,15 @@ async function viewOverview() {
   content.innerHTML = `<div class="page-title">Overview</div><div class="stat-grid">${skeletonRows(5, 'stats')}</div>`;
   transitionView();
   const data = await api('/stats');
-  const sessionsRes = await api('/sessions?limit=30');
+  const sessionsRes = await api('/sessions?limit=30&roots=1');
   if (data._error || sessionsRes._error) {
     content.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
     return;
   }
 
   const sessions = sessionsRes.sessions || [];
-  const nowMs = Date.now();
-  const ACTIVE_WINDOW_MIN = 15;
   const activeNow = sessions
-    .filter(s => {
-      const t = s.end_time || s.start_time;
-      if (!t) return false;
-      const ageMin = (nowMs - new Date(t).getTime()) / 60000;
-      return ageMin >= 0 && ageMin <= ACTIVE_WINDOW_MIN;
-    })
+    .filter(s => s.status === 'live' || s.live_descendant_count > 0)
     .slice(0, 4);
   const activeIds = new Set(activeNow.map(s => s.id));
   const recentSessions = sessions.filter(s => !activeIds.has(s.id)).slice(0, 6);
@@ -1209,10 +1408,10 @@ async function viewOverview() {
     </div>
 
     <div class="section-label">Active Now (${activeNow.length})</div>
-    ${activeNow.length ? activeNow.map(renderSessionItem).join('') : `<div class="empty" style="margin-bottom:var(--space-xl)"><p>No active sessions right now</p></div>`}
+    ${activeNow.length ? activeNow.map(s => renderSessionTree(s)).join('') : `<div class="empty" style="margin-bottom:var(--space-xl)"><p>No active sessions right now</p></div>`}
 
     <div class="section-label">Recent Sessions</div>
-    ${recentSessions.map(renderSessionItem).join('')}
+    ${recentSessions.map(s => renderSessionTree(s)).join('')}
   `;
 
   content.innerHTML = html;

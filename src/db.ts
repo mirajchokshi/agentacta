@@ -116,6 +116,14 @@ export function init(dbPath?: string): void {
 
     CREATE INDEX IF NOT EXISTS idx_insights_flagged ON session_insights(flagged);
     CREATE INDEX IF NOT EXISTS idx_insights_score ON session_insights(confusion_score DESC);
+
+    -- User-set lifecycle overrides. Deliberately no FK to sessions: re-indexing
+    -- deletes and re-inserts the session row, which would cascade this away.
+    CREATE TABLE IF NOT EXISTS session_overrides (
+      session_id TEXT PRIMARY KEY,
+      ended_at TEXT NOT NULL,
+      reason TEXT
+    );
   `);
 
   // Add columns if missing (migration)
@@ -134,6 +142,15 @@ export function init(dbPath?: string): void {
   if (!colNames.includes('first_message_timestamp')) db.exec("ALTER TABLE sessions ADD COLUMN first_message_timestamp TEXT");
   if (!colNames.includes('models')) db.exec("ALTER TABLE sessions ADD COLUMN models TEXT");
   if (!colNames.includes('projects')) db.exec("ALTER TABLE sessions ADD COLUMN projects TEXT");
+  if (!colNames.includes('parent_id')) {
+    db.exec("ALTER TABLE sessions ADD COLUMN parent_id TEXT");
+    // Existing rows predate parent links; clear the change markers so the next
+    // index pass re-parses every source once and fills them in.
+    db.exec("DELETE FROM index_state");
+  }
+  if (!colNames.includes('label')) db.exec("ALTER TABLE sessions ADD COLUMN label TEXT");
+  if (!colNames.includes('source_status')) db.exec("ALTER TABLE sessions ADD COLUMN source_status TEXT");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_id)");
 
   db.close();
 }
@@ -147,6 +164,7 @@ export function createStmts(db: Database.Database): PreparedStatements {
     deleteFileActivity: db.prepare('DELETE FROM file_activity WHERE session_id = ?'),
     insertEvent: db.prepare(`INSERT OR REPLACE INTO events (id, session_id, timestamp, type, role, content, tool_name, tool_args, tool_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     upsertSession: db.prepare(`INSERT OR REPLACE INTO sessions (id, start_time, end_time, message_count, tool_count, model, summary, agent, session_type, total_cost, total_tokens, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, initial_prompt, first_message_id, first_message_timestamp, models, projects) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+    setSessionLineage: db.prepare('UPDATE sessions SET parent_id = ?, label = ?, source_status = ? WHERE id = ?'),
     upsertState: db.prepare(`INSERT OR REPLACE INTO index_state (file_path, last_offset, last_modified) VALUES (?, ?, ?)`),
     insertFileActivity: db.prepare(`INSERT INTO file_activity (session_id, file_path, operation, timestamp) VALUES (?, ?, ?, ?)`),
     deleteArchive: db.prepare('DELETE FROM archive WHERE session_id = ?'),

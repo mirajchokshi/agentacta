@@ -32,6 +32,9 @@ export interface SessionRow {
   first_message_timestamp: string | null;
   models: string | null;
   projects: string | null;
+  parent_id?: string | null;
+  label?: string | null;
+  source_status?: string | null;
 }
 
 export interface EventRow {
@@ -93,6 +96,7 @@ export interface PreparedStatements {
   deleteFileActivity: Database.Statement;
   insertEvent: Database.Statement;
   upsertSession: Database.Statement;
+  setSessionLineage: Database.Statement;
   upsertState: Database.Statement;
   insertFileActivity: Database.Statement;
   deleteArchive: Database.Statement;
@@ -105,6 +109,8 @@ export interface SessionDir {
   agent: string;
   recursive?: boolean;
   sourceType?: string;
+  /** Claude Code project dir: also index <session>/subagents/*.jsonl */
+  subagents?: boolean;
 }
 
 export interface IndexResult {
@@ -149,6 +155,15 @@ export interface JsonlLine {
   payload?: Record<string, unknown>;
   content?: unknown;
   role?: string;
+  isSidechain?: boolean;
+  agentId?: string;
+}
+
+/** Parent/child and lifecycle metadata that comes from outside the transcript lines. */
+export interface SessionLineage {
+  parentId?: string | null;
+  label?: string | null;
+  sourceStatus?: string | null;
 }
 
 export interface MessagePayload {
@@ -360,7 +375,7 @@ export interface CodexSessionMeta {
   timestamp?: string;
   model?: string;
   model_provider?: string;
-  source?: string;
+  source?: string | Record<string, unknown>;
   originator?: string;
   cwd?: string;
 }

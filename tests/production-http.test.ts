@@ -16,9 +16,9 @@ interface Response {
   body: string;
 }
 
-function request(requestPath: string): Promise<Response> {
+function request(requestPath: string, method: string = 'GET'): Promise<Response> {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port: PORT, path: requestPath }, res => {
+    const req = http.request({ host: '127.0.0.1', port: PORT, path: requestPath, method }, res => {
       let body = '';
       res.setEncoding('utf8');
       res.on('data', chunk => { body += chunk; });
@@ -58,6 +58,13 @@ describe('production HTTP routes', () => {
       JSON.stringify({ type: 'session', id: 'production-http-session', timestamp: '2025-01-01T12:00:00Z' }),
       JSON.stringify({ type: 'message', id: 'production-http-event', timestamp: '2025-01-01T12:01:00Z', message: { role: 'user', content: 'production route test' } }),
     ].join('\n') + '\n');
+    // A Codex subagent thread spawned from the session above.
+    fs.writeFileSync(path.join(SESSIONS_DIR, 'child.jsonl'), [
+      JSON.stringify({ type: 'session_meta', timestamp: '2025-01-01T12:02:00Z', payload: { id: 'production-http-child', timestamp: '2025-01-01T12:02:00Z', source: { subagent: { thread_spawn: { parent_thread_id: 'production-http-session' } } } } }),
+      JSON.stringify({ type: 'event_msg', timestamp: '2025-01-01T12:03:00Z', payload: { type: 'user_message', message: 'child task' } }),
+    ].join('\n') + '\n');
+    // A session that started but never recorded any message, so it has no end.
+    fs.writeFileSync(path.join(SESSIONS_DIR, 'stale.jsonl'), JSON.stringify({ type: 'session', id: 'production-http-stale', timestamp: '2025-01-02T00:00:00Z' }) + '\n');
 
     child = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
       cwd: path.join(__dirname, '..'),
@@ -85,9 +92,9 @@ describe('production HTTP routes', () => {
   it('serves timeline events for the requested local calendar day', async () => {
     const response = await request('/api/timeline?date=2025-01-01');
     assert.strictEqual(response.status, 200);
-    const data = JSON.parse(response.body) as { date: string; events: unknown[] };
+    const data = JSON.parse(response.body) as { date: string; events: Array<{ session_id: string }> };
     assert.strictEqual(data.date, '2025-01-01');
-    assert.strictEqual(data.events.length, 1);
+    assert.strictEqual(data.events.filter(e => e.session_id === 'production-http-session').length, 1);
   });
 
   it('rejects malformed and impossible timeline dates', async () => {
@@ -102,5 +109,42 @@ describe('production HTTP routes', () => {
     const response = await request('/%2e%2e/package.json');
     assert.strictEqual(response.status, 403);
     assert.strictEqual(response.body, '');
+  });
+
+  it('nests subagent sessions under their parent with roots=1', async () => {
+    const flat = JSON.parse((await request('/api/sessions')).body) as { sessions: Array<{ id: string }> };
+    assert.ok(flat.sessions.some(s => s.id === 'production-http-child'), 'flat list still includes children');
+
+    const tree = JSON.parse((await request('/api/sessions?roots=1')).body) as { sessions: Array<{ id: string; child_count: number; children: Array<{ id: string }> }> };
+    assert.ok(!tree.sessions.some(s => s.id === 'production-http-child'), 'child is not a top-level row');
+    const parent = tree.sessions.find(s => s.id === 'production-http-session');
+    assert.strictEqual(parent?.child_count, 1);
+    assert.strictEqual(parent?.children[0].id, 'production-http-child');
+
+    const detail = JSON.parse((await request('/api/sessions/production-http-child')).body) as { parent: { id: string } };
+    assert.strictEqual(detail.parent.id, 'production-http-session');
+  });
+
+  it('marks a session ended and reopens it', async () => {
+    assert.strictEqual((await request('/api/sessions/production-http-stale/end')).status, 405, 'GET is rejected');
+    const before = JSON.parse((await request('/api/sessions/production-http-stale')).body) as { session: { status: string } };
+    assert.strictEqual(before.session.status, 'stale');
+
+    const ended = JSON.parse((await request('/api/sessions/production-http-stale/end', 'POST')).body) as { session: { status: string; ended_reason: string } };
+    assert.deepStrictEqual([ended.session.status, ended.session.ended_reason], ['ended', 'manual']);
+
+    const reopened = JSON.parse((await request('/api/sessions/production-http-stale/reopen', 'POST')).body) as { session: { status: string } };
+    assert.strictEqual(reopened.session.status, 'stale');
+
+    assert.strictEqual((await request('/api/sessions/does-not-exist/end', 'POST')).status, 404);
+  });
+
+  it('ends all stale sessions in one call', async () => {
+    const list = JSON.parse((await request('/api/sessions?roots=1')).body) as { staleCount: number };
+    assert.strictEqual(list.staleCount, 1);
+    const res = JSON.parse((await request('/api/sessions/end-stale', 'POST')).body) as { ended: number };
+    assert.strictEqual(res.ended, 1);
+    const after = JSON.parse((await request('/api/sessions?roots=1')).body) as { staleCount: number };
+    assert.strictEqual(after.staleCount, 0);
   });
 });

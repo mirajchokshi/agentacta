@@ -28,11 +28,13 @@ import type {
 } from './types.js';
 import { loadConfig } from './config.js';
 import { open, init, createStmts } from './db.js';
-import { discoverSessionDirs, listJsonlFiles, indexFile, indexOpenClawDb, watchOpenClawDb, indexAll } from './indexer.js';
+import { discoverSessionDirs, listSessionFiles, indexFile, indexOpenClawDb, watchOpenClawDb, indexAll } from './indexer.js';
 import { attributeSessionEvents, attributeEventDelta } from './project-attribution.js';
 import { loadDeltaAttributionContext } from './delta-attribution-context.js';
 import { analyzeSession, analyzeAll, getInsightsSummary } from './insights.js';
 import { isValidDateKey, resolveStaticPath } from './http-utils.js';
+import { withStatus, attachChildren, computeSessionStatus, LIVE_WINDOW_MS } from './session-status.js';
+import type { SessionWithOverride } from './session-status.js';
 
 // --version / -v flag: print version and exit
 if (process.argv.includes('--version') || process.argv.includes('-v')) {
@@ -253,7 +255,7 @@ for (const dir of sessionDirs) {
     }
     continue;
   }
-  const files: string[] = listJsonlFiles(dir.path, !!dir.recursive);
+  const files: string[] = listSessionFiles(dir);
   for (const filePath of files) {
     try {
       const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
@@ -294,7 +296,7 @@ function refreshInsightsAndNotify(sessionIds: string[]): void {
 
 function reindexRecursiveDir(dir: SessionDir): void {
   try {
-    const files: string[] = listJsonlFiles(dir.path, true);
+    const files: string[] = listSessionFiles(dir);
     let changed: number = 0;
     for (const filePath of files) {
       const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
@@ -358,13 +360,47 @@ for (const dir of sessionDirs) {
       }, REINDEX_DEBOUNCE_MS));
     });
     console.log(`  Watching: ${dir.path}`);
-    if (dir.recursive) {
+    // Nested files (Codex date dirs, Claude <session>/subagents/) aren't seen by a
+    // non-recursive fs.watch, so rescan them on an interval.
+    if (dir.recursive || dir.subagents) {
       const timer: NodeJS.Timeout = setInterval(() => reindexRecursiveDir(dir), RECURSIVE_RESCAN_MS);
       timer.unref?.();
     }
   } catch (err: unknown) {
     console.error(`  Failed to watch ${dir.path}:`, (err as Error).message);
   }
+}
+
+const SESSION_SELECT: string = 'SELECT s.*, o.ended_at AS override_ended_at FROM sessions s LEFT JOIN session_overrides o ON o.session_id = s.id';
+const sessionSortKey = (r: { end_time: string | null; start_time: string }): string => r.end_time || r.start_time || '';
+
+// All descendants of the given sessions (UNION de-duplicates, so a parent cycle terminates).
+function loadDescendants(rootIds: string[], nowMs: number) {
+  if (!rootIds.length) return [];
+  const rows = db.prepare(
+    `WITH RECURSIVE tree(id) AS (
+       SELECT id FROM sessions WHERE parent_id IN (SELECT value FROM json_each(?))
+       UNION
+       SELECT c.id FROM sessions c JOIN tree t ON c.parent_id = t.id
+     )
+     ${SESSION_SELECT} WHERE s.id IN (SELECT id FROM tree)`
+  ).all(JSON.stringify(rootIds)) as SessionWithOverride[];
+  return rows.map(r => withStatus(r, nowMs));
+}
+
+// Sessions that never recorded an end and have been quiet past the live window.
+function listStaleSessionIds(nowMs: number): string[] {
+  const cutoff: string = new Date(nowMs - LIVE_WINDOW_MS).toISOString();
+  const rows = db.prepare(`${SESSION_SELECT} WHERE s.end_time IS NULL AND s.start_time < ?`).all(cutoff) as SessionWithOverride[];
+  return rows.filter(r => computeSessionStatus(r, nowMs).status === 'stale').map(r => r.id);
+}
+
+function notifySessionStatus(id: string) {
+  const row = db.prepare(`${SESSION_SELECT} WHERE s.id = ?`).get(id) as SessionWithOverride | undefined;
+  if (!row) return null;
+  const session = withStatus(row);
+  sseEmitter.emit('session-status', id, { id, status: session.status, ended_reason: session.ended_reason, ended_at: session.ended_at });
+  return session;
 }
 
 const server: http.Server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse): void => {
@@ -451,15 +487,49 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       const limit: number = parseInt(query.limit) || 50;
       const offset: number = parseInt(query.offset) || 0;
       const agent: string = query.agent || '';
-      let sql: string = 'SELECT * FROM sessions';
+      // roots=1: only top-level sessions, each with its subagent tree attached.
+      // A child whose parent was never indexed is shown as a root.
+      const rootsOnly: boolean = query.roots === '1';
+      const where: string[] = [];
       const params: Array<string | number> = [];
-      if (agent) { sql += ' WHERE agent = ?'; params.push(agent); }
-      sql += ' ORDER BY COALESCE(end_time, start_time) DESC LIMIT ? OFFSET ?';
-      params.push(limit, offset);
-      const rows: SessionRow[] = db.prepare(sql).all(...params) as SessionRow[];
-      const countSql: string = agent ? 'SELECT COUNT(*) as c FROM sessions WHERE agent = ?' : 'SELECT COUNT(*) as c FROM sessions';
-      const total: number = agent ? (db.prepare(countSql).get(agent) as CountRow).c : (db.prepare(countSql).get() as CountRow).c;
-      json(res, { sessions: rows, total, limit, offset });
+      if (agent) { where.push('s.agent = ?'); params.push(agent); }
+      if (rootsOnly) where.push('(s.parent_id IS NULL OR s.parent_id NOT IN (SELECT id FROM sessions))');
+      const whereSql: string = where.length ? ` WHERE ${where.join(' AND ')}` : '';
+      const nowMs: number = Date.now();
+      const rows = (db.prepare(`${SESSION_SELECT}${whereSql} ORDER BY COALESCE(s.end_time, s.start_time) DESC LIMIT ? OFFSET ?`)
+        .all(...params, limit, offset) as SessionWithOverride[]).map(r => withStatus(r, nowMs));
+      const total: number = (db.prepare(`SELECT COUNT(*) as c FROM sessions s${whereSql}`).get(...params) as CountRow).c;
+      const sessions = rootsOnly
+        ? attachChildren(rows, loadDescendants(rows.map(r => r.id), nowMs), sessionSortKey)
+        : rows;
+      json(res, { sessions, total, limit, offset, staleCount: listStaleSessionIds(nowMs).length });
+    }
+
+    else if (pathname === '/api/sessions/end-stale') {
+      if (!requireMethod(req, res, 'POST')) return;
+      const ids: string[] = listStaleSessionIds(Date.now());
+      const endedAt: string = new Date().toISOString();
+      const upsert: Database.Statement = db.prepare('INSERT OR REPLACE INTO session_overrides (session_id, ended_at, reason) VALUES (?, ?, ?)');
+      db.transaction(() => { for (const sid of ids) upsert.run(sid, endedAt, 'stale'); })();
+      for (const sid of ids) notifySessionStatus(sid);
+      json(res, { ok: true, ended: ids.length });
+    }
+
+    else if (pathname.match(/^\/api\/sessions\/[^/]+\/(end|reopen)$/)) {
+      if (!requireMethod(req, res, 'POST')) return;
+      const parts: string[] = pathname.split('/');
+      const id: string = decodeURIComponent(parts[3]);
+      const action: string = parts[4];
+      const exists = db.prepare('SELECT id FROM sessions WHERE id = ?').get(id);
+      if (!exists) return json(res, { error: 'Not found' }, 404);
+      if (action === 'end') {
+        db.prepare('INSERT OR REPLACE INTO session_overrides (session_id, ended_at, reason) VALUES (?, ?, ?)')
+          .run(id, new Date().toISOString(), 'manual');
+      } else {
+        db.prepare('DELETE FROM session_overrides WHERE session_id = ?').run(id);
+      }
+      const session = notifySessionStatus(id);
+      json(res, { ok: true, session });
     }
 
     else if (pathname.match(/^\/api\/sessions\/[^/]+\/events$/)) {
@@ -524,7 +594,13 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
         }
       };
 
+      const onStatus = (sessionId: string, payload: unknown): void => {
+        if (sessionId !== id) return;
+        try { res.write(`event: status\ndata: ${JSON.stringify(payload)}\n\n`); } catch { /* ignore */ }
+      };
+
       sseEmitter.on('session-update', onUpdate);
+      sseEmitter.on('session-status', onStatus);
 
       const ping: NodeJS.Timeout = setInterval(() => {
         try { res.write(': ping\n\n'); } catch { /* ignore */ }
@@ -532,18 +608,26 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
 
       req.on('close', () => {
         sseEmitter.off('session-update', onUpdate);
+        sseEmitter.off('session-status', onStatus);
         clearInterval(ping);
       });
     }
     else if (pathname.match(/^\/api\/sessions\/[^/]+$/) && !pathname.includes('export')) {
       const id: string = pathname.split('/')[3];
-      const session: SessionRow | undefined = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as SessionRow | undefined;
-      if (!session) { json(res, { error: 'Not found' }, 404); }
+      const row = db.prepare(`${SESSION_SELECT} WHERE s.id = ?`).get(id) as SessionWithOverride | undefined;
+      if (!row) { json(res, { error: 'Not found' }, 404); }
       else {
+        const nowMs: number = Date.now();
+        const session = withStatus(row, nowMs);
         const events: EventRow[] = db.prepare('SELECT * FROM events WHERE session_id = ? ORDER BY timestamp DESC').all(id) as EventRow[];
         const attributed: AttributionResult = attributeSessionEvents(session, events);
         const hasArchive: boolean = ARCHIVE_MODE && (db.prepare('SELECT COUNT(*) as c FROM archive WHERE session_id = ?').get(id) as CountRow).c > 0;
-        json(res, { session, events: attributed.events, projectFilters: attributed.projectFilters, hasArchive });
+        const parentRow = session.parent_id
+          ? db.prepare(`${SESSION_SELECT} WHERE s.id = ?`).get(session.parent_id) as SessionWithOverride | undefined
+          : undefined;
+        const parent = parentRow ? withStatus(parentRow, nowMs) : null;
+        const [tree] = attachChildren([{ ...session }], loadDescendants([id], nowMs), sessionSortKey);
+        json(res, { session, parent, children: tree.children || [], events: attributed.events, projectFilters: attributed.projectFilters, hasArchive });
       }
     }
     else if (pathname.match(/^\/api\/archive\/session\/[^/]+$/)) {
