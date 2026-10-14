@@ -449,15 +449,10 @@ const expandedSessionGroups = new Set();
 function renderSessionStatus(s) {
   if (s.status === 'live') return '<span class="st st-live" title="Activity in the last 15 minutes"><i></i>Live</span>';
   if (s.status === 'stale') return '<span class="st st-stale" title="No end was recorded and it has been quiet for over 15 minutes">Stale</span>';
-  if (s.ended_reason === 'manual') return '<span class="st st-ended" title="Marked ended in AgentActa">Ended</span>';
   if (s.ended_reason === 'source' && s.source_status && !/^(done|completed?)$/i.test(s.source_status)) {
     return `<span class="st st-failed">${escHtml(s.source_status)}</span>`;
   }
   return '';
-}
-
-function canEndSession(s) {
-  return s.status === 'live' || s.status === 'stale';
 }
 
 function renderSessionItem(s) {
@@ -486,14 +481,9 @@ function renderSessionItem(s) {
           <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> ${s.message_count}</span>
           <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> ${s.tool_count}</span>
         </span>
-        ${canEndSession(s) ? renderEndButton(s) : ''}
       </div>
     </div>
   `;
-}
-
-function renderEndButton(s) {
-  return `<button class="text-btn" data-end-session="${escHtml(s.id)}" title="Mark ended in AgentActa. This does not stop the agent process; new activity reopens it.">End</button>`;
 }
 
 function renderChildrenToggle(s, expanded) {
@@ -518,7 +508,6 @@ function renderSubagentRow(s) {
     <span class="subagent-status">${renderSessionStatus(s)}</span>
     <span class="subagent-title" title="${escHtml(title)}">${escHtml(truncate(title, 140))}</span>
     <span class="subagent-meta">${when} \u00b7 ${s.message_count} msg \u00b7 ${s.tool_count} tools</span>
-    <span class="subagent-action">${canEndSession(s) ? renderEndButton(s) : ''}</span>
   </div>`;
 }
 
@@ -542,35 +531,12 @@ function renderSessionTree(s) {
   return `<div class="session-group">${renderSessionItem(s)}${renderChildrenToggle(s, open)}${renderSubagentList(kids, !open)}</div>`;
 }
 
-async function endSession(id, action = 'end') {
-  const res = await api(`/sessions/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
-  if (res._error) {
-    alertInline(res.error || 'Unable to update session');
-    return null;
-  }
-  return res.session;
-}
-
-function alertInline(msg) {
-  let el = document.getElementById('inlineToast');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'inlineToast';
-    el.className = 'new-events-indicator';
-    document.body.appendChild(el);
-  }
-  el.textContent = msg;
-  clearTimeout(el._t);
-  el._t = setTimeout(() => el.remove(), 3000);
-}
-
 // Delegated in the capture phase so these controls never also trigger the
 // card's own "open session" click handler.
 content.addEventListener('click', async (e) => {
   const toggle = e.target.closest('[data-toggle-children]');
-  const endBtn = e.target.closest('[data-end-session]');
   const row = e.target.closest('[data-open-session]');
-  if (!toggle && !endBtn && !row) return;
+  if (!toggle && !row) return;
   e.stopPropagation();
   e.preventDefault();
 
@@ -586,19 +552,6 @@ content.addEventListener('click', async (e) => {
     return;
   }
 
-  if (endBtn) {
-    endBtn.disabled = true;
-    const updated = await endSession(endBtn.dataset.endSession, 'end');
-    if (!updated) { endBtn.disabled = false; return; }
-    const target = endBtn.closest('.subagent-row') || endBtn.closest('.session-item');
-    if (!target) return;
-    const tmp = document.createElement('div');
-    tmp.innerHTML = target.classList.contains('subagent-row') ? renderSubagentRow(updated) : renderSessionItem(updated);
-    const fresh = tmp.firstElementChild;
-    target.replaceWith(fresh);
-    if (fresh.classList.contains('session-item')) fresh.addEventListener('click', () => viewSession(updated.id));
-    return;
-  }
 
   viewSession(row.dataset.openSession);
 }, true);
@@ -773,22 +726,12 @@ async function viewSessions() {
   }
 
   let html = `<div class="page-title">Sessions</div>`;
-  if (data.staleCount > 0) {
-    html += `<p class="stale-note">${data.staleCount} session${data.staleCount === 1 ? '' : 's'} never recorded an end and ${data.staleCount === 1 ? 'has' : 'have'} been quiet for over 15 minutes. <button class="text-btn" id="endStaleBtn">Mark ${data.staleCount === 1 ? 'it' : 'all'} ended</button></p>`;
-  }
   html += data.sessions.map(s => renderSessionTree(s)).join('');
   content.innerHTML = html;
   transitionView();
 
   $$('.session-item').forEach(item => {
     item.addEventListener('click', () => viewSession(item.dataset.id));
-  });
-  const endStale = $('#endStaleBtn');
-  if (endStale) endStale.addEventListener('click', async () => {
-    endStale.disabled = true;
-    const res = await api('/sessions/end-stale', { method: 'POST' });
-    if (res._error) { endStale.disabled = false; alertInline(res.error || 'Unable to update sessions'); return; }
-    viewSessions();
   });
 }
 
@@ -1167,7 +1110,7 @@ async function viewSession(id) {
 
   // Subscribe to real-time updates via SSE, with polling as a fallback.
   // "Following" is the client side of a live session: it can be paused, and it
-  // stops on its own when the session is marked ended.
+  // can be paused from the page.
   let lastSeenTs = allEvents.length ? allEvents[0].timestamp : new Date(0).toISOString();
   let lastSeenId = allEvents.length ? allEvents[0].id : '';
   let sessionState = { status: s.status, ended_reason: s.ended_reason, ended_at: s.ended_at, source_status: s.source_status };
@@ -1223,14 +1166,6 @@ async function viewSession(id) {
           startPolling();
         }
       };
-      eventSource.addEventListener('status', (event) => {
-        try {
-          const next = JSON.parse(event.data);
-          sessionState = { ...sessionState, ...next };
-          if (next.status === 'ended' && next.ended_reason === 'manual') stopFollowing();
-          else renderStatusControls();
-        } catch { /* ignore */ }
-      });
       eventSource.onerror = () => startPolling();
     } else {
       startPolling();
@@ -1244,34 +1179,15 @@ async function viewSession(id) {
     const st = { ...s, ...sessionState };
     slot.innerHTML = `
       ${renderSessionStatus(st)}
-      ${canEndSession(st) ? `<button class="export-btn session-action-btn" id="endSessionBtn" title="Marks the session ended in AgentActa and stops following it. AgentActa cannot stop the agent process; new activity reopens it.">Mark ended</button>` : ''}
-      ${st.ended_reason === 'manual' ? `<button class="export-btn session-action-btn" id="reopenSessionBtn" title="Clear the ended mark">Reopen</button>` : ''}
       <button class="export-btn session-action-btn" id="followToggleBtn" aria-pressed="${following}" title="${following ? 'New events are streaming into this page' : 'New events are not being streamed into this page'}">${following ? 'Pause updates' : 'Resume updates'}</button>
     `;
-    const endBtn = document.getElementById('endSessionBtn');
-    if (endBtn) endBtn.onclick = async () => {
-      endBtn.disabled = true;
-      const updated = await endSession(id, 'end');
-      if (!updated) { endBtn.disabled = false; return; }
-      sessionState = { ...sessionState, status: updated.status, ended_reason: updated.ended_reason, ended_at: updated.ended_at };
-      stopFollowing();
-    };
-    const reopenBtn = document.getElementById('reopenSessionBtn');
-    if (reopenBtn) reopenBtn.onclick = async () => {
-      reopenBtn.disabled = true;
-      const updated = await endSession(id, 'reopen');
-      if (!updated) { reopenBtn.disabled = false; return; }
-      sessionState = { ...sessionState, status: updated.status, ended_reason: updated.ended_reason, ended_at: updated.ended_at };
-      startFollowing();
-      renderStatusControls();
-    };
     const followBtn = document.getElementById('followToggleBtn');
     if (followBtn) followBtn.onclick = () => (following ? stopFollowing() : startFollowing());
   }
 
-  // Sessions that were explicitly ended (by the user or their source) open
-  // without a live stream; everything else follows as before.
-  if (s.status === 'ended' && (s.ended_reason === 'manual' || s.ended_reason === 'source')) renderStatusControls();
+  // Sessions their source reports as finished open without a live stream;
+  // everything else follows as before.
+  if (s.status === 'ended' && s.ended_reason === 'source') renderStatusControls();
   else startFollowing();
 
   const sseScrollHandler = () => {

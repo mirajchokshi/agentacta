@@ -9,13 +9,13 @@ import { open, init, createStmts } from '../src/db.js';
 import { discoverSessionDirs, listSessionFiles, indexFile, indexOpenClawDb } from '../src/indexer.js';
 import { computeSessionStatus, attachChildren, LIVE_WINDOW_MS } from '../src/session-status.js';
 import type { PreparedStatements, SessionRow, SessionDir } from '../src/types.js';
-import type { SessionWithOverride, SessionTreeNode } from '../src/session-status.js';
+import type { SessionTreeNode } from '../src/session-status.js';
 
 const TMP = path.join(os.tmpdir(), `agentacta-test-tree-${Date.now()}`);
 const TEST_DB = path.join(TMP, 'test.db');
 
-function row(partial: Partial<SessionWithOverride>): SessionWithOverride {
-  return { id: 'x', start_time: '2026-01-01T00:00:00Z', end_time: '2026-01-01T00:10:00Z', source_status: null, override_ended_at: null, ...partial } as SessionWithOverride;
+function row(partial: Partial<SessionRow>): SessionRow {
+  return { id: 'x', start_time: '2026-01-01T00:00:00Z', end_time: '2026-01-01T00:10:00Z', source_status: null, ...partial } as SessionRow;
 }
 
 function writeJsonl(fp: string, lines: Record<string, unknown>[]): void {
@@ -39,14 +39,6 @@ describe('session status', () => {
   it('is ended (inactive) when quiet with an end time', () => {
     const st = computeSessionStatus(row({}), now);
     assert.deepStrictEqual([st.status, st.ended_reason], ['ended', 'inactive']);
-  });
-
-  it('honours a manual end until new activity arrives after it', () => {
-    const last = new Date(now - 60_000).toISOString();
-    const ended = computeSessionStatus(row({ end_time: last, override_ended_at: new Date(now - 30_000).toISOString() }), now);
-    assert.deepStrictEqual([ended.status, ended.ended_reason], ['ended', 'manual']);
-    const reopened = computeSessionStatus(row({ end_time: last, override_ended_at: new Date(now - 120_000).toISOString() }), now);
-    assert.strictEqual(reopened.status, 'live');
   });
 
   it('treats terminal source statuses as ended even when recent', () => {
@@ -180,14 +172,4 @@ describe('subagent indexing', () => {
     assert.strictEqual((db.prepare('SELECT source_status FROM sessions WHERE id = ?').get('oc-child') as SessionRow).source_status, 'killed');
   });
 
-  it('keeps a manual end across re-indexing', () => {
-    db.prepare('INSERT OR REPLACE INTO session_overrides (session_id, ended_at, reason) VALUES (?, ?, ?)').run('agent-abc123', '2026-10-02T00:00:00Z', 'manual');
-    const subPath = path.join(TMP, 'claude-proj', '11111111-2222-3333-4444-555555555555', 'subagents', 'agent-abc123.jsonl');
-    fs.appendFileSync(subPath, JSON.stringify({ type: 'assistant', isSidechain: true, agentId: 'abc123', sessionId: 'x', uuid: 's-3', timestamp: '2026-10-01T00:03:00Z', message: { role: 'assistant', content: 'More' } }) + '\n');
-    const future = new Date(Date.now() + 5000);
-    fs.utimesSync(subPath, future, future);
-    const res = indexFile(db, subPath, 'claude-code', stmts, false, {} as never);
-    assert.ok(!res.skipped);
-    assert.ok(db.prepare('SELECT 1 FROM session_overrides WHERE session_id = ?').get('agent-abc123'), 'override is not cascaded away by delete+reinsert');
-  });
 });

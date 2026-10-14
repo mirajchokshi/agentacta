@@ -2122,27 +2122,6 @@ mark {
 @keyframes live-pulse { 50% { opacity: 0.3; } }
 @media (prefers-reduced-motion: reduce) { .st-live i { animation: none; } }
 
-/* Quiet inline action: reads as a link-weight control, not a button slab. */
-.text-btn {
-  padding: 0;
-  font: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  background: none;
-  border: none;
-  cursor: pointer;
-}
-.text-btn:hover, .text-btn:focus-visible { color: var(--text-primary); text-decoration: underline; text-underline-offset: 3px; }
-.text-btn:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
-
-.stale-note {
-  margin: 0 0 var(--space-lg);
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-.stale-note .text-btn { font-size: 13px; color: var(--amber); margin-left: 4px; }
-
 /* ---- Subagents: a dense list under the parent, indented to show nesting ---- */
 .session-group { margin-bottom: var(--space-sm); }
 .session-group > .session-item { margin-bottom: 0; }
@@ -2252,7 +2231,6 @@ mark {
   /* Narrow screens: plain flow. Status reads inline before the title, timing
      drops to its own line, and End stays pinned top-right. */
   .subagent-row { display: block; position: relative; }
-  .subagent-row:has(.text-btn) { padding-right: 3.5rem; }
   .subagent-row .st { margin-right: 6px; }
   .subagent-title { white-space: normal; }
   .subagent-meta { display: block; margin-top: 2px; white-space: normal; }
