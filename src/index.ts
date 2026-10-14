@@ -988,13 +988,18 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
     else if (pathname === '/api/files/sessions') {
       const fp: string = query.path || '';
       if (!fp) { json(res, { sessions: [] }); return; }
-      const rows: FileSessionRow[] = db.prepare(`
-        SELECT DISTINCT s.*, fa.operation, fa.timestamp as touch_time
+      // One row per session (a session that touched the file 50 times is still
+      // one session), with its operations combined and its latest touch.
+      const nowMs: number = Date.now();
+      const rows = (db.prepare(`
+        SELECT s.*, o.ended_at AS override_ended_at, GROUP_CONCAT(DISTINCT fa.operation) AS operation, MAX(fa.timestamp) AS touch_time
         FROM file_activity fa
         JOIN sessions s ON s.id = fa.session_id
+        LEFT JOIN session_overrides o ON o.session_id = s.id
         WHERE fa.file_path = ?
-        ORDER BY fa.timestamp DESC
-      `).all(fp) as FileSessionRow[];
+        GROUP BY s.id
+        ORDER BY touch_time DESC
+      `).all(fp) as Array<FileSessionRow & SessionWithOverride>).map(r => withStatus(r, nowMs));
       json(res, { file: fp, sessions: rows });
     }
     else if (pathname === '/api/insights') {

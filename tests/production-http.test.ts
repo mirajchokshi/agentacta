@@ -63,6 +63,11 @@ describe('production HTTP routes', () => {
       JSON.stringify({ type: 'session_meta', timestamp: '2025-01-01T12:02:00Z', payload: { id: 'production-http-child', timestamp: '2025-01-01T12:02:00Z', source: { subagent: { thread_spawn: { parent_thread_id: 'production-http-session' } } } } }),
       JSON.stringify({ type: 'event_msg', timestamp: '2025-01-01T12:03:00Z', payload: { type: 'user_message', message: 'child task' } }),
     ].join('\n') + '\n');
+    // A session that reads the same file three times.
+    fs.writeFileSync(path.join(SESSIONS_DIR, 'touches.jsonl'), [
+      JSON.stringify({ type: 'session', id: 'production-http-touches', timestamp: '2025-01-03T00:00:00Z' }),
+      ...[1, 2, 3].map(n => JSON.stringify({ type: 'message', id: `touch-${n}`, timestamp: `2025-01-03T00:0${n}:00Z`, message: { role: 'assistant', content: [{ type: 'tool_use', id: `tc-${n}`, name: 'Read', input: { path: '/tmp/touched.js' } }] } })),
+    ].join('\n') + '\n');
     // A session that started but never recorded any message, so it has no end.
     fs.writeFileSync(path.join(SESSIONS_DIR, 'stale.jsonl'), JSON.stringify({ type: 'session', id: 'production-http-stale', timestamp: '2025-01-02T00:00:00Z' }) + '\n');
 
@@ -146,5 +151,11 @@ describe('production HTTP routes', () => {
     assert.strictEqual(res.ended, 1);
     const after = JSON.parse((await request('/api/sessions?roots=1')).body) as { staleCount: number };
     assert.strictEqual(after.staleCount, 0);
+  });
+
+  it('lists each session once on a file\'s session list', async () => {
+    const data = JSON.parse((await request('/api/files/sessions?path=' + encodeURIComponent('/tmp/touched.js'))).body) as { sessions: Array<{ id: string; touch_time: string }> };
+    assert.deepStrictEqual(data.sessions.map(s => s.id), ['production-http-touches']);
+    assert.strictEqual(data.sessions[0].touch_time, '2025-01-03T00:03:00Z');
   });
 });
