@@ -443,7 +443,7 @@ code, pre, .mono { font-family: var(--font-mono); }
   white-space: nowrap;
   transition: background var(--duration-fast), color var(--duration-fast), border-color var(--duration-fast), transform 0.08s;
 }
-.row-btn:hover { color: var(--red); background: var(--red-soft); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+.row-btn:hover { color: var(--text-primary); background: var(--bg-hover); border-color: var(--border-hover); }
 .row-btn:active { transform: scale(0.95); }
 .row-btn:disabled { opacity: 0.5; cursor: default; }
 .row-btn-warn { color: var(--amber); }
@@ -1182,7 +1182,7 @@ code, pre, .mono { font-family: var(--font-mono); }
 ::-webkit-scrollbar-thumb { background: var(--bg-active); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-hover); }
 
-.view-enter { animation: viewIn 0.22s var(--ease-out); }
+.view-enter { animation: viewIn 0.16s var(--ease-out); }
 @keyframes viewIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
 /* ---- Toasts: confirmation with Undo ---- */
@@ -1312,8 +1312,31 @@ code, pre, .mono { font-family: var(--font-mono); }
    give immediate pressed feedback. */
 @media (hover: none) {
   .si-go { opacity: 0.8; }
-  .session-item:active, .subagent-row:active, .file-item:active, .result-item:active, .tl-session:active { background: var(--bg-active); }
+  /* No sticky hover after a tap; the press state is the feedback. */
+  .session-item:hover, .subagent-row:hover, .file-item:hover, .file-group-header:hover,
+  .result-item:hover, .tl-session:hover, .nav-item:hover, .back-btn:hover,
+  .session-parent-link:hover, .subagent-toggle:hover, .subagent-heading:hover,
+  .btn:hover, .row-btn:hover, .filter-chip:hover { background: transparent; }
+  .btn:hover, .row-btn:hover { background: var(--bg-elevated); color: var(--text-primary); border-color: var(--border-default); }
+  .row-btn:hover { color: var(--text-secondary); }
+  .row-btn-warn:hover { color: var(--amber); }
+  .filter-chip.active:hover { background: var(--bg-active); }
+  .nav-item.active:hover { background: var(--bg-active); }
+  .session-item:hover .si-go, .subagent-row:hover .si-go { transform: none; color: var(--text-tertiary); }
 }
+
+/* Press feedback is immediate (no fade-in) so a tap registers under the finger. */
+.session-item:active, .subagent-row:active, .file-item:active, .file-group-header:active,
+.result-item:active, .tl-session:active, .nav-item:active, .subagent-toggle:active,
+.subagent-heading:active, .back-btn:active, .session-parent-link:active,
+.is-pressed {
+  background: var(--bg-active) !important;
+  transition: none !important;
+}
+.btn:active, .row-btn:active, .btn.is-pressed, .row-btn.is-pressed, .filter-chip.is-pressed { background: var(--bg-active) !important; transform: scale(0.97); transition: none !important; }
+.toast-action.is-pressed { background: var(--accent-medium) !important; }
+
+a, button, select, summary, [role="link"], .nav-item, .session-item, .file-item { touch-action: manipulation; }
 
 /* ---- Narrow screens ---- */
 @media (max-width: 768px) {
