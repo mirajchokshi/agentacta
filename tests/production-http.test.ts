@@ -147,8 +147,9 @@ describe('production HTTP routes', () => {
   it('ends all stale sessions in one call', async () => {
     const list = JSON.parse((await request('/api/sessions?roots=1')).body) as { staleCount: number };
     assert.strictEqual(list.staleCount, 1);
-    const res = JSON.parse((await request('/api/sessions/end-stale', 'POST')).body) as { ended: number };
+    const res = JSON.parse((await request('/api/sessions/end-stale', 'POST')).body) as { ended: number; ids: string[] };
     assert.strictEqual(res.ended, 1);
+    assert.deepStrictEqual(res.ids, ['production-http-stale']);
     const after = JSON.parse((await request('/api/sessions?roots=1')).body) as { staleCount: number };
     assert.strictEqual(after.staleCount, 0);
   });

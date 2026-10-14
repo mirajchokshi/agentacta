@@ -330,7 +330,7 @@ function renderTimelineEvents(events, prevSessionId = null) {
     let head = '';
     if (ev.session_id && ev.session_id !== prev) {
       const title = cleanSessionSummary(ev.session_summary || '', '');
-      head = `<button class="tl-session" data-open-session="${escHtml(ev.session_id)}"><span class="tl-session-title">${escHtml(truncate(title, 110))}</span><span class="tl-session-id">${escHtml(shortSessionId(ev.session_id))}</span></button>`;
+      head = `<button class="tl-session" data-open-session="${escHtml(ev.session_id)}"><span class="tl-session-title">${escHtml(truncate(title, 110))}</span><span class="tl-session-id">${escHtml(shortSessionId(ev.session_id))}</span><span class="tl-open">Open${icon('chevron', 12)}</span></button>`;
       prev = ev.session_id;
     }
     return head + renderEvent(ev);
@@ -423,10 +423,78 @@ function isInternalProjectTag(tag) {
 
 const expandedSessionGroups = new Set();
 
+const ICON_PATHS = {
+  chevron: '<path d="m9 18 6-6-6-6"/>',
+  stop: '<rect x="5" y="5" width="14" height="14" rx="1.5" fill="currentColor" stroke="none"/>',
+  pause: '<rect x="7" y="5" width="3.5" height="14" rx="1"/><rect x="13.5" y="5" width="3.5" height="14" rx="1"/>',
+  play: '<path d="M7 4.5v15l12-7.5z"/>',
+  toStart: '<path d="M5 3h14"/><path d="m18 13-6-6-6 6"/><path d="M12 7v14"/>',
+  download: '<path d="M12 15V3"/><path d="m7 10 5 5 5-5"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>',
+  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
+  undo: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+  up: '<path d="M14 9 9 4 4 9"/><path d="M20 20h-7a4 4 0 0 1-4-4V4"/>',
+};
+
+function icon(name, size = 14) {
+  return `<svg class="i i-${name}" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_PATHS[name]}</svg>`;
+}
+
+// A status glyph in a fixed leading column, readable at a glance: a pulsing
+// dot while live, a dashed ring when stale, a check when it finished, a stop
+// square when someone ended it, an x when the source says it failed.
+function statusIcon(s) {
+  let kind = 'done';
+  let label = 'Finished';
+  if (s.status === 'live') { kind = 'live'; label = 'Live: activity in the last 15 minutes'; }
+  else if (s.status === 'stale') { kind = 'stale'; label = 'Stale: never recorded an end'; }
+  else if (s.ended_reason === 'manual') { kind = 'stopped'; label = 'Marked ended in AgentActa'; }
+  else if (s.ended_reason === 'source' && s.source_status && !/^(done|completed?)$/i.test(s.source_status)) { kind = 'failed'; label = s.source_status; }
+  const g = {
+    live: '<circle class="ring" cx="8" cy="8" r="3.5"/><circle cx="8" cy="8" r="3.5" fill="currentColor" stroke="none"/>',
+    stale: '<circle cx="8" cy="8" r="5.5" stroke-dasharray="2.4 2.2"/>',
+    done: '<circle cx="8" cy="8" r="5.5"/><path d="M5.7 8.2l1.6 1.6 3.1-3.3"/>',
+    stopped: '<circle cx="8" cy="8" r="5.5"/><rect x="6" y="6" width="4" height="4" rx="0.6" fill="currentColor" stroke="none"/>',
+    failed: '<circle cx="8" cy="8" r="6" fill="currentColor" stroke="none"/><path d="M6 6l4 4M10 6l-4 4" stroke="var(--bg-surface)"/>',
+  }[kind];
+  return `<span class="sicon sicon-${kind}" title="${escHtml(label)}" role="img" aria-label="${escHtml(label)}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${g}</svg></span>`;
+}
+
+// Bottom-center confirmation with an optional action (Undo). Replaces the
+// previous auto-dismissing error pill so every mutation gives feedback.
+function showToast(message, { actionLabel, onAction, tone = 'default', timeout = 6000 } = {}) {
+  let host = document.getElementById('toastHost');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'toastHost';
+    host.className = 'toast-host';
+    host.setAttribute('role', 'status');
+    host.setAttribute('aria-live', 'polite');
+    document.body.appendChild(host);
+  }
+  const t = document.createElement('div');
+  t.className = `toast toast-${tone}`;
+  t.innerHTML = `<span class="toast-msg">${escHtml(message)}</span>${actionLabel ? `<button class="toast-action">${icon('undo', 13)}${escHtml(actionLabel)}</button>` : ''}<kbd class="toast-dismiss" aria-hidden="true">Esc</kbd>`;
+  const dismiss = () => {
+    if (!t.isConnected) return;
+    t.classList.add('leaving');
+    setTimeout(() => t.remove(), 180);
+  };
+  if (actionLabel) {
+    t.querySelector('.toast-action').addEventListener('click', async () => {
+      dismiss();
+      if (onAction) await onAction();
+    });
+  }
+  host.appendChild(t);
+  setTimeout(dismiss, timeout);
+  t._dismiss = dismiss;
+  return t;
+}
+
 // Status is plain colored text; only exceptions get ink (a quietly finished
 // session renders nothing). Live alone gets a dot because it changes as you watch.
 function renderSessionStatus(s) {
-  if (s.status === 'live') return '<span class="st st-live" title="Activity in the last 15 minutes"><i></i>Live</span>';
+  if (s.status === 'live') return '<span class="st st-live" title="Activity in the last 15 minutes">Live</span>';
   if (s.status === 'stale') return '<span class="st st-stale" title="No end was recorded and it has been quiet for over 15 minutes">Stale</span>';
   if (s.ended_reason === 'manual') return '<span class="st st-ended" title="Marked ended in AgentActa">Ended</span>';
   if (s.ended_reason === 'source' && s.source_status && !/^(done|completed?)$/i.test(s.source_status)) {
@@ -472,6 +540,7 @@ function renderSessionItem(s) {
   const headline = s.label || cleanSessionSummary(s.summary, s.initial_prompt);
   return `
     <div class="session-item" data-id="${escHtml(s.id)}" role="link" tabindex="0">
+      ${statusIcon(s)}
       <div class="si-main">
         <div class="si-title">${renderSessionStatus(s)}<span class="si-headline">${escHtml(truncate(headline, 160))}</span></div>
         <div class="si-meta">${renderSessionMeta(s)}</div>
@@ -479,6 +548,7 @@ function renderSessionItem(s) {
       <div class="si-when"><span>${fmtTime(s.start_time)}</span><span class="si-dur">${duration}</span></div>
       <div class="si-counts"><span title="${s.message_count} messages">${fmtCompact(s.message_count)} msg</span><span title="${s.tool_count} tool calls">${fmtCompact(s.tool_count)} tools</span></div>
       <div class="si-action">${canEndSession(s) ? renderEndButton(s) : ''}</div>
+      <span class="si-go" aria-hidden="true">${icon('chevron', 16)}</span>
     </div>
   `;
 }
@@ -489,7 +559,7 @@ function renderSessionList(sessions, { tree = false } = {}) {
 }
 
 function renderEndButton(s) {
-  return `<button class="text-btn" data-end-session="${escHtml(s.id)}" title="Mark ended in AgentActa. This does not stop the agent process; new activity reopens it.">End</button>`;
+  return `<button class="row-btn" data-end-session="${escHtml(s.id)}" title="Mark ended in AgentActa. This does not stop the agent process; new activity reopens it.">${icon('stop', 9)}End</button>`;
 }
 
 function renderChildrenToggle(s, expanded) {
@@ -511,10 +581,11 @@ function renderSubagentRow(s) {
   const when = s.status === 'stale' ? `${fmtTime(s.start_time)} \u00b7 never closed` : `${fmtTime(s.start_time)} \u00b7 ${fmtDuration(s.start_time, s.end_time || s.start_time)}`;
   const title = s.label || cleanSessionSummary(s.summary, s.initial_prompt);
   return `<div class="subagent-row" data-open-session="${escHtml(s.id)}" role="link" tabindex="0">
-    <span class="subagent-status">${renderSessionStatus(s)}</span>
+    <span class="subagent-status">${statusIcon(s)}${renderSessionStatus(s)}</span>
     <span class="subagent-title" title="${escHtml(title)}">${escHtml(truncate(title, 140))}</span>
     <span class="subagent-meta">${when} \u00b7 ${s.message_count} msg \u00b7 ${s.tool_count} tools</span>
     <span class="subagent-action">${canEndSession(s) ? renderEndButton(s) : ''}</span>
+    <span class="si-go" aria-hidden="true">${icon('chevron', 14)}</span>
   </div>`;
 }
 
@@ -548,16 +619,7 @@ async function endSession(id, action = 'end') {
 }
 
 function alertInline(msg) {
-  let el = document.getElementById('inlineToast');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'inlineToast';
-    el.className = 'new-events-indicator';
-    document.body.appendChild(el);
-  }
-  el.textContent = msg;
-  clearTimeout(el._t);
-  el._t = setTimeout(() => el.remove(), 3000);
+  showToast(msg, { tone: 'error' });
 }
 
 // Delegated in the capture phase so these controls never also trigger the
@@ -584,15 +646,25 @@ content.addEventListener('click', async (e) => {
 
   if (endBtn) {
     endBtn.disabled = true;
-    const updated = await endSession(endBtn.dataset.endSession, 'end');
+    const id = endBtn.dataset.endSession;
+    let target = endBtn.closest('.subagent-row') || endBtn.closest('.session-item');
+    const swap = (session) => {
+      if (!target || !target.isConnected) return;
+      const tmp = document.createElement('div');
+      tmp.innerHTML = target.classList.contains('subagent-row') ? renderSubagentRow(session) : renderSessionItem(session);
+      const fresh = tmp.firstElementChild;
+      fresh.classList.add('row-flash');
+      target.replaceWith(fresh);
+      if (fresh.classList.contains('session-item')) fresh.addEventListener('click', () => viewSession(session.id));
+      target = fresh;
+    };
+    const updated = await endSession(id, 'end');
     if (!updated) { endBtn.disabled = false; return; }
-    const target = endBtn.closest('.subagent-row') || endBtn.closest('.session-item');
-    if (!target) return;
-    const tmp = document.createElement('div');
-    tmp.innerHTML = target.classList.contains('subagent-row') ? renderSubagentRow(updated) : renderSessionItem(updated);
-    const fresh = tmp.firstElementChild;
-    target.replaceWith(fresh);
-    if (fresh.classList.contains('session-item')) fresh.addEventListener('click', () => viewSession(updated.id));
+    swap(updated);
+    showToast('Session marked ended', {
+      actionLabel: 'Undo',
+      onAction: async () => { const back = await endSession(id, 'reopen'); if (back) swap(back); },
+    });
     return;
   }
 
@@ -747,7 +819,7 @@ async function viewSessions() {
 
   let html = `<header class="page-head"><h1 class="page-title">Sessions</h1><span class="page-count">${data.total.toLocaleString()} top-level</span></header>`;
   if (data.staleCount > 0) {
-    html += `<p class="stale-note">${data.staleCount} session${data.staleCount === 1 ? '' : 's'} never recorded an end and ${data.staleCount === 1 ? 'has' : 'have'} been quiet for over 15 minutes. <button class="text-btn" id="endStaleBtn">Mark ${data.staleCount === 1 ? 'it' : 'all'} ended</button></p>`;
+    html += `<p class="stale-note">${data.staleCount} session${data.staleCount === 1 ? '' : 's'} never recorded an end and ${data.staleCount === 1 ? 'has' : 'have'} been quiet for over 15 minutes. <button class="row-btn row-btn-warn" id="endStaleBtn">${icon('stop', 9)}Mark ${data.staleCount === 1 ? 'it' : 'all'} ended</button></p>`;
   }
   html += renderSessionList(data.sessions, { tree: true });
   content.innerHTML = html;
@@ -761,7 +833,17 @@ async function viewSessions() {
     endStale.disabled = true;
     const res = await api('/sessions/end-stale', { method: 'POST' });
     if (res._error) { endStale.disabled = false; alertInline(res.error || 'Unable to update sessions'); return; }
-    viewSessions();
+    const ids = res.ids || [];
+    await viewSessions();
+    showToast(`Marked ${ids.length} stale session${ids.length === 1 ? '' : 's'} ended`, {
+      actionLabel: 'Undo',
+      timeout: 10000,
+      onAction: async () => {
+        await Promise.all(ids.map(sid => api(`/sessions/${encodeURIComponent(sid)}/reopen`, { method: 'POST' })));
+        if (location.hash === '#sessions') viewSessions();
+        showToast(`Reopened ${ids.length} session${ids.length === 1 ? '' : 's'}`);
+      },
+    });
   });
 }
 
@@ -798,22 +880,22 @@ async function viewSession(id) {
     : (s.total_tokens ? [`<span>${fmtCompact(s.total_tokens)} tokens</span>`] : []);
   let html = `
     <button class="back-btn" id="backBtn">\u2190 Back</button>
-    ${parent ? `<button class="session-parent-link" id="parentSessionLink" title="Open parent session">Subagent of <span>${escHtml(truncate(parent.label || cleanSessionSummary(parent.summary, parent.initial_prompt), 90))}</span></button>` : ''}
+    ${parent ? `<button class="session-parent-link" id="parentSessionLink" title="Open parent session">${icon('up', 13)}Subagent of <span>${escHtml(truncate(parent.label || cleanSessionSummary(parent.summary, parent.initial_prompt), 90))}</span></button>` : ''}
     <header class="detail-head">
       <h1 class="page-title detail-title">${escHtml(truncate(headline, 240))}</h1>
       <p class="detail-meta">${renderSessionMeta(s)}<span class="sep" aria-hidden="true"> \u00b7 </span>${fmtDate(s.start_time)}, ${fmtTimeShort(s.start_time)} \u2013 ${endText}${spanText}</p>
       <p class="detail-stats"><span>${s.message_count.toLocaleString()} messages</span><span>${s.tool_count.toLocaleString()} tool calls</span>${tokenStats.join('')}</p>
       <div class="detail-actions">
         <span id="sessionStatusSlot" class="detail-status"></span>
-        ${s.first_message_id ? `<button class="btn" id="jumpToStartBtn" title="Scroll to the first user prompt">Initial prompt</button>` : ''}
-        <span class="export-links">Export
-          <a href="#" onclick="dlExport('/api/export/session/${id}?format=md','session.md');return false">Markdown</a>
-          <a href="#" onclick="dlExport('/api/export/session/${id}?format=json','session.json');return false">JSON</a>
-          ${data.hasArchive ? `<a href="#" onclick="dlExport('/api/archive/export/${id}','session.jsonl');return false">JSONL</a>` : ''}
+        ${s.first_message_id ? `<button class="btn" id="jumpToStartBtn" title="Scroll to the first user prompt">${icon('toStart', 12)}Initial prompt</button>` : ''}
+        <span class="btn-group" role="group" aria-label="Export">
+          <button class="btn" onclick="dlExport('/api/export/session/${id}?format=md','session.md')" title="Download as Markdown">${icon('download', 12)}Markdown</button>
+          <button class="btn" onclick="dlExport('/api/export/session/${id}?format=json','session.json')" title="Download as JSON">JSON</button>
+          ${data.hasArchive ? `<button class="btn" onclick="dlExport('/api/archive/export/${id}','session.jsonl')" title="Download raw JSONL">JSONL</button>` : ''}
         </span>
         <span class="session-id-row">
           <code class="session-id-value" title="${escHtml(id)}">${escHtml(id)}</code>
-          <button class="session-id-copy" id="copySessionId" title="Copy session ID" aria-label="Copy session ID"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button>
+          <button class="session-id-copy" id="copySessionId" title="Copy session ID" aria-label="Copy session ID">${icon('copy', 13)}</button>
           <span class="session-id-copied" id="copyConfirm" role="status">Copied</span>
         </span>
       </div>
@@ -1208,11 +1290,19 @@ async function viewSession(id) {
     if (!slot) return;
     const st = { ...s, ...sessionState };
     slot.innerHTML = `
-      ${renderSessionStatus(st)}
-      ${canEndSession(st) ? `<button class="btn" id="endSessionBtn" title="Marks the session ended in AgentActa and stops following it. AgentActa cannot stop the agent process; new activity reopens it.">Mark ended</button>` : ''}
-      ${st.ended_reason === 'manual' ? `<button class="btn" id="reopenSessionBtn" title="Clear the ended mark">Reopen</button>` : ''}
-      <button class="btn" id="followToggleBtn" title="${following ? 'New events are streaming into this page' : 'New events are not being streamed into this page'}">${following ? 'Pause updates' : 'Resume updates'}</button>
+      <span class="detail-state">${statusIcon(st)}${renderSessionStatus(st) || '<span class="st st-ended">Finished</span>'}</span>
+      ${canEndSession(st) ? `<button class="btn btn-danger" id="endSessionBtn" title="Marks the session ended in AgentActa and stops following it. AgentActa cannot stop the agent process; new activity reopens it.">${icon('stop', 10)}Mark ended</button>` : ''}
+      ${st.ended_reason === 'manual' ? `<button class="btn" id="reopenSessionBtn" title="Clear the ended mark">${icon('undo', 12)}Reopen</button>` : ''}
+      <button class="btn" id="followToggleBtn" title="${following ? 'New events stream into this page as they are indexed' : 'New events are not being streamed into this page'}">${following ? `${icon('pause', 12)}Pause updates` : `${icon('play', 12)}Resume updates`}</button>
     `;
+    const reopen = async () => {
+      const updated = await endSession(id, 'reopen');
+      if (!updated) return false;
+      sessionState = { ...sessionState, status: updated.status, ended_reason: updated.ended_reason, ended_at: updated.ended_at };
+      startFollowing();
+      renderStatusControls();
+      return true;
+    };
     const endBtn = document.getElementById('endSessionBtn');
     if (endBtn) endBtn.onclick = async () => {
       endBtn.disabled = true;
@@ -1220,15 +1310,12 @@ async function viewSession(id) {
       if (!updated) { endBtn.disabled = false; return; }
       sessionState = { ...sessionState, status: updated.status, ended_reason: updated.ended_reason, ended_at: updated.ended_at };
       stopFollowing();
+      showToast('Session marked ended; live updates paused', { actionLabel: 'Undo', onAction: reopen });
     };
     const reopenBtn = document.getElementById('reopenSessionBtn');
     if (reopenBtn) reopenBtn.onclick = async () => {
       reopenBtn.disabled = true;
-      const updated = await endSession(id, 'reopen');
-      if (!updated) { reopenBtn.disabled = false; return; }
-      sessionState = { ...sessionState, status: updated.status, ended_reason: updated.ended_reason, ended_at: updated.ended_at };
-      startFollowing();
-      renderStatusControls();
+      if (!(await reopen())) reopenBtn.disabled = false;
     };
     const followBtn = document.getElementById('followToggleBtn');
     if (followBtn) followBtn.onclick = () => (following ? stopFollowing() : startFollowing());
@@ -2159,8 +2246,40 @@ document.addEventListener('keydown', e => {
     else openCmdk();
     return;
   }
-  if (e.key === 'Escape' && window._cmdk.open) { e.preventDefault(); closeCmdk(); }
+  if (e.key === 'Escape' && window._cmdk.open) { e.preventDefault(); closeCmdk(); return; }
+  handleListKeys(e);
 });
+
+// Keyboard-first navigation: J/K (or arrows once a row has focus) move
+// between rows, Enter opens, Esc dismisses a toast or goes back, / searches.
+const NAV_ROWS = '.session-item[data-id], .subagent-row, .result-item, .file-group-header, .file-item, .tl-session';
+function handleListKeys(e) {
+  if (window._cmdk && window._cmdk.open) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+
+  if (e.key === '/') { e.preventDefault(); openCmdk(); return; }
+  if (e.key === 'Escape') {
+    const toasts = document.querySelectorAll('.toast:not(.leaving)');
+    if (toasts.length) { toasts[toasts.length - 1]._dismiss?.(); return; }
+    const back = document.getElementById('backBtn');
+    if (back) { e.preventDefault(); back.click(); }
+    return;
+  }
+
+  const onRow = t && t.matches && t.matches(NAV_ROWS);
+  const down = e.key === 'j' || (onRow && e.key === 'ArrowDown');
+  const up = e.key === 'k' || (onRow && e.key === 'ArrowUp');
+  if (!down && !up) return;
+  const rows = $$(NAV_ROWS, content).filter(r => r.offsetParent !== null);
+  if (!rows.length) return;
+  e.preventDefault();
+  const i = rows.indexOf(document.activeElement);
+  const next = i === -1 ? rows[0] : rows[Math.max(0, Math.min(rows.length - 1, i + (down ? 1 : -1)))];
+  next.focus({ preventScroll: true });
+  next.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
 handleRoute();
 
 // Swipe right from left edge to go back

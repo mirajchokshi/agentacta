@@ -512,7 +512,8 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       const upsert: Database.Statement = db.prepare('INSERT OR REPLACE INTO session_overrides (session_id, ended_at, reason) VALUES (?, ?, ?)');
       db.transaction(() => { for (const sid of ids) upsert.run(sid, endedAt, 'stale'); })();
       for (const sid of ids) notifySessionStatus(sid);
-      json(res, { ok: true, ended: ids.length });
+      // ids lets the UI offer Undo (reopen each).
+      json(res, { ok: true, ended: ids.length, ids });
     }
 
     else if (pathname.match(/^\/api\/sessions\/[^/]+\/(end|reopen)$/)) {
