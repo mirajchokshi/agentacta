@@ -444,12 +444,14 @@ function renderModelTags(s) {
 
 const expandedSessionGroups = new Set();
 
+// Status is plain colored text; only exceptions get ink (a quietly finished
+// session renders nothing). Live alone gets a dot because it changes as you watch.
 function renderSessionStatus(s) {
-  if (s.status === 'live') return '<span class="session-status status-live" title="Activity in the last 15 minutes"><i></i>Live</span>';
-  if (s.status === 'stale') return '<span class="session-status status-stale" title="No end was recorded and it has been quiet for over 15 minutes">Stale</span>';
-  if (s.ended_reason === 'manual') return '<span class="session-status status-ended" title="Marked ended in AgentActa">Ended</span>';
+  if (s.status === 'live') return '<span class="st st-live" title="Activity in the last 15 minutes"><i></i>Live</span>';
+  if (s.status === 'stale') return '<span class="st st-stale" title="No end was recorded and it has been quiet for over 15 minutes">Stale</span>';
+  if (s.ended_reason === 'manual') return '<span class="st st-ended" title="Marked ended in AgentActa">Ended</span>';
   if (s.ended_reason === 'source' && s.source_status && !/^(done|completed?)$/i.test(s.source_status)) {
-    return `<span class="session-status status-failed">${escHtml(s.source_status)}</span>`;
+    return `<span class="st st-failed">${escHtml(s.source_status)}</span>`;
   }
   return '';
 }
@@ -484,35 +486,60 @@ function renderSessionItem(s) {
           <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> ${s.message_count}</span>
           <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> ${s.tool_count}</span>
         </span>
-        ${canEndSession(s) ? `<button class="session-end-btn" data-end-session="${escHtml(s.id)}" title="Mark this session ended in AgentActa. This does not stop the agent process; new activity reopens it.">End</button>` : ''}
+        ${canEndSession(s) ? renderEndButton(s) : ''}
       </div>
     </div>
   `;
 }
 
-function renderChildrenToggle(s, expanded) {
-  const n = s.child_count || 0;
-  const extra = (s.descendant_count || 0) > n ? ` \u00b7 ${s.descendant_count} total` : '';
-  const live = s.live_descendant_count ? ` \u00b7 <span class="children-live">${s.live_descendant_count} live</span>` : '';
-  return `<button class="session-children-toggle${expanded ? ' expanded' : ''}" data-toggle-children="${escHtml(s.id)}" aria-expanded="${expanded}">
-    <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>
-    ${n} subagent${n === 1 ? '' : 's'}${extra}${live}
-  </button>`;
+function renderEndButton(s) {
+  return `<button class="text-btn" data-end-session="${escHtml(s.id)}" title="Mark ended in AgentActa. This does not stop the agent process; new activity reopens it.">End</button>`;
 }
 
-// A session card plus its collapsible subagent tree. Groups with a live
-// descendant start expanded so running work is visible at a glance.
-function renderSessionTree(s, depth = 0) {
+function renderChildrenToggle(s, expanded) {
+  const n = s.child_count || 0;
+  const extra = (s.descendant_count || 0) > n ? ` (${s.descendant_count} total)` : '';
+  const live = s.live_descendant_count ? `, <span class="st-live">${s.live_descendant_count} live</span>` : '';
+  return `<button class="subagent-toggle" data-toggle-children="${escHtml(s.id)}" aria-expanded="${expanded}">${n} subagent${n === 1 ? '' : 's'}${extra}${live}</button>`;
+}
+
+function isGroupExpanded(s) {
+  if (expandedSessionGroups.has(s.id)) return true;
+  if (expandedSessionGroups.has('!' + s.id)) return false;
+  return s.live_descendant_count > 0;
+}
+
+// One line per subagent: status, title, when, how much. Columns line up so a
+// long list can be scanned; the parent card already carries tags and models.
+function renderSubagentRow(s) {
+  const when = s.status === 'stale' ? `${fmtTime(s.start_time)} \u00b7 never closed` : `${fmtTime(s.start_time)} \u00b7 ${fmtDuration(s.start_time, s.end_time || s.start_time)}`;
+  const title = s.label || cleanSessionSummary(s.summary, s.initial_prompt);
+  return `<div class="subagent-row" data-open-session="${escHtml(s.id)}" role="link" tabindex="0">
+    <span class="subagent-status">${renderSessionStatus(s)}</span>
+    <span class="subagent-title" title="${escHtml(title)}">${escHtml(truncate(title, 140))}</span>
+    <span class="subagent-meta">${when} \u00b7 ${s.message_count} msg \u00b7 ${s.tool_count} tools</span>
+    <span class="subagent-action">${canEndSession(s) ? renderEndButton(s) : ''}</span>
+  </div>`;
+}
+
+function renderSubagentList(kids, hidden) {
+  return `<div class="subagent-list"${hidden ? ' hidden' : ''}>${kids.map(renderSubagentNode).join('')}</div>`;
+}
+
+function renderSubagentNode(s) {
+  const kids = Array.isArray(s.children) ? s.children : [];
+  if (!kids.length) return renderSubagentRow(s);
+  const open = isGroupExpanded(s);
+  return renderSubagentRow(s) + renderChildrenToggle(s, open) + renderSubagentList(kids, !open);
+}
+
+// A top-level session card with its subagents listed beneath it. Groups with
+// a live descendant start expanded so running work is visible at a glance.
+function renderSessionTree(s) {
   const kids = Array.isArray(s.children) ? s.children : [];
   if (!kids.length) return renderSessionItem(s);
-  const expanded = expandedSessionGroups.has(s.id) || (!expandedSessionGroups.has('!' + s.id) && s.live_descendant_count > 0);
-  return `<div class="session-group" data-group-id="${escHtml(s.id)}">
-    ${renderSessionItem(s)}
-    ${renderChildrenToggle(s, expanded)}
-    <div class="session-children"${expanded ? '' : ' hidden'}>
-      ${kids.map(k => renderSessionTree(k, depth + 1)).join('')}
-    </div>
-  </div>`;
+  const open = isGroupExpanded(s);
+  return `<div class="session-group">${renderSessionItem(s)}${renderChildrenToggle(s, open)}${renderSubagentList(kids, !open)}</div>`;
 }
 
 async function endSession(id, action = 'end') {
@@ -542,36 +569,47 @@ function alertInline(msg) {
 content.addEventListener('click', async (e) => {
   const toggle = e.target.closest('[data-toggle-children]');
   const endBtn = e.target.closest('[data-end-session]');
-  if (!toggle && !endBtn) return;
+  const row = e.target.closest('[data-open-session]');
+  if (!toggle && !endBtn && !row) return;
   e.stopPropagation();
   e.preventDefault();
 
   if (toggle) {
     const id = toggle.dataset.toggleChildren;
-    const group = toggle.closest('.session-group');
-    const kids = group && group.querySelector(':scope > .session-children');
-    if (!kids) return;
-    const open = kids.hasAttribute('hidden');
-    kids.toggleAttribute('hidden', !open);
-    toggle.classList.toggle('expanded', open);
+    const list = toggle.nextElementSibling;
+    if (!list || !list.classList.contains('subagent-list')) return;
+    const open = list.hasAttribute('hidden');
+    list.toggleAttribute('hidden', !open);
     toggle.setAttribute('aria-expanded', String(open));
     if (open) { expandedSessionGroups.add(id); expandedSessionGroups.delete('!' + id); }
     else { expandedSessionGroups.delete(id); expandedSessionGroups.add('!' + id); }
     return;
   }
 
-  endBtn.disabled = true;
-  const updated = await endSession(endBtn.dataset.endSession, 'end');
-  if (!updated) { endBtn.disabled = false; return; }
-  const item = endBtn.closest('.session-item');
-  if (item) {
+  if (endBtn) {
+    endBtn.disabled = true;
+    const updated = await endSession(endBtn.dataset.endSession, 'end');
+    if (!updated) { endBtn.disabled = false; return; }
+    const target = endBtn.closest('.subagent-row') || endBtn.closest('.session-item');
+    if (!target) return;
     const tmp = document.createElement('div');
-    tmp.innerHTML = renderSessionItem(updated);
+    tmp.innerHTML = target.classList.contains('subagent-row') ? renderSubagentRow(updated) : renderSessionItem(updated);
     const fresh = tmp.firstElementChild;
-    item.replaceWith(fresh);
-    fresh.addEventListener('click', () => viewSession(updated.id));
+    target.replaceWith(fresh);
+    if (fresh.classList.contains('session-item')) fresh.addEventListener('click', () => viewSession(updated.id));
+    return;
   }
+
+  viewSession(row.dataset.openSession);
 }, true);
+
+content.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const row = e.target.closest && e.target.closest('[data-open-session]');
+  if (!row || e.target !== row) return;
+  e.preventDefault();
+  viewSession(row.dataset.openSession);
+});
 
 async function viewSearch(query = '') {
   clearJumpUi();
@@ -736,10 +774,7 @@ async function viewSessions() {
 
   let html = `<div class="page-title">Sessions</div>`;
   if (data.staleCount > 0) {
-    html += `<div class="stale-banner">
-      <span>${data.staleCount} session${data.staleCount === 1 ? '' : 's'} never recorded an end and ${data.staleCount === 1 ? 'has' : 'have'} been quiet for over 15 minutes.</span>
-      <button class="session-end-btn" id="endStaleBtn">Mark all ended</button>
-    </div>`;
+    html += `<p class="stale-note">${data.staleCount} session${data.staleCount === 1 ? '' : 's'} never recorded an end and ${data.staleCount === 1 ? 'has' : 'have'} been quiet for over 15 minutes. <button class="text-btn" id="endStaleBtn">Mark ${data.staleCount === 1 ? 'it' : 'all'} ended</button></p>`;
   }
   html += data.sessions.map(s => renderSessionTree(s)).join('');
   content.innerHTML = html;
@@ -825,15 +860,10 @@ async function viewSession(id) {
       ` : ''}
     </div>
     ${children.length ? `
-      <div class="session-group detail-children" data-group-id="${escHtml(id)}">
-        <button class="section-label session-children-heading${childrenCollapsed ? '' : ' expanded'}" data-toggle-children="${escHtml(id)}" aria-expanded="${!childrenCollapsed}">
-          <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>
-          Subagents (${children.length}${childTotal > children.length ? ` \u00b7 ${childTotal} total` : ''})
-        </button>
-        <div class="session-children"${childrenCollapsed ? ' hidden' : ''}>
-          ${children.map(c => renderSessionTree(c)).join('')}
-        </div>
-      </div>
+      <section class="detail-subagents">
+        <button class="section-label subagent-heading" data-toggle-children="${escHtml(id)}" aria-expanded="${!childrenCollapsed}">Subagents (${children.length}${childTotal > children.length ? `, ${childTotal} total` : ''})</button>
+        ${renderSubagentList(children, childrenCollapsed)}
+      </section>
     ` : ''}
     <div class="section-label" id="sessionEventsLabel">Events</div>
     <div id="eventsContainer"></div>
@@ -961,9 +991,6 @@ async function viewSession(id) {
 
   const parentLink = $('#parentSessionLink');
   if (parentLink) parentLink.addEventListener('click', () => viewSession(parent.id));
-  $$('.detail-children .session-item').forEach(item => {
-    item.addEventListener('click', () => viewSession(item.dataset.id));
-  });
 
   $('#copySessionId').addEventListener('click', async () => {
     const conf = $('#copyConfirm');
@@ -1217,9 +1244,9 @@ async function viewSession(id) {
     const st = { ...s, ...sessionState };
     slot.innerHTML = `
       ${renderSessionStatus(st)}
-      ${canEndSession(st) ? `<button class="export-btn session-action-btn danger" id="endSessionBtn" title="Marks the session ended in AgentActa and stops following it. AgentActa cannot stop the agent process; new activity reopens it.">Mark ended</button>` : ''}
+      ${canEndSession(st) ? `<button class="export-btn session-action-btn" id="endSessionBtn" title="Marks the session ended in AgentActa and stops following it. AgentActa cannot stop the agent process; new activity reopens it.">Mark ended</button>` : ''}
       ${st.ended_reason === 'manual' ? `<button class="export-btn session-action-btn" id="reopenSessionBtn" title="Clear the ended mark">Reopen</button>` : ''}
-      <button class="export-btn session-action-btn" id="followToggleBtn" title="${following ? 'Stop streaming new events into this page' : 'Stream new events into this page as they are indexed'}">${following ? '<i class="follow-dot"></i>Following' : 'Follow live'}</button>
+      <button class="export-btn session-action-btn" id="followToggleBtn" aria-pressed="${following}" title="${following ? 'New events are streaming into this page' : 'New events are not being streamed into this page'}">${following ? 'Pause updates' : 'Resume updates'}</button>
     `;
     const endBtn = document.getElementById('endSessionBtn');
     if (endBtn) endBtn.onclick = async () => {

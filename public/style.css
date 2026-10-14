@@ -2098,155 +2098,163 @@ mark {
 [data-theme="dark"] .confusion-red    { background: #7f1d1d; color: #fca5a5; }
 
 
-/* ---- Session status (live / stale / ended) ---- */
-.session-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  font-weight: 500;
-  padding: 1px 8px;
-  border-radius: 10px;
-  margin-right: 8px;
-  vertical-align: 1px;
+/* ---- Session status: text, not badges ---- */
+.st {
   font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  margin-right: 8px;
 }
-.session-status.status-live { color: var(--green); background: var(--green-soft); }
-.session-status.status-live i,
-.follow-dot {
+.st-live { color: var(--green); }
+.st-stale { color: var(--amber); }
+.st-ended { color: var(--text-secondary); }
+.st-failed { color: var(--red); }
+.st-live i {
+  display: inline-block;
   width: 6px;
   height: 6px;
+  margin-right: 5px;
   border-radius: 50%;
-  background: var(--green);
-  display: inline-block;
+  background: currentColor;
+  vertical-align: 1px;
   animation: live-pulse 1.6s var(--ease-in-out) infinite;
 }
-.follow-dot { margin-right: 6px; vertical-align: 1px; }
-.session-status.status-stale { color: var(--amber); background: var(--amber-soft); }
-.session-status.status-ended { color: var(--text-secondary); background: var(--bg-elevated); border: 1px solid var(--border-default); }
-.session-status.status-failed { color: var(--red); background: var(--red-soft); }
+@keyframes live-pulse { 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) { .st-live i { animation: none; } }
 
-@keyframes live-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .session-status.status-live i, .follow-dot { animation: none; }
-}
-
-.session-end-btn {
-  font-size: 11px;
+/* Quiet inline action: reads as a link-weight control, not a button slab. */
+.text-btn {
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
   font-weight: 500;
-  font-family: var(--font-sans);
   color: var(--text-secondary);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  padding: 3px 10px;
+  background: none;
+  border: none;
   cursor: pointer;
-  transition: all var(--duration-normal) var(--ease-out);
 }
-.session-end-btn:hover,
-.session-action-btn.danger:hover {
-  color: var(--red);
-  border-color: var(--red);
-  background: var(--red-soft);
-}
-.session-end-btn:disabled,
-.session-action-btn:disabled { opacity: 0.5; cursor: default; }
-.session-action-btn { display: inline-flex; align-items: center; }
+.text-btn:hover, .text-btn:focus-visible { color: var(--text-primary); text-decoration: underline; text-underline-offset: 3px; }
+.text-btn:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
 
-.stale-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-md);
-  padding: var(--space-md) var(--space-lg);
-  margin-bottom: var(--space-lg);
-  border: 1px solid var(--border-subtle);
-  border-left: 3px solid var(--amber);
-  border-radius: var(--radius-md);
-  background: var(--bg-surface);
+.stale-note {
+  margin: 0 0 var(--space-lg);
   font-size: 13px;
   color: var(--text-secondary);
 }
+.stale-note .text-btn { font-size: 13px; color: var(--amber); margin-left: 4px; }
 
-/* ---- Nested subagent sessions ---- */
+/* ---- Subagents: a dense list under the parent, indented to show nesting ---- */
 .session-group { margin-bottom: var(--space-sm); }
 .session-group > .session-item { margin-bottom: 0; }
-.session-group:not(.detail-children) > .session-item {
-  border-bottom-left-radius: 0;
-  border-bottom-right-radius: 0;
-}
 
-.session-children-toggle,
-.session-children-heading {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-family: var(--font-sans);
-  cursor: pointer;
-}
-.session-children-toggle {
-  width: 100%;
-  font-size: 12px;
-  color: var(--text-secondary);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  border-top: none;
-  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
-  padding: 6px var(--space-xl);
-  text-align: left;
-  transition: all var(--duration-normal) var(--ease-out);
-}
-.session-children-toggle:hover { color: var(--text-primary); background: var(--bg-hover); }
-.session-children-heading {
-  background: none;
-  border: none;
-  padding: 0;
-  margin-bottom: var(--space-md);
-}
-.session-children-heading:hover { color: var(--text-primary); }
-.session-children-toggle .chev,
-.session-children-heading .chev { transition: transform var(--duration-normal) var(--ease-out); flex-shrink: 0; }
-.session-children-toggle.expanded .chev,
-.session-children-heading.expanded .chev { transform: rotate(90deg); }
-.children-live { color: var(--green); }
-
-.session-children {
-  margin: var(--space-sm) 0 0 var(--space-lg);
-  padding-left: var(--space-md);
-  border-left: 2px solid var(--border-default);
-}
-.session-children[hidden] { display: none; }
-.detail-children { margin-bottom: var(--space-xl); }
-.detail-children > .session-children { margin-left: 0; margin-top: 0; }
-.session-children .session-item { padding: var(--space-md) var(--space-lg); }
-.session-children .session-children-toggle { padding-left: var(--space-lg); }
-
-.session-parent-link {
+.subagent-toggle,
+.subagent-heading {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  padding: 6px 0;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+/* Disclosure triangle: the only cue that the line expands. */
+.subagent-toggle::before,
+.subagent-heading::before {
+  content: '';
+  width: 0;
+  height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+.subagent-toggle[aria-expanded="true"]::before,
+.subagent-heading[aria-expanded="true"]::before { transform: rotate(90deg); }
+.subagent-toggle:hover, .subagent-heading:hover { color: var(--text-primary); }
+.subagent-toggle:focus-visible, .subagent-heading:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 2px; border-radius: 2px; }
+.session-group > .subagent-toggle { margin-left: var(--space-xl); }
+.subagent-heading { margin-bottom: var(--space-xs); }
+
+/* The list is one grid and each row a subgrid, so status, title, timing and
+   action line up across siblings; the status column is only as wide as the
+   widest status present (zero when every child finished normally). */
+.subagent-list {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  column-gap: var(--space-md);
+  margin: 0 0 var(--space-sm) var(--space-xl);
+  border-left: 1px solid var(--border-default);
+}
+.subagent-list[hidden] { display: none; }
+.subagent-list > .subagent-toggle,
+.subagent-list > .subagent-list { grid-column: 2 / -1; justify-self: start; margin-left: 0; }
+.subagent-list > .subagent-list { justify-self: stretch; }
+.detail-subagents { margin-bottom: var(--space-xl); }
+.detail-subagents > .subagent-list { margin-left: 0; border-left: none; }
+
+.subagent-row {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  align-items: baseline;
+  padding: 7px var(--space-md);
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.subagent-row:hover { background: var(--bg-hover); }
+.subagent-row:focus-visible { outline: 2px solid var(--border-focus); outline-offset: -2px; }
+.subagent-row .st { margin-right: 0; }
+.subagent-title {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subagent-meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.subagent-action { text-align: right; }
+
+.session-parent-link {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
   max-width: 100%;
   margin-bottom: var(--space-sm);
   padding: 0;
-  font-size: 12px;
   font-family: var(--font-sans);
+  font-size: 12px;
   color: var(--text-secondary);
   background: none;
   border: none;
   cursor: pointer;
 }
 .session-parent-link span {
-  color: var(--accent);
+  color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.session-parent-link:hover span { text-decoration: underline; }
+.session-parent-link:hover span { text-decoration: underline; text-underline-offset: 3px; }
 
 @media (max-width: 768px) {
-  .session-children { margin-left: var(--space-xs); padding-left: var(--space-sm); }
-  .stale-banner { flex-direction: column; align-items: flex-start; }
+  .session-group > .subagent-toggle { margin-left: var(--space-lg); }
+  .subagent-list { display: block; margin-left: var(--space-sm); }
+  .subagent-list > .subagent-toggle,
+  .subagent-list > .subagent-list { margin-left: var(--space-md); }
+  /* Narrow screens: plain flow. Status reads inline before the title, timing
+     drops to its own line, and End stays pinned top-right. */
+  .subagent-row { display: block; position: relative; }
+  .subagent-row:has(.text-btn) { padding-right: 3.5rem; }
+  .subagent-row .st { margin-right: 6px; }
+  .subagent-title { white-space: normal; }
+  .subagent-meta { display: block; margin-top: 2px; white-space: normal; }
+  .subagent-action { position: absolute; top: 7px; right: var(--space-md); }
 }
