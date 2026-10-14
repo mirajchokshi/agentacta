@@ -445,6 +445,16 @@ function indexCronRunFile(db: Database.Database, filePath: string, agentName: st
   return { sessionId, synthetic: true };
 }
 
+// Claude Code transcripts have no header. Newer versions open with metadata
+// lines (mode, permission-mode, agent-setting, ai-title, ...) before the first
+// message; every line carries the sessionId.
+const CLAUDE_CODE_LINE_TYPES = new Set(['user', 'assistant', 'system', 'summary', 'file-history-snapshot', 'queue-operation', 'mode', 'permission-mode', 'agent-setting', 'ai-title', 'custom-title', 'attachment']);
+
+function isClaudeCodeFirstLine(line: JsonlLine): boolean {
+  if (line.type && CLAUDE_CODE_LINE_TYPES.has(line.type)) return true;
+  return typeof line.sessionId === 'string' && line.type !== 'session' && line.type !== 'session_meta';
+}
+
 function indexFile(db: Database.Database, filePath: string, agentName: string, stmts: PreparedStatements, archiveMode: boolean, config: AgentActaConfig): IndexResult {
   const stat = fs.statSync(filePath);
   const mtime = stat.mtime.toISOString();
@@ -510,7 +520,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
     if (firstLine.agent) agent = firstLine.agent;
     if (firstLine.sessionType) sessionType = firstLine.sessionType;
     if (sessionId && sessionId.includes('subagent')) sessionType = 'subagent';
-  } else if (firstLine.type === 'user' || firstLine.type === 'assistant' || firstLine.type === 'file-history-snapshot' || firstLine.type === 'queue-operation') {
+  } else if (isClaudeCodeFirstLine(firstLine)) {
     // Claude Code format — no session header, extract from first message or queue-operation line
     isClaudeCode = true;
     for (const line of lines) {
