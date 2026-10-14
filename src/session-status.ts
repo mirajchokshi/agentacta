@@ -4,10 +4,8 @@
 // running", so liveness is inferred. A session is:
 //   live   - activity within LIVE_WINDOW_MS (same window as Overview "Active Now")
 //   stale  - never recorded an end (end_time NULL) and has been quiet past the window
-//   ended  - marked ended by the user, reported finished by its source
-//            (OpenClaw done/failed/killed), or simply quiet past the window
-// A manual "mark ended" only holds until new activity arrives after it; if the
-// agent keeps writing, the session shows live again.
+//   ended  - reported finished by its source (OpenClaw done/failed/killed), or
+//            simply quiet past the window
 
 import type { SessionRow } from './types.js';
 
@@ -18,7 +16,7 @@ const TERMINAL_SOURCE_STATUSES = new Set([
 ]);
 
 export type SessionStatus = 'live' | 'stale' | 'ended';
-export type EndedReason = 'manual' | 'source' | 'inactive' | null;
+export type EndedReason = 'source' | 'inactive' | null;
 
 export interface StatusFields {
   status: SessionStatus;
@@ -26,22 +24,14 @@ export interface StatusFields {
   ended_at: string | null;
 }
 
-export interface SessionWithOverride extends SessionRow {
-  override_ended_at?: string | null;
-}
 
 function toMs(ts: string | null | undefined): number {
   if (!ts) return NaN;
   return Date.parse(ts);
 }
 
-export function computeSessionStatus(s: SessionWithOverride, nowMs: number = Date.now()): StatusFields {
+export function computeSessionStatus(s: SessionRow, nowMs: number = Date.now()): StatusFields {
   const lastMs = toMs(s.end_time || s.start_time);
-  const overrideMs = toMs(s.override_ended_at);
-
-  if (Number.isFinite(overrideMs) && !(lastMs > overrideMs)) {
-    return { status: 'ended', ended_reason: 'manual', ended_at: s.override_ended_at as string };
-  }
   if (s.source_status && TERMINAL_SOURCE_STATUSES.has(s.source_status.toLowerCase())) {
     return { status: 'ended', ended_reason: 'source', ended_at: s.end_time };
   }
@@ -54,9 +44,8 @@ export function computeSessionStatus(s: SessionWithOverride, nowMs: number = Dat
   return { status: 'ended', ended_reason: 'inactive', ended_at: s.end_time };
 }
 
-export function withStatus<T extends SessionWithOverride>(s: T, nowMs: number = Date.now()): Omit<T, 'override_ended_at'> & StatusFields {
-  const { override_ended_at: _omit, ...rest } = s;
-  return { ...rest, ...computeSessionStatus(s, nowMs) };
+export function withStatus<T extends SessionRow>(s: T, nowMs: number = Date.now()): T & StatusFields {
+  return { ...s, ...computeSessionStatus(s, nowMs) };
 }
 
 export interface SessionTreeNode {

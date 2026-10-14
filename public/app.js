@@ -455,14 +455,11 @@ const expandedSessionGroups = new Set();
 
 const ICON_PATHS = {
   chevron: '<path d="m9 18 6-6-6-6"/>',
-  stop: '<rect x="5" y="5" width="14" height="14" rx="1.5" fill="currentColor" stroke="none"/>',
-  check: '<path d="M20 6 9 17l-5-5"/>',
   pause: '<rect x="7" y="5" width="3.5" height="14" rx="1"/><rect x="13.5" y="5" width="3.5" height="14" rx="1"/>',
   play: '<path d="M7 4.5v15l12-7.5z"/>',
   toStart: '<path d="M5 3h14"/><path d="m18 13-6-6-6 6"/><path d="M12 7v14"/>',
   download: '<path d="M12 15V3"/><path d="m7 10 5 5 5-5"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>',
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
-  undo: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
   up: '<path d="M14 9 9 4 4 9"/><path d="M20 20h-7a4 4 0 0 1-4-4V4"/>',
 };
 
@@ -471,73 +468,33 @@ function icon(name, size = 14) {
 }
 
 // A status glyph in a fixed leading column, readable at a glance: a pulsing
-// dot while live, a dashed ring when stale, a check when it finished, a stop
-// square when someone ended it, an x when the source says it failed.
+// dot while live, a dashed ring when stale, a check when it finished, an x
+// when the source says it failed.
 function statusIcon(s) {
   let kind = 'done';
   let label = 'Finished';
   if (s.status === 'live') { kind = 'live'; label = 'Live: activity in the last 15 minutes'; }
   else if (s.status === 'stale') { kind = 'stale'; label = 'Stale: never recorded an end'; }
-  else if (s.ended_reason === 'manual') { kind = 'done'; label = 'Marked done in AgentActa'; }
   else if (s.ended_reason === 'source' && s.source_status && !/^(done|completed?)$/i.test(s.source_status)) { kind = 'failed'; label = s.source_status; }
   const g = {
     live: '<circle class="ring" cx="8" cy="8" r="3.5"/><circle cx="8" cy="8" r="3.5" fill="currentColor" stroke="none"/>',
     stale: '<circle cx="8" cy="8" r="5.5" stroke-dasharray="2.4 2.2"/>',
     done: '<circle cx="8" cy="8" r="5.5"/><path d="M5.7 8.2l1.6 1.6 3.1-3.3"/>',
-    stopped: '<circle cx="8" cy="8" r="5.5"/><rect x="6" y="6" width="4" height="4" rx="0.6" fill="currentColor" stroke="none"/>',
     failed: '<circle cx="8" cy="8" r="6" fill="currentColor" stroke="none"/><path d="M6 6l4 4M10 6l-4 4" stroke="var(--bg-surface)"/>',
   }[kind];
   return `<span class="sicon sicon-${kind}" title="${escHtml(label)}" role="img" aria-label="${escHtml(label)}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${g}</svg></span>`;
 }
 
-// Bottom-center confirmation with an optional action (Undo). Replaces the
-// previous auto-dismissing error pill so every mutation gives feedback.
-function showToast(message, { actionLabel, onAction, tone = 'default', timeout = 6000 } = {}) {
-  let host = document.getElementById('toastHost');
-  if (!host) {
-    host = document.createElement('div');
-    host.id = 'toastHost';
-    host.className = 'toast-host';
-    host.setAttribute('role', 'status');
-    host.setAttribute('aria-live', 'polite');
-    document.body.appendChild(host);
-  }
-  const t = document.createElement('div');
-  t.className = `toast toast-${tone}`;
-  t.innerHTML = `<span class="toast-msg">${escHtml(message)}</span>${actionLabel ? `<button class="toast-action">${icon('undo', 13)}${escHtml(actionLabel)}</button>` : ''}<kbd class="toast-dismiss" aria-hidden="true">Esc</kbd>`;
-  const dismiss = () => {
-    if (!t.isConnected) return;
-    t.classList.add('leaving');
-    setTimeout(() => t.remove(), 180);
-  };
-  if (actionLabel) {
-    t.querySelector('.toast-action').addEventListener('click', async () => {
-      dismiss();
-      if (onAction) await onAction();
-    });
-  }
-  host.appendChild(t);
-  setTimeout(dismiss, timeout);
-  t._dismiss = dismiss;
-  return t;
-}
 
 // Status is plain colored text; only exceptions get ink (a quietly finished
 // session renders nothing). Live alone gets a dot because it changes as you watch.
 function renderSessionStatus(s) {
   if (s.status === 'live') return '<span class="st st-live" title="Activity in the last 15 minutes">Live</span>';
   if (s.status === 'stale') return '<span class="st st-stale" title="No end was recorded and it has been quiet for over 15 minutes">Stale</span>';
-  if (s.ended_reason === 'manual') return '<span class="st st-ended" title="Marked done in AgentActa">Marked done</span>';
   if (s.ended_reason === 'source' && s.source_status && !/^(done|completed?)$/i.test(s.source_status)) {
     return `<span class="st st-failed">${escHtml(s.source_status)}</span>`;
   }
   return '';
-}
-
-// AgentActa can't stop an agent, so the only honest action is filing away a
-// session that is over but never recorded an end. Live sessions get none.
-function canEndSession(s) {
-  return s.status === 'stale';
 }
 
 function sessionProjects(s) {
@@ -580,7 +537,6 @@ function renderSessionItem(s) {
       </div>
       <div class="si-when"><span>${fmtTime(s.start_time)}</span><span class="si-dur">${duration}</span></div>
       <div class="si-counts"><span title="${s.message_count} messages">${fmtCompact(s.message_count)} msg</span><span title="${s.tool_count} tool calls">${fmtCompact(s.tool_count)} tools</span></div>
-      <div class="si-action">${canEndSession(s) ? renderEndButton(s) : ''}</div>
       <span class="si-go" aria-hidden="true">${icon('chevron', 16)}</span>
     </div>
   `;
@@ -589,10 +545,6 @@ function renderSessionItem(s) {
 function renderSessionList(sessions, { tree = false } = {}) {
   if (!sessions.length) return '';
   return `<div class="session-list">${sessions.map(s => tree ? renderSessionTree(s) : renderSessionItem(s)).join('')}</div>`;
-}
-
-function renderEndButton(s) {
-  return `<button class="row-btn" data-end-session="${escHtml(s.id)}" title="This session went quiet without recording an end. Mark it done so it stops showing as open.">${icon('check', 11)}Mark done</button>`;
 }
 
 function renderChildrenToggle(s, expanded) {
@@ -617,7 +569,6 @@ function renderSubagentRow(s) {
     <span class="subagent-status">${statusIcon(s)}${renderSessionStatus(s)}</span>
     <span class="subagent-title" title="${escHtml(title)}">${escHtml(truncate(title, 140))}</span>
     <span class="subagent-meta">${when} \u00b7 ${s.message_count} msg \u00b7 ${s.tool_count} tools</span>
-    <span class="subagent-action">${canEndSession(s) ? renderEndButton(s) : ''}</span>
     <span class="si-go" aria-hidden="true">${icon('chevron', 14)}</span>
   </div>`;
 }
@@ -642,31 +593,14 @@ function renderSessionTree(s) {
   return `<div class="session-group">${renderSessionItem(s)}${renderChildrenToggle(s, open)}${renderSubagentList(kids, !open)}</div>`;
 }
 
-async function endSession(id, action = 'end') {
-  const res = await api(`/sessions/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
-  if (res._error) {
-    alertInline(res.error || 'Unable to update session');
-    return null;
-  }
-  return res.session;
-}
-
-function alertInline(msg) {
-  showToast(msg, { tone: 'error' });
-}
-
 // Delegated in the capture phase so these controls never also trigger the
 // card's own "open session" click handler.
 content.addEventListener('click', async (e) => {
   const toggle = e.target.closest('[data-toggle-children]');
-  const endBtn = e.target.closest('[data-end-session]');
-  const staleBtn = e.target.closest('#endStaleBtn');
   const row = e.target.closest('[data-open-session]') || e.target.closest('.session-item[data-id]');
-  if (!toggle && !endBtn && !staleBtn && !row) return;
+  if (!toggle && !row) return;
   e.stopPropagation();
   e.preventDefault();
-
-  if (staleBtn) { if (!staleBtn.disabled) endAllStale(staleBtn); return; }
 
   if (toggle) {
     const id = toggle.dataset.toggleChildren;
@@ -677,30 +611,6 @@ content.addEventListener('click', async (e) => {
     toggle.setAttribute('aria-expanded', String(open));
     if (open) { expandedSessionGroups.add(id); expandedSessionGroups.delete('!' + id); }
     else { expandedSessionGroups.delete(id); expandedSessionGroups.add('!' + id); }
-    return;
-  }
-
-  if (endBtn) {
-    endBtn.disabled = true;
-    const id = endBtn.dataset.endSession;
-    let target = endBtn.closest('.subagent-row') || endBtn.closest('.session-item');
-    const swap = (session) => {
-      if (!target || !target.isConnected) return;
-      const tmp = document.createElement('div');
-      tmp.innerHTML = target.classList.contains('subagent-row') ? renderSubagentRow(session) : renderSessionItem(session);
-      const fresh = tmp.firstElementChild;
-      fresh.classList.add('row-flash');
-      target.replaceWith(fresh);
-      if (fresh.classList.contains('session-item')) fresh.addEventListener('click', () => viewSession(session.id));
-      target = fresh;
-    };
-    const updated = await endSession(id, 'end');
-    if (!updated) { endBtn.disabled = false; return; }
-    swap(updated);
-    showToast('Marked done', {
-      actionLabel: 'Undo',
-      onAction: async () => { const back = await endSession(id, 'reopen'); if (back) swap(back); },
-    });
     return;
   }
 
@@ -859,31 +769,9 @@ async function viewSessions() {
   }
 
   let html = `<header class="page-head"><h1 class="page-title">Sessions</h1><span class="page-count">${data.total.toLocaleString()} top-level</span></header>`;
-  if (data.staleCount > 0) {
-    html += `<p class="stale-note">${data.staleCount} session${data.staleCount === 1 ? '' : 's'} never recorded an end and ${data.staleCount === 1 ? 'has' : 'have'} been quiet for over 15 minutes. <button class="row-btn row-btn-warn" id="endStaleBtn">${icon('check', 11)}Mark ${data.staleCount === 1 ? 'it' : 'all'} done</button></p>`;
-  }
   html += renderSessionList(data.sessions, { tree: true });
   if (restored) renderInPlace(html);
   else { content.innerHTML = html; transitionView(); }
-}
-
-async function endAllStale(btn) {
-  btn.disabled = true;
-  const res = await api('/sessions/end-stale', { method: 'POST' });
-  if (res._error) { btn.disabled = false; alertInline(res.error || 'Unable to update sessions'); return; }
-  const ids = res.ids || [];
-  delete viewCache.sessions;
-  await viewSessions();
-  showToast(`Marked ${ids.length} stale session${ids.length === 1 ? '' : 's'} done`, {
-    actionLabel: 'Undo',
-    timeout: 10000,
-    onAction: async () => {
-      await Promise.all(ids.map(sid => api(`/sessions/${encodeURIComponent(sid)}/reopen`, { method: 'POST' })));
-      delete viewCache.sessions;
-      if (stillOn('sessions')) viewSessions();
-      showToast(`Reopened ${ids.length} session${ids.length === 1 ? '' : 's'}`);
-    },
-  });
 }
 
 async function viewSession(id) {
@@ -1254,7 +1142,7 @@ async function viewSession(id) {
 
   // Subscribe to real-time updates via SSE, with polling as a fallback.
   // "Following" is the client side of a live session: it can be paused, and it
-  // stops on its own when the session is marked done.
+  // can be paused from the page.
   let lastSeenTs = allEvents.length ? allEvents[0].timestamp : new Date(0).toISOString();
   let lastSeenId = allEvents.length ? allEvents[0].id : '';
   let sessionState = { status: s.status, ended_reason: s.ended_reason, ended_at: s.ended_at, source_status: s.source_status };
@@ -1310,14 +1198,6 @@ async function viewSession(id) {
           startPolling();
         }
       };
-      eventSource.addEventListener('status', (event) => {
-        try {
-          const next = JSON.parse(event.data);
-          sessionState = { ...sessionState, ...next };
-          if (next.status === 'ended' && next.ended_reason === 'manual') stopFollowing();
-          else renderStatusControls();
-        } catch { /* ignore */ }
-      });
       eventSource.onerror = () => startPolling();
     } else {
       startPolling();
@@ -1331,39 +1211,15 @@ async function viewSession(id) {
     const st = { ...s, ...sessionState };
     slot.innerHTML = `
       <span class="detail-state">${statusIcon(st)}${renderSessionStatus(st) || '<span class="st st-ended">Finished</span>'}</span>
-      ${canEndSession(st) ? `<button class="btn" id="endSessionBtn" title="This session went quiet without recording an end. Mark it done so it stops showing as open.">${icon('check', 12)}Mark done</button>` : ''}
-      ${st.ended_reason === 'manual' ? `<button class="btn" id="reopenSessionBtn" title="Clear the ended mark">${icon('undo', 12)}Reopen</button>` : ''}
       <button class="btn" id="followToggleBtn" title="${following ? 'New events stream into this page as they are indexed' : 'New events are not being streamed into this page'}">${following ? `${icon('pause', 12)}Pause updates` : `${icon('play', 12)}Resume updates`}</button>
     `;
-    const reopen = async () => {
-      const updated = await endSession(id, 'reopen');
-      if (!updated) return false;
-      sessionState = { ...sessionState, status: updated.status, ended_reason: updated.ended_reason, ended_at: updated.ended_at };
-      startFollowing();
-      renderStatusControls();
-      return true;
-    };
-    const endBtn = document.getElementById('endSessionBtn');
-    if (endBtn) endBtn.onclick = async () => {
-      endBtn.disabled = true;
-      const updated = await endSession(id, 'end');
-      if (!updated) { endBtn.disabled = false; return; }
-      sessionState = { ...sessionState, status: updated.status, ended_reason: updated.ended_reason, ended_at: updated.ended_at };
-      stopFollowing();
-      showToast('Marked done', { actionLabel: 'Undo', onAction: reopen });
-    };
-    const reopenBtn = document.getElementById('reopenSessionBtn');
-    if (reopenBtn) reopenBtn.onclick = async () => {
-      reopenBtn.disabled = true;
-      if (!(await reopen())) reopenBtn.disabled = false;
-    };
     const followBtn = document.getElementById('followToggleBtn');
     if (followBtn) followBtn.onclick = () => (following ? stopFollowing() : startFollowing());
   }
 
-  // Sessions that were explicitly ended (by the user or their source) open
-  // without a live stream; everything else follows as before.
-  if (s.status === 'ended' && (s.ended_reason === 'manual' || s.ended_reason === 'source')) renderStatusControls();
+  // Sessions their source reports as finished open without a live stream;
+  // everything else follows as before.
+  if (s.status === 'ended' && s.ended_reason === 'source') renderStatusControls();
   else startFollowing();
 
   const sseScrollHandler = () => {
@@ -2298,7 +2154,7 @@ document.addEventListener('keydown', e => {
 // pressed state 40ms after the finger lands, drop it if the finger moves
 // (a scroll), and make a quick tap flash briefly so it always registers.
 (function initTouchPress() {
-  const PRESSABLE = '.toast-action, .row-btn, .btn, .filter-chip, .session-id-copy, .subagent-toggle, .subagent-heading, .back-btn, .session-parent-link, .tool-detail > summary, .session-item, .subagent-row, .file-item, .file-group-header, .result-item, .tl-session, .nav-item, .cmdk-item';
+  const PRESSABLE = '.btn, .filter-chip, .session-id-copy, .subagent-toggle, .subagent-heading, .back-btn, .session-parent-link, .tool-detail > summary, .session-item, .subagent-row, .file-item, .file-group-header, .result-item, .tl-session, .nav-item, .cmdk-item';
   let el = null, timer = null, x0 = 0, y0 = 0;
   const release = (flash) => {
     clearTimeout(timer);
@@ -2327,7 +2183,7 @@ document.addEventListener('keydown', e => {
 })();
 
 // Keyboard-first navigation: J/K (or arrows once a row has focus) move
-// between rows, Enter opens, Esc dismisses a toast or goes back, / searches.
+// between rows, Enter opens, Esc goes back, / searches.
 const NAV_ROWS = '.session-item[data-id], .subagent-row, .result-item, .file-group-header, .file-item, .tl-session';
 function handleListKeys(e) {
   if (window._cmdk && window._cmdk.open) return;
@@ -2337,8 +2193,6 @@ function handleListKeys(e) {
 
   if (e.key === '/') { e.preventDefault(); openCmdk(); return; }
   if (e.key === 'Escape') {
-    const toasts = document.querySelectorAll('.toast:not(.leaving)');
-    if (toasts.length) { toasts[toasts.length - 1]._dismiss?.(); return; }
     const back = document.getElementById('backBtn');
     if (back) { e.preventDefault(); back.click(); }
     return;

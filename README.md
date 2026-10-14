@@ -87,7 +87,7 @@ Session detail view supports project-scoped filtering, so mixed-project sessions
 
 Subagent sessions nest under the session that spawned them (Claude Code `subagents/` transcripts, Codex spawned threads, OpenClaw spawned sessions), with a collapsible count on the parent and a link back to the parent from the child.
 
-Sessions show as **Live** (activity in the last 15 minutes) or **Stale** (never recorded an end and has gone quiet). Either can be marked ended from the list or detail view, and the Sessions page can mark every stale session ended at once. Marking a session ended is AgentActa bookkeeping: it does not stop the agent process, and new activity reopens it. The detail view's **Following** toggle stops or resumes streaming new events into the page.
+Sessions show as **Live** (activity in the last 15 minutes) or **Stale** (never recorded an end and has gone quiet). AgentActa only reads transcripts, so it can't stop a running agent; on a live session's page, **Pause updates** stops streaming new events into the page.
 
 Session types get tagged so noisy categories are easier to spot (cron, sub-agent, heartbeat). Codex-backed work is also distinguished more clearly, including direct Codex runs and Symphony-origin Codex sessions.
 
@@ -173,10 +173,7 @@ It accepts a string, a colon-delimited string, or a JSON array.
 | `GET /api/stats` | Session/message/tool/token totals |
 | `GET /api/sessions` | Session list with metadata and `status` (`live` / `stale` / `ended`); `?roots=1` returns top-level sessions with their subagent tree |
 | `GET /api/sessions/:id` | Full session events, plus `parent` and nested `children` |
-| `GET /api/sessions/:id/stream?after=<ts>` | SSE stream for live session-detail updates (`event: status` on end/reopen) |
-| `POST /api/sessions/:id/end` | Mark a session ended (does not signal the agent; new activity reopens it) |
-| `POST /api/sessions/:id/reopen` | Clear a manual end |
-| `POST /api/sessions/end-stale` | Mark every stale session ended |
+| `GET /api/sessions/:id/stream?after=<ts>` | SSE stream for live session-detail updates |
 | `GET /api/search?q=<query>` | Full-text search + filters |
 | `GET /api/suggestions` | Search suggestions |
 | `GET /api/timeline?date=YYYY-MM-DD` | Events for one day |

@@ -117,13 +117,6 @@ export function init(dbPath?: string): void {
     CREATE INDEX IF NOT EXISTS idx_insights_flagged ON session_insights(flagged);
     CREATE INDEX IF NOT EXISTS idx_insights_score ON session_insights(confusion_score DESC);
 
-    -- User-set lifecycle overrides. Deliberately no FK to sessions: re-indexing
-    -- deletes and re-inserts the session row, which would cascade this away.
-    CREATE TABLE IF NOT EXISTS session_overrides (
-      session_id TEXT PRIMARY KEY,
-      ended_at TEXT NOT NULL,
-      reason TEXT
-    );
   `);
 
   // Add columns if missing (migration)

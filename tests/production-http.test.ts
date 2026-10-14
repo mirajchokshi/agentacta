@@ -131,28 +131,9 @@ describe('production HTTP routes', () => {
     assert.strictEqual(detail.parent.id, 'production-http-session');
   });
 
-  it('marks a session ended and reopens it', async () => {
-    assert.strictEqual((await request('/api/sessions/production-http-stale/end')).status, 405, 'GET is rejected');
-    const before = JSON.parse((await request('/api/sessions/production-http-stale')).body) as { session: { status: string } };
-    assert.strictEqual(before.session.status, 'stale');
-
-    const ended = JSON.parse((await request('/api/sessions/production-http-stale/end', 'POST')).body) as { session: { status: string; ended_reason: string } };
-    assert.deepStrictEqual([ended.session.status, ended.session.ended_reason], ['ended', 'manual']);
-
-    const reopened = JSON.parse((await request('/api/sessions/production-http-stale/reopen', 'POST')).body) as { session: { status: string } };
-    assert.strictEqual(reopened.session.status, 'stale');
-
-    assert.strictEqual((await request('/api/sessions/does-not-exist/end', 'POST')).status, 404);
-  });
-
-  it('ends all stale sessions in one call', async () => {
-    const list = JSON.parse((await request('/api/sessions?roots=1')).body) as { staleCount: number };
-    assert.strictEqual(list.staleCount, 1);
-    const res = JSON.parse((await request('/api/sessions/end-stale', 'POST')).body) as { ended: number; ids: string[] };
-    assert.strictEqual(res.ended, 1);
-    assert.deepStrictEqual(res.ids, ['production-http-stale']);
-    const after = JSON.parse((await request('/api/sessions?roots=1')).body) as { staleCount: number };
-    assert.strictEqual(after.staleCount, 0);
+  it('reports a session that never recorded an end as stale', async () => {
+    const detail = JSON.parse((await request('/api/sessions/production-http-stale')).body) as { session: { status: string } };
+    assert.strictEqual(detail.session.status, 'stale');
   });
 
   it('lists each session once on a file\'s session list', async () => {
