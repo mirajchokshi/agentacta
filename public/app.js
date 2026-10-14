@@ -26,7 +26,7 @@ function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) {
-    const color = theme === 'light' ? '#f5f7fb' : (theme === 'oled' ? '#000000' : '#0a0e1a');
+    const color = theme === 'light' ? '#f7f7f8' : (theme === 'oled' ? '#000000' : '#0d0e10');
     meta.setAttribute('content', color);
   }
 }
@@ -113,10 +113,24 @@ function dlExport(url, filename) {
 
 function fmtTokens(n) {
   if (!n) return '0';
-  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(4) + 'B';
+  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2).replace(/\.?0+$/, '') + 'B';
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
   if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, '') + 'K';
   return n.toLocaleString();
+}
+
+// Compact for scanning (55.4K, 6.28B); callers put the exact value in a title.
+function fmtCompact(n) {
+  n = Number(n) || 0;
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return (n / 1e9).toFixed(abs >= 1e10 ? 1 : 2).replace(/\.0+$/, '') + 'B';
+  if (abs >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (abs >= 1e4) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+  return n.toLocaleString();
+}
+
+function renderMetrics(items) {
+  return `<dl class="metrics">${items.map(m => `<div class="metric"><dt>${escHtml(m.label)}</dt><dd title="${escHtml(m.title || String(m.value))}">${escHtml(String(m.value))}</dd>${m.note ? `<p class="metric-note">${escHtml(m.note)}</p>` : ''}</div>`).join('')}</dl>`;
 }
 
 function fmtDate(ts) {
@@ -165,14 +179,6 @@ function shortSessionId(id) {
   return id.length > 24 ? `${id.slice(0, 8)}\u2026${id.slice(-8)}` : id;
 }
 
-function badgeClass(type, role) {
-  if (type === 'tool_call') return 'badge-tool_call';
-  if (type === 'tool_result') return 'badge-tool_result';
-  if (role === 'user') return 'badge-user';
-  if (role === 'assistant') return 'badge-assistant';
-  return 'badge-message';
-}
-
 function transitionView() {
   content.classList.remove('view-enter');
   void content.offsetWidth;
@@ -184,35 +190,21 @@ function skeletonLine(width = '100%', height = '12px') {
 }
 
 function skeletonRows(count = 6, kind = 'event') {
-  if (kind === 'session') {
-    return Array.from({ length: count }).map(() => `
-      <div class="session-item skeleton-card">
-        <div class="skeleton-line" style="width:58%;height:12px"></div>
-        <div class="skeleton-line" style="width:90%;height:14px"></div>
-        <div class="skeleton-line" style="width:72%;height:14px"></div>
-      </div>
-    `).join('');
+  if (kind === 'session' || kind === 'file') {
+    return `<div class="skeleton-list">${Array.from({ length: count }).map(() => `
+      <div class="skeleton-row">
+        <div class="skeleton-line" style="width:56%;height:13px"></div>
+        <div class="skeleton-line" style="width:32%;height:11px;margin-top:7px"></div>
+      </div>`).join('')}</div>`;
   }
   if (kind === 'stats') {
-    return Array.from({ length: count }).map(() => `
-      <div class="stat-card skeleton-card">
-        <div class="skeleton-line" style="width:44%;height:10px"></div>
-        <div class="skeleton-line" style="width:66%;height:28px;margin-top:8px"></div>
-      </div>
-    `).join('');
-  }
-  if (kind === 'file') {
-    return Array.from({ length: count }).map(() => `
-      <div class="file-item skeleton-card">
-        <div class="skeleton-line" style="width:62%;height:13px"></div>
-        <div class="skeleton-line" style="width:86%;height:12px;margin-top:10px"></div>
-      </div>
-    `).join('');
+    return `<div class="metrics">${Array.from({ length: count }).map(() => `
+      <div class="metric"><div class="skeleton-line" style="width:60px;height:10px"></div><div class="skeleton-line" style="width:84px;height:22px;margin-top:8px"></div></div>`).join('')}</div>`;
   }
   return Array.from({ length: count }).map(() => `
     <div class="event-item skeleton-row">
-      <div class="skeleton-line" style="width:72px;height:10px"></div>
-      <div class="skeleton-line" style="width:60px;height:16px"></div>
+      <div class="skeleton-line" style="width:64px;height:10px"></div>
+      <div class="skeleton-line" style="width:44px;height:10px"></div>
       <div class="event-body">
         <div class="skeleton-line" style="width:82%;height:12px"></div>
         <div class="skeleton-line" style="width:66%;height:12px;margin-top:8px"></div>
@@ -280,68 +272,73 @@ window.addEventListener('popstate', () => {
   handleRoute();
 });
 
+const EVENT_ROLE_LABELS = { tool: 'Tool', result: 'Result', user: 'User', assistant: 'Assistant' };
+const TOOL_SUMMARY_KEYS = ['command', 'cmd', 'file_path', 'path', 'filePath', 'pattern', 'query', 'q', 'url', 'description', 'prompt', 'name'];
+
+function eventKind(ev) {
+  if (ev.type === 'tool_call') return 'tool';
+  if (ev.type === 'tool_result') return 'result';
+  if (ev.role === 'user') return 'user';
+  if (ev.role === 'assistant') return 'assistant';
+  return 'other';
+}
+
+// The one argument a reader needs to know what a call did: the shell command,
+// the file, the pattern, the URL. Falls back to the first string argument.
+function summarizeToolArgs(raw) {
+  if (!raw) return { summary: '', pretty: '' };
+  let args;
+  try { args = JSON.parse(raw); } catch { return { summary: raw.split('\n')[0], pretty: raw }; }
+  const pretty = JSON.stringify(args, null, 2);
+  if (!args || typeof args !== 'object') return { summary: String(args), pretty };
+  const key = TOOL_SUMMARY_KEYS.find(k => typeof args[k] === 'string' && args[k].trim());
+  const value = key ? args[key] : Object.values(args).find(v => typeof v === 'string' && v.trim());
+  return { summary: value ? value.replace(/\s+/g, ' ').trim() : '', pretty };
+}
+
 function renderEvent(ev) {
-  const badge = `<span class="event-badge ${badgeClass(ev.type, ev.role)}">${ev.type === 'tool_call' ? 'tool' : ev.role || ev.type}</span>`;
+  const kind = eventKind(ev);
+  const role = EVENT_ROLE_LABELS[kind] || escHtml(ev.role || ev.type || '');
   let body = '';
 
-  if (ev.type === 'tool_call') {
-    body = `<span class="tool-name">${escHtml(fmtToolName(ev.tool_name))}</span>`;
-    if (ev.tool_args) {
-      try {
-        const args = JSON.parse(ev.tool_args);
-        body += `<div class="tool-args">${escHtml(JSON.stringify(args, null, 2))}</div>`;
-      } catch {
-        body += `<div class="tool-args">${escHtml(ev.tool_args)}</div>`;
-      }
-    }
-  } else if (ev.type === 'tool_result') {
-    body = `<span class="tool-name">\u2192 ${escHtml(fmtToolName(ev.tool_name))}</span>`;
-    if (ev.content) {
-      body += `<div class="tool-args">${escHtml(truncate(ev.content, 500))}</div>`;
-    }
+  if (kind === 'tool') {
+    const { summary, pretty } = summarizeToolArgs(ev.tool_args);
+    body = `<div class="tool-line"><span class="tool-name">${escHtml(fmtToolName(ev.tool_name))}</span>${summary ? `<code class="tool-summary">${escHtml(truncate(summary, 220))}</code>` : ''}</div>
+      ${pretty ? `<details class="tool-detail"><summary>Arguments</summary><pre>${escHtml(pretty)}</pre></details>` : ''}`;
+  } else if (kind === 'result') {
+    const out = ev.content || '';
+    const first = out.split('\n').find(l => l.trim()) || '';
+    const lines = out ? out.split('\n').length : 0;
+    body = `<div class="tool-line"><span class="tool-name">${escHtml(fmtToolName(ev.tool_name) || 'Output')}</span>${first ? `<code class="tool-summary">${escHtml(truncate(first.trim(), 220))}</code>` : '<span class="tool-empty">no output</span>'}</div>
+      ${out && (lines > 1 || out.length > 220) ? `<details class="tool-detail"><summary>Output \u00b7 ${lines} line${lines === 1 ? '' : 's'}</summary><pre>${escHtml(truncate(out, 4000))}</pre></details>` : ''}`;
   } else {
     body = `<div class="event-content">${escHtml(ev.content || '')}</div>`;
   }
 
-  return `<div class="event-item" data-event-id="${ev.id}">
-    <div class="event-time">${fmtTimeShort(ev.timestamp)}</div>
-    ${badge}
+  return `<div class="event-item ev-${kind}" data-event-id="${escHtml(ev.id)}">
+    <time class="event-time" datetime="${escHtml(ev.timestamp || '')}">${fmtTimeShort(ev.timestamp)}</time>
+    <span class="event-role">${role}</span>
     <div class="event-body">${body}</div>
   </div>`;
 }
 
+// Timeline interleaves sessions; a session line marks each change of session so
+// every event has context, and opens that session on click.
+function renderTimelineEvents(events, prevSessionId = null) {
+  let prev = prevSessionId;
+  return events.map(ev => {
+    let head = '';
+    if (ev.session_id && ev.session_id !== prev) {
+      const title = cleanSessionSummary(ev.session_summary || '', '');
+      head = `<button class="tl-session" data-open-session="${escHtml(ev.session_id)}"><span class="tl-session-title">${escHtml(truncate(title, 110))}</span><span class="tl-session-id">${escHtml(shortSessionId(ev.session_id))}</span></button>`;
+      prev = ev.session_id;
+    }
+    return head + renderEvent(ev);
+  }).join('');
+}
+
 function renderTimelineEvent(ev) {
-  const typeClass = ev.type === 'tool_call' || ev.type === 'tool_result' ? 'type-tool' :
-                    ev.role === 'user' ? 'type-user' :
-                    ev.role === 'assistant' ? 'type-assistant' : '';
-
-  const badge = `<span class="event-badge ${badgeClass(ev.type, ev.role)}">${ev.type === 'tool_call' ? 'tool' : ev.role || ev.type}</span>`;
-  let body = '';
-
-  if (ev.type === 'tool_call') {
-    body = `<span class="tool-name">${escHtml(fmtToolName(ev.tool_name))}</span>`;
-    if (ev.tool_args) {
-      try {
-        const args = JSON.parse(ev.tool_args);
-        body += `<div class="tool-args">${escHtml(JSON.stringify(args, null, 2))}</div>`;
-      } catch {
-        body += `<div class="tool-args">${escHtml(ev.tool_args)}</div>`;
-      }
-    }
-  } else if (ev.type === 'tool_result') {
-    body = `<span class="tool-name">\u2192 ${escHtml(fmtToolName(ev.tool_name))}</span>`;
-    if (ev.content) {
-      body += `<div class="tool-args">${escHtml(truncate(ev.content, 500))}</div>`;
-    }
-  } else {
-    body = `<div class="event-content">${escHtml(ev.content || '')}</div>`;
-  }
-
-  return `<div class="timeline-event ${typeClass}" data-event-id="${ev.id}">
-    <div class="event-time">${fmtTimeShort(ev.timestamp)}</div>
-    ${badge}
-    <div class="event-body">${body}</div>
-  </div>`;
+  return renderEvent(ev);
 }
 
 function fmtDuration(start, end) {
@@ -424,24 +421,6 @@ function isInternalProjectTag(tag) {
   return false;
 }
 
-function renderProjectTags(s) {
-  let projects = [];
-  if (s.projects) {
-    try { projects = JSON.parse(s.projects); } catch {}
-  }
-  const visible = [...new Set(projects)].filter(p => !isInternalProjectTag(p));
-  return visible.map(p => `<span class="session-project">${escHtml(p)}</span>`).join('');
-}
-
-function renderModelTags(s) {
-  let models = [];
-  if (s.models) {
-    try { models = JSON.parse(s.models); } catch {}
-  }
-  if (!models.length && s.model) models = [s.model];
-  return models.map(m => `<span class="session-model">${escHtml(m)}</span>`).join('');
-}
-
 const expandedSessionGroups = new Set();
 
 // Status is plain colored text; only exceptions get ink (a quietly finished
@@ -460,36 +439,53 @@ function canEndSession(s) {
   return s.status === 'live' || s.status === 'stale';
 }
 
+function sessionProjects(s) {
+  let projects = [];
+  if (s.projects) { try { projects = JSON.parse(s.projects); } catch {} }
+  return [...new Set(projects)].filter(p => !isInternalProjectTag(p));
+}
+
+function sessionModels(s) {
+  let models = [];
+  if (s.models) { try { models = JSON.parse(s.models); } catch {} }
+  if (!models.length && s.model) models = [s.model];
+  return models;
+}
+
+// Who/where/what as one quiet line: agent, type, project, model. Plain text in
+// a fixed order reads faster than a row of colored chips.
+function renderSessionMeta(s) {
+  const agent = normalizeAgentLabel(s.agent || '');
+  const parts = [];
+  if (agent) parts.push(`<span class="m-agent">${escHtml(agent)}</span>`);
+  if (s.session_type && s.session_type !== agent) parts.push(escHtml(s.session_type));
+  const projects = sessionProjects(s);
+  if (projects.length) parts.push(`<span class="m-project">${escHtml(projects.slice(0, 2).join(', '))}${projects.length > 2 ? ` +${projects.length - 2}` : ''}</span>`);
+  const models = sessionModels(s);
+  if (models.length) parts.push(`<span class="m-model">${escHtml(models[0])}${models.length > 1 ? ` +${models.length - 1}` : ''}</span>`);
+  return parts.join('<span class="sep" aria-hidden="true"> \u00b7 </span>');
+}
+
 function renderSessionItem(s) {
   const isStale = s.status === 'stale';
-  const endLabel = s.end_time ? fmtTimeOnly(s.end_time) : (s.status === 'live' ? 'now' : '?');
-  const timeRange = `${fmtTime(s.start_time)} \u2192 ${endLabel}`;
   const duration = isStale ? 'never closed' : fmtDuration(s.start_time, s.end_time || s.start_time);
-  const isSubagent = s.session_type === 'subagent';
-  const showAgentTag = s.agent && s.agent !== 'main' && !isSubagent;
   const headline = s.label || cleanSessionSummary(s.summary, s.initial_prompt);
-
   return `
-    <div class="session-item" data-id="${escHtml(s.id)}">
-      <div class="session-header">
-        <span class="session-time">${renderSessionStatus(s)}${timeRange} \u00b7 ${duration}</span>
-        <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-          ${renderProjectTags(s)}
-          ${showAgentTag ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
-          ${s.session_type && s.session_type !== normalizeAgentLabel(s.agent || '') ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
-          ${renderModelTags(s)}
-        </span>
+    <div class="session-item" data-id="${escHtml(s.id)}" role="link" tabindex="0">
+      <div class="si-main">
+        <div class="si-title">${renderSessionStatus(s)}<span class="si-headline">${escHtml(truncate(headline, 160))}</span></div>
+        <div class="si-meta">${renderSessionMeta(s)}</div>
       </div>
-      <div class="session-summary">${escHtml(truncate(headline, 120))}</div>
-      <div class="session-meta">
-        <span style="display:flex;gap:var(--space-lg);align-items:center">
-          <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> ${s.message_count}</span>
-          <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> ${s.tool_count}</span>
-        </span>
-        ${canEndSession(s) ? renderEndButton(s) : ''}
-      </div>
+      <div class="si-when"><span>${fmtTime(s.start_time)}</span><span class="si-dur">${duration}</span></div>
+      <div class="si-counts"><span title="${s.message_count} messages">${fmtCompact(s.message_count)} msg</span><span title="${s.tool_count} tool calls">${fmtCompact(s.tool_count)} tools</span></div>
+      <div class="si-action">${canEndSession(s) ? renderEndButton(s) : ''}</div>
     </div>
   `;
+}
+
+function renderSessionList(sessions, { tree = false } = {}) {
+  if (!sessions.length) return '';
+  return `<div class="session-list">${sessions.map(s => tree ? renderSessionTree(s) : renderSessionItem(s)).join('')}</div>`;
 }
 
 function renderEndButton(s) {
@@ -600,15 +596,19 @@ content.addEventListener('click', async (e) => {
     return;
   }
 
+  if (row.closest('#results')) {
+    window._lastView = 'search';
+    window._lastSearchQuery = $('#searchInput')?.value || '';
+  }
   viewSession(row.dataset.openSession);
 }, true);
 
 content.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter' && e.key !== ' ') return;
-  const row = e.target.closest && e.target.closest('[data-open-session]');
+  const row = e.target.closest && e.target.closest('[data-open-session], .session-item[data-id]');
   if (!row || e.target !== row) return;
   e.preventDefault();
-  viewSession(row.dataset.openSession);
+  viewSession(row.dataset.openSession || row.dataset.id);
 });
 
 async function viewSearch(query = '') {
@@ -616,23 +616,21 @@ async function viewSearch(query = '') {
   const typeFilter = window._searchType || '';
   const roleFilter = window._searchRole || '';
 
-  let html = `<div class="page-title">Search</div>
+  const seg = (filter, val, label, active) => `<button class="filter-chip${active ? ' active' : ''}" data-filter="${filter}" data-val="${val}" aria-pressed="${active}">${label}</button>`;
+  let html = `<h1 class="page-title">Search</h1>
     <div class="search-bar">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
       <input type="text" id="searchInput" placeholder="Search messages, tool calls, files\u2026" value="${escHtml(query)}">
     </div>
-    <div class="filters">
-      <span class="filter-chip ${typeFilter===''?'active':''}" data-filter="type" data-val="">All</span>
-      <span class="filter-chip ${typeFilter==='message'?'active':''}" data-filter="type" data-val="message">Messages</span>
-      <span class="filter-chip ${typeFilter==='tool_call'?'active':''}" data-filter="type" data-val="tool_call">Tool Calls</span>
-      <span class="filter-chip ${typeFilter==='tool_result'?'active':''}" data-filter="type" data-val="tool_result">Results</span>
-      <span class="filter-chip ${roleFilter==='user'?'active':''}" data-filter="role" data-val="user">User</span>
-      <span class="filter-chip ${roleFilter==='assistant'?'active':''}" data-filter="role" data-val="assistant">Assistant</span>
+    <div class="toolbar">
+      <div class="seg" role="group" aria-label="Event type">
+        ${seg('type', '', 'All', typeFilter === '')}${seg('type', 'message', 'Messages', typeFilter === 'message')}${seg('type', 'tool_call', 'Tool calls', typeFilter === 'tool_call')}${seg('type', 'tool_result', 'Results', typeFilter === 'tool_result')}
+      </div>
+      <div class="seg" role="group" aria-label="Role">
+        ${seg('role', '', 'Any role', roleFilter === '')}${seg('role', 'user', 'User', roleFilter === 'user')}${seg('role', 'assistant', 'Assistant', roleFilter === 'assistant')}
+      </div>
     </div>
     <div id="results">
-      <div class="search-bar skeleton-card" style="margin-top:6px">
-        <div class="skeleton-line" style="height:16px;width:40%"></div>
-      </div>
       ${skeletonRows(4, 'session')}
     </div>`;
 
@@ -651,8 +649,8 @@ async function viewSearch(query = '') {
     chip.addEventListener('click', () => {
       const f = chip.dataset.filter;
       const v = chip.dataset.val;
-      if (f === 'type') window._searchType = v === window._searchType ? '' : v;
-      if (f === 'role') window._searchRole = v === window._searchRole ? '' : v;
+      if (f === 'type') window._searchType = v;
+      if (f === 'role') window._searchRole = v;
       viewSearch(input.value);
     });
   });
@@ -666,10 +664,9 @@ async function showSearchHome() {
   const reqId = (window._searchReqSeq = (window._searchReqSeq || 0) + 1);
   el.innerHTML = `${skeletonRows(4, 'session')}`;
 
-  const stats = await api('/stats');
-  const sessions = await api('/sessions?limit=5');
+  const sessions = await api('/sessions?limit=8');
   if (reqId !== window._searchReqSeq) return;
-  if (stats._error || sessions._error) {
+  if (sessions._error) {
     el.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
     return;
   }
@@ -679,20 +676,9 @@ async function showSearchHome() {
   if (reqId !== window._searchReqSeq) return;
 
   let html = `
-    <div class="search-stats" style="margin-top:8px">
-      <div class="search-stat"><div class="num">${stats.sessions}</div><div class="lbl">Sessions</div></div>
-      <div class="search-stat"><div class="num">${stats.messages.toLocaleString()}</div><div class="lbl">Messages</div></div>
-      <div class="search-stat"><div class="num">${stats.toolCalls.toLocaleString()}</div><div class="lbl">Tool Calls</div></div>
-      <div class="search-stat"><div class="num">${fmtTokens(stats.totalTokens || 0)}</div><div class="lbl">Tokens</div></div>
-    </div>
-
-    ${suggestions.length ? `<div class="section-label">Quick Search</div>
-    <div class="filters" id="suggestions">
-      ${suggestions.map(s => `<span class="suggestion-chip" data-q="${s}">${s}</span>`).join('')}
-    </div>` : ''}
-
-    <div class="section-label">Recent Sessions</div>
-    ${sessions.sessions.map(renderSessionItem).join('')}
+    ${suggestions.length ? `<p class="suggestions">Try ${suggestions.map(q => `<button class="suggestion-chip text-btn" data-q="${escHtml(q)}">${escHtml(q)}</button>`).join('<span class="sep" aria-hidden="true">, </span>')}</p>` : ''}
+    <h2 class="section-label">Recent sessions</h2>
+    ${renderSessionList(sessions.sessions)}
   `;
 
   el.innerHTML = html;
@@ -732,33 +718,20 @@ async function doSearch(q) {
   if (data._error || data.error) { el.innerHTML = `<div class="empty"><p>${escHtml(data.error || 'Server error')}</p></div>`; return; }
   if (!data.results.length) { el.innerHTML = '<div class="empty"><h2>No results</h2><p>Try a different search term or adjust filters</p></div>'; return; }
 
-  let header = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--space-md)">
-    <span class="section-label" style="margin:0">${data.results.length} results</span>
-    <div style="display:flex;gap:8px">
-      <a class="export-btn" href="#" onclick="dlExport('/api/export/search?q=${encodeURIComponent(q)}&format=md','search.md');return false">MD</a>
-      <a class="export-btn" href="#" onclick="dlExport('/api/export/search?q=${encodeURIComponent(q)}&format=json','search.json');return false">JSON</a>
+  el.innerHTML = `<div class="results-head">
+      <span class="page-count">${data.results.length}${data.results.length === 100 ? '+' : ''} results</span>
+      <span class="export-links">Export
+        <a href="#" onclick="dlExport('/api/export/search?q=${encodeURIComponent(q)}&format=md','search.md');return false">Markdown</a>
+        <a href="#" onclick="dlExport('/api/export/search?q=${encodeURIComponent(q)}&format=json','search.json');return false">JSON</a>
+      </span>
     </div>
-  </div>`;
-
-  el.innerHTML = header + data.results.map(r => `
-    <div class="result-item">
-      <div class="result-meta">
-        <span class="event-badge ${badgeClass(r.type, r.role)}">${r.type === 'tool_call' ? 'tool' : r.role || r.type}</span>
-        <span class="session-time">${fmtTime(r.timestamp)}</span>
-        ${r.tool_name ? `<span class="tool-name">${escHtml(fmtToolName(r.tool_name))}</span>` : ''}
-        <span class="session-link" data-session="${r.session_id}">view session \u2192</span>
-      </div>
-      <div class="result-content">${escHtml(truncate(r.content || r.tool_args || r.tool_result || '', 400))}</div>
-    </div>
-  `).join('');
-
-  $$('.session-link', el).forEach(link => {
-    link.addEventListener('click', () => {
-      window._lastView = 'search';
-      window._lastSearchQuery = q;
-      viewSession(link.dataset.session);
-    });
-  });
+    <div class="result-list">${data.results.map(r => {
+      const kind = eventKind(r);
+      return `<div class="result-item" data-open-session="${escHtml(r.session_id)}" role="link" tabindex="0">
+        <div class="result-meta"><span class="event-role ev-${kind}">${EVENT_ROLE_LABELS[kind] || escHtml(r.role || r.type)}</span>${r.tool_name ? `<span class="tool-name">${escHtml(fmtToolName(r.tool_name))}</span>` : ''}<time>${fmtTime(r.timestamp)}</time></div>
+        <div class="result-content">${escHtml(truncate(r.content || r.tool_args || r.tool_result || '', 400))}</div>
+      </div>`;
+    }).join('')}</div>`;
 }
 
 async function viewSessions() {
@@ -772,11 +745,11 @@ async function viewSessions() {
     return;
   }
 
-  let html = `<div class="page-title">Sessions</div>`;
+  let html = `<header class="page-head"><h1 class="page-title">Sessions</h1><span class="page-count">${data.total.toLocaleString()} top-level</span></header>`;
   if (data.staleCount > 0) {
     html += `<p class="stale-note">${data.staleCount} session${data.staleCount === 1 ? '' : 's'} never recorded an end and ${data.staleCount === 1 ? 'has' : 'have'} been quiet for over 15 minutes. <button class="text-btn" id="endStaleBtn">Mark ${data.staleCount === 1 ? 'it' : 'all'} ended</button></p>`;
   }
-  html += data.sessions.map(s => renderSessionTree(s)).join('');
+  html += renderSessionList(data.sessions, { tree: true });
   content.innerHTML = html;
   transitionView();
 
@@ -817,56 +790,48 @@ async function viewSession(id) {
   const children = Array.isArray(data.children) ? data.children : [];
   const childTotal = children.reduce((n, c) => n + 1 + (c.descendant_count || 0), 0);
   const childrenCollapsed = children.length > 10 && !children.some(c => c.status === 'live');
+  const headline = s.label || cleanSessionSummary(s.summary, s.initial_prompt);
+  const endText = s.end_time ? fmtTimeShort(s.end_time) : (s.status === 'live' ? 'now' : 'no end recorded');
+  const spanText = s.end_time ? ` (${fmtDuration(s.start_time, s.end_time)})` : '';
+  const tokenStats = s.output_tokens
+    ? [`<span title="${(s.output_tokens).toLocaleString()} output tokens">${fmtCompact(s.output_tokens)} output</span>`, `<span title="${(s.input_tokens + s.cache_read_tokens).toLocaleString()} input tokens incl. cache reads">${fmtCompact(s.input_tokens + s.cache_read_tokens)} input tokens</span>`]
+    : (s.total_tokens ? [`<span>${fmtCompact(s.total_tokens)} tokens</span>`] : []);
   let html = `
-    <div class="back-btn" id="backBtn">\u2190 Back</div>
-    ${parent ? `<button class="session-parent-link" id="parentSessionLink" title="Open parent session">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
-      Subagent of <span>${escHtml(truncate(parent.label || cleanSessionSummary(parent.summary, parent.initial_prompt), 80))}</span>
-    </button>` : ''}
-    <div class="page-title">${s.label ? escHtml(s.label) : 'Session'}</div>
-    <div class="session-id-row">
-      <span class="session-id-label">ID</span>
-      <span class="session-id-value" title="${escHtml(id)}">${escHtml(id)}</span>
-      <button class="session-id-copy" id="copySessionId" title="Copy session ID">\u29c9</button>
-      <span class="session-id-copied" id="copyConfirm">Copied!</span>
-    </div>
-    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
-      <span id="sessionStatusSlot" style="display:contents"></span>
-      ${s.first_message_id ? `<button class="jump-to-start-btn" id="jumpToStartBtn" title="Jump to initial prompt">Initial Prompt</button>` : ''}
-      ${data.hasArchive ? `<a class="export-btn" href="#" onclick="dlExport('/api/archive/export/${id}','session.jsonl');return false">JSONL</a>` : ''}
-      <a class="export-btn" href="#" onclick="dlExport('/api/export/session/${id}?format=md','session.md');return false">MD</a>
-      <a class="export-btn" href="#" onclick="dlExport('/api/export/session/${id}?format=json','session.json');return false">JSON</a>
-    </div>
-    <div class="session-detail-card">
-      <div class="session-header" style="margin-bottom:12px">
-        <span class="session-time">${fmtDate(s.start_time)} \u00b7 ${fmtTimeShort(s.start_time)} \u2013 ${s.end_time ? fmtTimeShort(s.end_time) : (s.status === 'live' ? 'now' : 'no end recorded')}</span>
-        <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-          ${s.agent && s.agent !== 'main' ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
-          ${s.session_type && s.session_type !== normalizeAgentLabel(s.agent || '') ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
-          ${renderModelTags(s)}
+    <button class="back-btn" id="backBtn">\u2190 Back</button>
+    ${parent ? `<button class="session-parent-link" id="parentSessionLink" title="Open parent session">Subagent of <span>${escHtml(truncate(parent.label || cleanSessionSummary(parent.summary, parent.initial_prompt), 90))}</span></button>` : ''}
+    <header class="detail-head">
+      <h1 class="page-title detail-title">${escHtml(truncate(headline, 240))}</h1>
+      <p class="detail-meta">${renderSessionMeta(s)}<span class="sep" aria-hidden="true"> \u00b7 </span>${fmtDate(s.start_time)}, ${fmtTimeShort(s.start_time)} \u2013 ${endText}${spanText}</p>
+      <p class="detail-stats"><span>${s.message_count.toLocaleString()} messages</span><span>${s.tool_count.toLocaleString()} tool calls</span>${tokenStats.join('')}</p>
+      <div class="detail-actions">
+        <span id="sessionStatusSlot" class="detail-status"></span>
+        ${s.first_message_id ? `<button class="btn" id="jumpToStartBtn" title="Scroll to the first user prompt">Initial prompt</button>` : ''}
+        <span class="export-links">Export
+          <a href="#" onclick="dlExport('/api/export/session/${id}?format=md','session.md');return false">Markdown</a>
+          <a href="#" onclick="dlExport('/api/export/session/${id}?format=json','session.json');return false">JSON</a>
+          ${data.hasArchive ? `<a href="#" onclick="dlExport('/api/archive/export/${id}','session.jsonl');return false">JSONL</a>` : ''}
+        </span>
+        <span class="session-id-row">
+          <code class="session-id-value" title="${escHtml(id)}">${escHtml(id)}</code>
+          <button class="session-id-copy" id="copySessionId" title="Copy session ID" aria-label="Copy session ID"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button>
+          <span class="session-id-copied" id="copyConfirm" role="status">Copied</span>
         </span>
       </div>
-      <div class="session-detail-grid">
-        <span><span class="detail-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span> ${s.message_count} messages</span>
-        <span><span class="detail-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></span> ${s.tool_count} tools</span>
-        ${s.output_tokens ? `<span><span class="detail-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/></svg></span> ${fmtTokens(s.output_tokens)} output</span><span><span class="detail-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></span> ${fmtTokens(s.input_tokens + s.cache_read_tokens)} input</span>` : s.total_tokens ? `<span><span class="detail-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg></span> ${fmtTokens(s.total_tokens)} tokens</span><span></span>` : '<span></span><span></span>'}
+    </header>
+    ${projectFilters.length ? `
+      <div class="seg" id="sessionProjectFilters" role="group" aria-label="Filter events by project">
+        <button class="filter-chip active" data-project-filter="all">All projects</button>
+        ${projectFilters.map(p => `<button class="filter-chip" data-project-filter="${escHtml(p.project)}">${escHtml(p.project)} <span class="count">${p.eventCount}</span></button>`).join('')}
       </div>
-      ${projectFilters.length ? `
-        <div class="section-label" style="margin-top:14px">Project Filter</div>
-        <div class="filters" id="sessionProjectFilters" style="margin-bottom:4px">
-          <span class="filter-chip active" data-project-filter="all">All</span>
-          ${projectFilters.map(p => `<span class="filter-chip" data-project-filter="${escHtml(p.project)}">${escHtml(p.project)} · ${p.eventCount}</span>`).join('')}
-        </div>
-      ` : ''}
-    </div>
+    ` : ''}
     ${children.length ? `
       <section class="detail-subagents">
         <button class="section-label subagent-heading" data-toggle-children="${escHtml(id)}" aria-expanded="${!childrenCollapsed}">Subagents (${children.length}${childTotal > children.length ? `, ${childTotal} total` : ''})</button>
         ${renderSubagentList(children, childrenCollapsed)}
       </section>
     ` : ''}
-    <div class="section-label" id="sessionEventsLabel">Events</div>
-    <div id="eventsContainer"></div>
+    <h2 class="section-label" id="sessionEventsLabel">Events</h2>
+    <div id="eventsContainer" class="event-list"></div>
     <div class="empty" id="sessionEventsEmpty" style="display:none"><h2>No events</h2><p>This session has no events to display.</p></div>
     <div id="sessionInsightsPanel" class="loading" style="margin-top:var(--space-xl)">Loading insights...</div>
   `;
@@ -1244,9 +1209,9 @@ async function viewSession(id) {
     const st = { ...s, ...sessionState };
     slot.innerHTML = `
       ${renderSessionStatus(st)}
-      ${canEndSession(st) ? `<button class="export-btn session-action-btn" id="endSessionBtn" title="Marks the session ended in AgentActa and stops following it. AgentActa cannot stop the agent process; new activity reopens it.">Mark ended</button>` : ''}
-      ${st.ended_reason === 'manual' ? `<button class="export-btn session-action-btn" id="reopenSessionBtn" title="Clear the ended mark">Reopen</button>` : ''}
-      <button class="export-btn session-action-btn" id="followToggleBtn" aria-pressed="${following}" title="${following ? 'New events are streaming into this page' : 'New events are not being streamed into this page'}">${following ? 'Pause updates' : 'Resume updates'}</button>
+      ${canEndSession(st) ? `<button class="btn" id="endSessionBtn" title="Marks the session ended in AgentActa and stops following it. AgentActa cannot stop the agent process; new activity reopens it.">Mark ended</button>` : ''}
+      ${st.ended_reason === 'manual' ? `<button class="btn" id="reopenSessionBtn" title="Clear the ended mark">Reopen</button>` : ''}
+      <button class="btn" id="followToggleBtn" title="${following ? 'New events are streaming into this page' : 'New events are not being streamed into this page'}">${following ? 'Pause updates' : 'Resume updates'}</button>
     `;
     const endBtn = document.getElementById('endSessionBtn');
     if (endBtn) endBtn.onclick = async () => {
@@ -1308,8 +1273,8 @@ async function viewTimeline(date) {
   window._lastView = 'timeline';
   window._timelineState = { date, limit: 100, offset: 0, hasMore: true, loading: false, seenEventIds: new Set() };
 
-  content.innerHTML = `<div class="page-title">Timeline</div>
-    <input type="date" class="date-input" id="dateInput" value="${date}">
+  content.innerHTML = `<header class="page-head"><h1 class="page-title">Timeline</h1>
+    <input type="date" class="date-input" id="dateInput" value="${date}" aria-label="Day"></header>
     <div id="timelineContent">${skeletonRows(8, 'event')}</div>
     <div id="timelineLoadMore" class="loading-more" style="display:none">Loading more…</div>`;
   transitionView();
@@ -1337,16 +1302,18 @@ async function viewTimeline(date) {
 
     if (!append) {
       if (!data.events.length) {
-        el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"><div class="timeline-line"></div><div class="empty" id="timelineEmpty"><h2>No activity</h2><p>Nothing recorded on this day</p></div></div>`;
+        el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"><div class="empty" id="timelineEmpty"><h2>No activity</h2><p>Nothing recorded on this day</p></div></div>`;
         return;
       }
-      el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"><div class="timeline-line"></div>${data.events.map(renderTimelineEvent).join('')}</div>`;
+      el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap">${renderTimelineEvents(data.events)}</div>`;
+      state.lastSessionId = data.events[data.events.length - 1].session_id;
       return;
     }
 
     const wrap = $('#timelineWrap');
     if (wrap) {
-      wrap.insertAdjacentHTML('beforeend', data.events.map(renderTimelineEvent).join(''));
+      wrap.insertAdjacentHTML('beforeend', renderTimelineEvents(data.events, state.lastSessionId));
+      if (data.events.length) state.lastSessionId = data.events[data.events.length - 1].session_id;
     }
   }
 
@@ -1379,14 +1346,14 @@ async function viewTimeline(date) {
 
         let wrap = $('#timelineWrap');
         if (!wrap) {
-          el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"><div class="timeline-line"></div></div>`;
+          el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"></div>`;
           wrap = $('#timelineWrap');
         }
 
         const empty = $('#timelineEmpty');
         if (empty) empty.remove();
 
-        const html = fresh.map(renderTimelineEvent).join('');
+        const html = renderTimelineEvents(fresh);
         wrap.insertAdjacentHTML('afterbegin', html);
         state.offset += fresh.length;
 
@@ -1407,7 +1374,7 @@ async function viewTimeline(date) {
 
 async function viewOverview() {
   clearJumpUi();
-  content.innerHTML = `<div class="page-title">Overview</div><div class="stat-grid">${skeletonRows(5, 'stats')}</div>`;
+  content.innerHTML = `<h1 class="page-title">Overview</h1>${skeletonRows(4, 'stats')}${skeletonRows(4, 'session')}`;
   transitionView();
   const data = await api('/stats');
   const sessionsRes = await api('/sessions?limit=30&roots=1');
@@ -1424,21 +1391,19 @@ async function viewOverview() {
   const recentSessions = sessions.filter(s => !activeIds.has(s.id)).slice(0, 6);
   const uniqueTools = new Set((data.tools || []).filter(t => t).map(t => fmtToolGroup(t)));
 
-  let html = `<div class="page-title">Overview</div>
+  let html = `<h1 class="page-title">Overview</h1>
+    ${renderMetrics([
+      { label: 'Sessions', value: fmtCompact(data.sessions), title: data.sessions.toLocaleString() },
+      { label: 'Messages', value: fmtCompact(data.messages), title: data.messages.toLocaleString() },
+      { label: 'Tool calls', value: fmtCompact(data.toolCalls), title: data.toolCalls.toLocaleString() },
+      { label: 'Tokens', value: fmtCompact(data.totalTokens || 0), title: (data.totalTokens || 0).toLocaleString() },
+    ])}
 
-    <div class="section-label">Key Metrics</div>
-    <div class="stat-grid">
-      <div class="stat-card accent-blue"><div class="label">Sessions</div><div class="value">${data.sessions}</div></div>
-      <div class="stat-card accent-green"><div class="label">Messages</div><div class="value">${data.messages.toLocaleString()}</div></div>
-      <div class="stat-card accent-amber"><div class="label">Tool Calls</div><div class="value">${data.toolCalls.toLocaleString()}</div></div>
-      <div class="stat-card accent-teal"><div class="label">Total Tokens</div><div class="value">${(data.totalTokens || 0).toLocaleString()}</div></div>
-    </div>
+    <h2 class="section-label">Active now${activeNow.length ? ` <span class="count">${activeNow.length}</span>` : ''}</h2>
+    ${activeNow.length ? renderSessionList(activeNow, { tree: true }) : `<p class="quiet-note">Nothing has written in the last 15 minutes.</p>`}
 
-    <div class="section-label">Active Now (${activeNow.length})</div>
-    ${activeNow.length ? activeNow.map(s => renderSessionTree(s)).join('') : `<div class="empty" style="margin-bottom:var(--space-xl)"><p>No active sessions right now</p></div>`}
-
-    <div class="section-label">Recent Sessions</div>
-    ${recentSessions.map(s => renderSessionTree(s)).join('')}
+    <h2 class="section-label">Recent</h2>
+    ${renderSessionList(recentSessions, { tree: true })}
   `;
 
   content.innerHTML = html;
@@ -1448,7 +1413,7 @@ async function viewOverview() {
 
 async function viewStats() {
   clearJumpUi();
-  content.innerHTML = `<div class="page-title">Settings</div>${skeletonRows(4, 'session')}`;
+  content.innerHTML = `<h1 class="page-title">Settings</h1>${skeletonRows(4, 'session')}`;
   transitionView();
   const data = await api('/stats');
   if (data._error) {
@@ -1460,79 +1425,60 @@ async function viewStats() {
   const themeMode = lsGet(THEME_MODE_KEY) || 'light';
   const darkVariant = lsGet(THEME_DARK_VARIANT_KEY) || 'default';
 
+  const dirs = data.sessionDirs || [];
+  const isClaude = d => d.agent === 'claude-code' || /^claude-/.test(d.agent || '');
+  const claudeDirs = dirs.filter(isClaude);
+  const pathRows = [];
+  if (claudeDirs.length) pathRows.push(['~/.claude/projects/*', `claude-code, ${claudeDirs.length} workspace${claudeDirs.length === 1 ? '' : 's'}`]);
+  for (const d of dirs.filter(d => !isClaude(d))) {
+    pathRows.push([(d.path || '').replace(/^\/home\/[^/]+/, '~').replace(/^\/Users\/[^/]+/, '~'), normalizeAgentLabel(d.agent)]);
+  }
+  const tools = [...uniqueTools].sort((a, b) => a.localeCompare(b));
+
   let html = `<div class="settings-page">
-    <div class="page-title">Settings</div>
+    <h1 class="page-title">Settings</h1>
 
-    <div class="section-label">System</div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:var(--space-md);margin-bottom:var(--space-md)">
-      <div class="config-card"><div class="config-label">Storage Mode</div><div class="config-value">${escHtml(data.storageMode || 'reference')}</div></div>
-      <div class="config-card"><div class="config-label">DB Size</div><div class="config-value" id="dbSizeValue">${escHtml(data.dbSize?.display || 'N/A')}</div></div>
+    <h2 class="section-label">Appearance</h2>
+    <div class="form-row">
+      <label>Theme <select id="themeModeSelect" class="select">
+        <option value="system" ${themeMode==='system'?'selected':''}>System</option>
+        <option value="light" ${themeMode==='light'?'selected':''}>Light</option>
+        <option value="dark" ${themeMode==='dark'?'selected':''}>Dark</option>
+      </select></label>
+      <label>Dark variant <select id="darkVariantSelect" class="select">
+        <option value="default" ${darkVariant==='default'?'selected':''}>Default</option>
+        <option value="trueblack" ${darkVariant==='trueblack'?'selected':''}>True black</option>
+      </select></label>
     </div>
-    <p class="settings-help" style="margin-bottom:var(--space-sm)">Date range: ${fmtDate(data.dateRange?.earliest)} to ${fmtDate(data.dateRange?.latest)}</p>
+
+    <h2 class="section-label">Database</h2>
+    <dl class="facts">
+      <dt>Storage mode</dt><dd>${escHtml(data.storageMode || 'reference')}</dd>
+      <dt>Size</dt><dd id="dbSizeValue">${escHtml(data.dbSize?.display || 'N/A')}</dd>
+      <dt>Date range</dt><dd>${fmtDate(data.dateRange?.earliest)} to ${fmtDate(data.dateRange?.latest)}</dd>
+      <dt>Indexed sessions</dt><dd id="sysSessions">\u2026</dd>
+    </dl>
     <div class="settings-maintenance">
-      <button class="export-btn" id="optimizeDbBtn">Optimize Database</button>
-      <span id="optimizeDbStatus" class="settings-maintenance-status"></span>
+      <button class="btn" id="optimizeDbBtn">Optimize database</button>
+      <span id="optimizeDbStatus" class="settings-maintenance-status" role="status"></span>
     </div>
-    <p class="settings-help">Reclaims unused space and merges pending writes. Safe to run anytime, doesn't delete any data.</p>
+    <p class="settings-help">Reclaims unused space and merges pending writes. Safe to run anytime; it doesn't delete data.</p>
 
-    <div class="section-label">Appearance</div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:var(--space-md);margin-bottom:var(--space-xl)">
-      <div class="config-card">
-        <div class="config-label">Theme Mode</div>
-        <select id="themeModeSelect" class="settings-select">
-          <option value="system" ${themeMode==='system'?'selected':''}>System</option>
-          <option value="light" ${themeMode==='light'?'selected':''}>Light</option>
-          <option value="dark" ${themeMode==='dark'?'selected':''}>Dark</option>
-        </select>
-      </div>
-      <div class="config-card">
-        <div class="config-label">Dark Variant</div>
-        <select id="darkVariantSelect" class="settings-select">
-          <option value="default" ${darkVariant==='default'?'selected':''}>Default</option>
-          <option value="trueblack" ${darkVariant==='trueblack'?'selected':''}>True Black</option>
-        </select>
-      </div>
-    </div>
+    ${pathRows.length ? `<h2 class="section-label">Session sources</h2>
+    <dl class="facts facts-paths">${pathRows.map(([p, a]) => `<dt class="mono">${escHtml(p)}</dt><dd>${escHtml(a)}</dd>`).join('')}</dl>` : ''}
 
-    ${data.sessionDirs && data.sessionDirs.length ? (() => {
-      const dirs = data.sessionDirs || [];
-      const claudeDirs = dirs.filter(d => d.agent === 'claude-code' || /^claude-/.test(d.agent || ''));
-      const otherDirs = dirs.filter(d => !(d.agent === 'claude-code' || /^claude-/.test(d.agent || '')));
+    <h2 class="section-label">Server</h2>
+    <dl class="facts">
+      <dt>Version</dt><dd id="sysVersion">\u2026</dd>
+      <dt>Uptime</dt><dd id="sysUptime">\u2026</dd>
+      <dt>Node.js</dt><dd id="sysNode">\u2026</dd>
+      ${data.agents && data.agents.length ? `<dt>Agents</dt><dd>${data.agents.map(escHtml).join(', ')}</dd>` : ''}
+    </dl>
 
-      const lines = [];
-
-      if (claudeDirs.length) {
-        const projects = new Set();
-        for (const d of claudeDirs) {
-          const m = (d.path || '').match(/[\\/]\\.claude[\\/]projects[\\/]([^\\/]+)$/);
-          if (m && m[1]) projects.add(m[1]);
-        }
-        const projectCount = projects.size || claudeDirs.length;
-        lines.push(`<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-subtle)"><span style="color:var(--text-tertiary)">~/.claude/projects/*</span> <span style="color:var(--accent);font-size:12px">claude-code \u00b7 ${projectCount} workspace${projectCount === 1 ? '' : 's'}</span></div>`);
-      }
-
-      for (const d of otherDirs) {
-        const display = (d.path || '').replace(/^\/home\/[^/]+/, '~').replace(/^\/Users\/[^/]+/, '~');
-        lines.push(`<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-subtle)"><span style="color:var(--text-tertiary)">${escHtml(display)}</span> <span style="color:var(--accent);font-size:12px">${escHtml(normalizeAgentLabel(d.agent))}</span></div>`);
-      }
-
-      return `<div class="section-label">Session Paths</div>
-      <div class="config-card" style="margin-bottom:var(--space-xl)">
-        <div style="font-size:12.5px;font-family:var(--font-mono)">${lines.join('')}</div>
-      </div>`;
-    })() : ''}
-
-    ${data.agents && data.agents.length > 1 ? `<div class="section-label">Agents</div><div class="filters" style="margin-bottom:var(--space-xl)">${data.agents.map(a => `<span class="filter-chip">${escHtml(a)}</span>`).join('')}</div>` : ''}
-    <div class="section-label">Tools Used</div>
-    <div class="tools-grid">${[...new Set((data.tools||[]).filter(t => t).map(t => fmtToolGroup(t)))].sort().map(t => `<span class="tool-chip">${escHtml(t)}</span>`).join('')}</div>
-
-    <div class="section-label">System Info</div>
-    <div id="systemInfoContainer" style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:var(--space-md);margin-bottom:var(--space-md)">
-      <div class="config-card"><div class="config-label">Version</div><div class="config-value" id="sysVersion">…</div></div>
-      <div class="config-card"><div class="config-label">Uptime</div><div class="config-value" id="sysUptime">…</div></div>
-      <div class="config-card"><div class="config-label">Indexed Sessions</div><div class="config-value" id="sysSessions">…</div></div>
-      <div class="config-card"><div class="config-label">Node.js</div><div class="config-value" id="sysNode">…</div></div>
-    </div>
+    <details class="tools-used">
+      <summary class="section-label">Tools seen <span class="count">${tools.length}</span></summary>
+      <ul class="tools-grid">${tools.map(t => `<li>${escHtml(t)}</li>`).join('')}</ul>
+    </details>
   </div>`;
 
   content.innerHTML = html;
@@ -1602,7 +1548,7 @@ async function viewStats() {
 async function viewFiles() {
   clearJumpUi();
   window._lastView = 'files';
-  content.innerHTML = `<div class="page-title">Files</div>${skeletonRows(6, 'file')}`;
+  content.innerHTML = `<h1 class="page-title">Files</h1>${skeletonRows(6, 'file')}`;
   transitionView();
   const data = await api('/files?limit=500');
   if (data._error) {
@@ -1648,24 +1594,19 @@ function renderFiles() {
 
   const exts = [...new Set(window._allFiles.map(f => getFileExt(f.file_path)))].sort();
 
-  let html = `<div class="page-title">Files</div>
-    <div class="search-bar" style="margin-bottom:12px">
+  const sortBtn = (val, label) => `<button class="filter-chip${sort === val ? ' active' : ''}" data-sort="${val}" aria-pressed="${sort === val}">${label}</button>`;
+  let html = `<header class="page-head"><h1 class="page-title">Files</h1><span class="page-count">${files.length.toLocaleString()} of ${window._allFiles.length.toLocaleString()}</span></header>
+    <div class="search-bar">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
       <input type="text" id="fileSearchInput" placeholder="Filter by filename or path\u2026" value="${escHtml(window._fileSearch)}">
     </div>
-    <div class="filters" style="margin-bottom:8px">
-      <span class="filter-chip ${sort==='touches'?'active':''}" data-sort="touches">Most touched</span>
-      <span class="filter-chip ${sort==='recent'?'active':''}" data-sort="recent">Recent</span>
-      <span class="filter-chip ${sort==='sessions'?'active':''}" data-sort="sessions">Most sessions</span>
-      <span class="filter-chip ${sort==='name'?'active':''}" data-sort="name">A\u2013Z</span>
-    </div>
-    <div class="filters" style="margin-bottom:12px">
-      <span class="filter-chip ext-chip ${!window._fileFilter?'active':''}" data-ext="">All</span>
-      ${exts.map(e => `<span class="filter-chip ext-chip ${window._fileFilter===e?'active':''}" data-ext="${e}">${e}</span>`).join('')}
-    </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-      <span style="color:var(--text-tertiary);font-size:12px;font-weight:500">${files.length} files</span>
-      <span class="filter-chip ${window._fileGrouped?'active':''}" id="groupToggle" style="cursor:pointer">Group by directory</span>
+    <div class="toolbar">
+      <div class="seg" role="group" aria-label="Sort">${sortBtn('touches', 'Most touched')}${sortBtn('recent', 'Recent')}${sortBtn('sessions', 'Most sessions')}${sortBtn('name', 'A\u2013Z')}</div>
+      <select id="extSelect" class="select" aria-label="File type">
+        <option value="">All types</option>
+        ${exts.map(e => `<option value="${escHtml(e)}"${window._fileFilter === e ? ' selected' : ''}>${escHtml(e)}</option>`).join('')}
+      </select>
+      <button class="btn${window._fileGrouped ? ' active' : ''}" id="groupToggle" aria-pressed="${window._fileGrouped}">Group by directory</button>
     </div>
     <div id="filesList"></div>`;
 
@@ -1693,18 +1634,19 @@ function renderFiles() {
       return groupMetric(b[1]) - groupMetric(a[1]);
     });
 
+    listEl.className = 'file-list';
     listEl.innerHTML = sortedGroups.map(([dir, dirFiles]) => {
       const totalTouches = dirFiles.reduce((s, f) => s + f.touch_count, 0);
       const totalSessions = dirFiles.reduce((s, f) => s + f.session_count, 0);
       const groupStat = sort === 'sessions' ? `${totalSessions} sessions` : `${totalTouches} touches`;
       return `
         <div class="file-group">
-          <div class="file-group-header" data-dir="${escHtml(dir)}">
-            <span class="file-group-arrow">\u25b6</span>
+          <button class="file-group-header" data-dir="${escHtml(dir)}" aria-expanded="false">
             <span class="file-group-name">~/${escHtml(dir)}</span>
-            <span style="color:var(--text-tertiary);font-size:12px;margin-left:auto">${dirFiles.length} files \u00b7 ${groupStat}</span>
-          </div>
-          <div class="file-group-items" style="display:none">
+            <span class="file-group-stat">${dirFiles.length} files</span>
+            <span class="file-group-stat">${groupStat}</span>
+          </button>
+          <div class="file-group-items" hidden>
             ${dirFiles.map(f => renderFileItem(f)).join('')}
           </div>
         </div>`;
@@ -1713,17 +1655,13 @@ function renderFiles() {
     $$('.file-group-header').forEach(h => {
       h.addEventListener('click', () => {
         const items = h.nextElementSibling;
-        const arrow = h.querySelector('.file-group-arrow');
-        if (items.style.display === 'none') {
-          items.style.display = 'block';
-          arrow.textContent = '\u25bc';
-        } else {
-          items.style.display = 'none';
-          arrow.textContent = '\u25b6';
-        }
+        const open = items.hasAttribute('hidden');
+        items.toggleAttribute('hidden', !open);
+        h.setAttribute('aria-expanded', String(open));
       });
     });
   } else {
+    listEl.className = 'file-list';
     listEl.innerHTML = files.map(f => renderFileItem(f)).join('');
   }
 
@@ -1742,14 +1680,13 @@ function renderFiles() {
     chip.onclick = () => { window._fileSort = chip.dataset.sort; renderFiles(); };
   });
 
-  $$('.ext-chip').forEach(chip => {
-    chip.onclick = () => { window._fileFilter = chip.dataset.ext; renderFiles(); };
-  });
+  $('#extSelect').addEventListener('change', e => { window._fileFilter = e.target.value; renderFiles(); });
 
   $('#groupToggle').addEventListener('click', () => { window._fileGrouped = !window._fileGrouped; renderFiles(); });
 
   $$('.file-item').forEach(item => {
     item.addEventListener('click', () => viewFileDetail(item.dataset.path));
+    item.addEventListener('keydown', e => { if (e.key === 'Enter') viewFileDetail(item.dataset.path); });
   });
 
   searchInput.addEventListener('keyup', () => { window._fileCursorPos = searchInput.selectionStart; });
@@ -1757,16 +1694,14 @@ function renderFiles() {
 
 function renderFileItem(f) {
   const fname = f.file_path.split('/').pop();
-  const dir = f.file_path.split('/').slice(0, -1).join('/');
+  const dir = f.file_path.split('/').slice(0, -1).join('/').replace(/^\/home\/[^/]+/, '~').replace(/^\/Users\/[^/]+/, '~');
   return `
-    <div class="file-item" data-path="${escHtml(f.file_path)}">
-      <div class="file-path"><span style="color:var(--text-primary);font-weight:500">${escHtml(fname)}</span> <span style="color:var(--text-tertiary);font-size:12px">${escHtml(dir)}/</span></div>
-      <div class="file-meta">
-        <span>${f.touch_count} touches</span>
-        <span>${f.session_count} sessions</span>
-        <span style="color:var(--amber)">${escHtml(f.operations)}</span>
-        <span class="session-time">${fmtTime(f.last_touched)}</span>
-      </div>
+    <div class="file-item" data-path="${escHtml(f.file_path)}" role="link" tabindex="0">
+      <div class="file-path"><span class="file-name">${escHtml(fname)}</span><span class="file-dir">${escHtml(dir)}/</span></div>
+      <span class="file-stat" title="${f.touch_count} touches">${fmtCompact(f.touch_count)}</span>
+      <span class="file-stat" title="${f.session_count} sessions">${fmtCompact(f.session_count)} sess</span>
+      <span class="file-ops">${escHtml(f.operations)}</span>
+      <time class="file-when">${fmtTime(f.last_touched)}</time>
     </div>
   `;
 }
@@ -1782,11 +1717,12 @@ async function viewFileDetail(filePath) {
 
   let html = `
     <div class="back-btn" id="backBtn">\u2190 Back</div>
-    <div class="page-title" style="word-break:break-all;font-size:16px">${escHtml(filePath)}</div>
-    <div class="section-label">${data.sessions.length} sessions touched this file</div>
+    <h1 class="page-title file-title">${escHtml(filePath.split('/').pop())}</h1>
+    <p class="page-sub mono">${escHtml(filePath)}</p>
+    <h2 class="section-label">${data.sessions.length} session${data.sessions.length === 1 ? '' : 's'} touched this file</h2>
   `;
 
-  html += data.sessions.map(s => renderSessionItem(s)).join('');
+  html += renderSessionList(data.sessions);
   content.innerHTML = html;
   transitionView();
 
@@ -1821,52 +1757,45 @@ const SIGNAL_COLORS = {
   long_prompt_short_session: 'accent'
 };
 
-function renderSignalTag(sig) {
+function renderSignalTag(sig, count = 1) {
   const label = SIGNAL_LABELS[sig.type] || sig.type;
   const color = SIGNAL_COLORS[sig.type] || 'muted';
   const desc = SIGNAL_DESCRIPTIONS[sig.type] || '';
-  return `<span class="signal-tag signal-${color}"${desc ? ` title="${escHtml(desc)}"` : ''}><span class="signal-dot"></span>${escHtml(label)}</span>`;
+  return `<span class="signal-tag signal-${color}"${desc ? ` title="${escHtml(desc)}"` : ''}>${escHtml(label)}${count > 1 ? `<span class="signal-count"> \u00d7${count}</span>` : ''}</span>`;
 }
 
-function renderReliabilityBadge(score) {
-  const reliability = 100 - score;
-  return `<span class="insight-score-value" title="Reliability score: higher means fewer errors">${reliability}</span>`;
-}
-
-function renderIssueRateBadge(signals) {
-  const TOTAL_SIGNAL_TYPES = 5;
-  const uniqueTypes = new Set((signals || []).map(s => s.type)).size;
-  const rate = Math.round((uniqueTypes / TOTAL_SIGNAL_TYPES) * 100);
-  return `<span class="insight-score-value" title="${uniqueTypes} of ${TOTAL_SIGNAL_TYPES} issue types detected">${rate}%</span>`;
+// One entry per signal type with a count, most frequent first.
+function renderSignalSummary(signals) {
+  const counts = new Map();
+  for (const sig of signals || []) counts.set(sig.type, (counts.get(sig.type) || 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])
+    .map(([type, n]) => renderSignalTag({ type }, n)).join('<span class="sep" aria-hidden="true">, </span>');
 }
 
 function renderInsightsPanel(insights) {
   if (!insights || !insights.signals || !insights.signals.length) {
-    return `<div class="insights-panel insights-clean"><span style="color:var(--text-tertiary);font-size:13px">No issues detected</span></div>`;
+    return `<section class="insights-panel insights-clean"><h2 class="section-label">Health</h2><p class="quiet-note">No issues detected.</p></section>`;
   }
-  return `<div class="insights-panel">
-    <div class="section-label" style="margin-top:0">Session Health ${renderReliabilityBadge(insights.confusion_score)}</div>
-    <div class="insights-signals">
+  return `<section class="insights-panel">
+    <h2 class="section-label">Health <span class="count">reliability ${100 - insights.confusion_score}/100</span></h2>
+    <ul class="insights-signals">
       ${insights.signals.map(sig => {
         let detail = '';
-        if (sig.type === 'tool_retry_loop') detail = `${escHtml(sig.tool)} called ${sig.count}x consecutively`;
+        if (sig.type === 'tool_retry_loop') detail = `${escHtml(sig.tool)} called ${sig.count}\u00d7 in a row`;
         else if (sig.type === 'session_bail') detail = `${sig.tool_calls} tool calls with no file writes`;
         else if (sig.type === 'high_error_rate') detail = `${sig.rate}% error rate (${sig.error_count}/${sig.total})`;
-        else if (sig.type === 'long_prompt_short_session') detail = `${sig.prompt_words} word prompt, ${sig.tool_calls} tool calls`;
+        else if (sig.type === 'long_prompt_short_session') detail = `${sig.prompt_words}-word prompt, ${sig.tool_calls} tool calls`;
         else if (sig.type === 'no_completion') detail = `Ended on ${escHtml(sig.last_event_type)}${sig.last_tool ? ': ' + escHtml(sig.last_tool) : ''}`;
-        return `<div class="insight-callout">
-          ${renderSignalTag(sig)}
-          <span class="insight-detail">${detail}</span>
-        </div>`;
+        return `<li class="insight-callout">${renderSignalTag(sig)}<span class="insight-detail">${detail}</span></li>`;
       }).join('')}
-    </div>
-  </div>`;
+    </ul>
+  </section>`;
 }
 
 async function viewInsights() {
   clearJumpUi();
   window._lastView = 'insights';
-  content.innerHTML = `<div class="page-title">Insights</div><div class="stat-grid">${skeletonRows(3, 'stats')}</div>`;
+  content.innerHTML = `<h1 class="page-title">Insights</h1>${skeletonRows(2, 'stats')}${skeletonRows(5, 'session')}`;
   transitionView();
 
   const data = await api('/insights');
@@ -1885,14 +1814,13 @@ async function viewInsights() {
   // Reliability score (inverted struggle score)
   const reliabilityScore = 100 - (data.avg_confusion_score || 0);
 
-  let html = `<div class="page-title">Insights</div>
+  let html = `<h1 class="page-title">Insights</h1>
+    ${renderMetrics([
+      { label: 'Sessions with an issue', value: `${issueRate}%`, note: `${data.flagged_count.toLocaleString()} of ${data.total_sessions.toLocaleString()}` },
+      { label: 'Reliability', value: `${reliabilityScore}/100`, note: 'Average; higher means cleaner runs' },
+    ])}
 
-    <div class="stat-grid">
-      <div class="stat-card accent-amber"><div class="label">Issue Rate</div><div class="value">${issueRate}%</div><div class="stat-desc">${data.flagged_count} of ${data.total_sessions} sessions had at least one detected issue</div></div>
-      <div class="stat-card accent-purple"><div class="label">Reliability Score</div><div class="value">${reliabilityScore}</div><div class="stat-desc">How often the agent completed tasks cleanly, out of 100</div></div>
-    </div>
-
-    <div class="section-label">Issue Types</div>
+    <h2 class="section-label">Issue types</h2>
     <div class="signal-chart">
       ${signalTypes.map(type => {
         const count = data.signal_counts[type] || 0;
@@ -1916,27 +1844,22 @@ async function viewInsights() {
       }).join('')}
     </div>
 
-    <div class="section-label">Sessions with Issues (${data.flagged_count})</div>
-    <div id="insightsList">
+    <h2 class="section-label">Sessions with issues <span class="count">${data.flagged_count.toLocaleString()}</span></h2>
+    <div id="insightsList" class="session-list insight-list">
       ${data.top_flagged.length ? [...data.top_flagged].sort((a, b) => {
         const aRate = new Set((a.signals||[]).map(s=>s.type)).size;
         const bRate = new Set((b.signals||[]).map(s=>s.type)).size;
         return bRate - aRate || b.confusion_score - a.confusion_score;
       }).map(s => {
         const summary = cleanSessionSummary(s.summary, '');
-        return `<div class="session-item insight-row" data-id="${escHtml(s.session_id)}">
-          <div class="session-header">
-            <span class="session-time">${fmtTime(s.start_time)}</span>
-            <span class="insight-scores">issue rate ${renderIssueRateBadge(s.signals)} · reliability ${renderReliabilityBadge(s.confusion_score)}</span>
+        return `<div class="session-item insight-row" data-id="${escHtml(s.session_id)}" role="link" tabindex="0">
+          <div class="si-main">
+            <div class="si-title"><span class="si-headline">${escHtml(truncate(summary, 160))}</span></div>
+            <div class="si-meta">${renderSignalSummary(s.signals)}</div>
           </div>
-          <div class="session-summary">${escHtml(truncate(summary, 120))}</div>
-          <div class="session-meta">
-            <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-              ${s.agent ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
-              ${s.model ? `<span class="session-model">${escHtml(s.model)}</span>` : ''}
-            </span>
-            <span class="insight-signal-tags">${s.signals.map(sig => renderSignalTag(sig)).join('')}</span>
-          </div>
+          <div class="si-when"><span>${fmtTime(s.start_time)}</span><span class="si-dur">${escHtml(normalizeAgentLabel(s.agent || ''))}</span></div>
+          <div class="si-counts" title="Reliability score: higher means fewer errors"><span>${100 - s.confusion_score}<span class="unit">/100</span></span><span>reliability</span></div>
+          <div class="si-action"></div>
         </div>`;
       }).join('') : '<div class="empty"><p>No flagged sessions found</p></div>'}
     </div>
