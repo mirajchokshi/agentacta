@@ -1,0 +1,21 @@
+# agentsview (MIT, github.com/kenn-io/agentsview), pinned. Same read-only data,
+# telemetry off, bound to localhost.
+name: aabench
+services:
+  agentsview:
+    image: ghcr.io/kenn-io/agentsview:0.45.0
+    ports: ["127.0.0.1:18080:8080"]
+    # Default args plus --public-url: it rejects Host headers it does not expect.
+    command: ["--host", "0.0.0.0", "--no-browser", "--public-url", "http://127.0.0.1:18080"]
+    environment:
+      AGENTSVIEW_TELEMETRY_ENABLED: "0"
+      CLAUDE_PROJECTS_DIR: /agents/claude
+      CODEX_SESSIONS_DIR: /agents/codex
+      OPENCLAW_DIR: /agents/openclaw
+    volumes:
+      - agentsview-state:/data
+      - ${BENCH_HOME:-~/agentacta-bench-env}/data/home/.claude/projects:/agents/claude:ro
+      - ${BENCH_HOME:-~/agentacta-bench-env}/data/home/.codex/sessions:/agents/codex:ro
+      - ${BENCH_HOME:-~/agentacta-bench-env}/data/home/.openclaw/agents:/agents/openclaw:ro
+volumes:
+  agentsview-state:

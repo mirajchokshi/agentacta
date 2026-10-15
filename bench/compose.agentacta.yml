@@ -1,0 +1,13 @@
+# AgentActa under test. Data is mounted read-only; its database lives in a
+# project volume so teardown removes it. Bound to localhost only.
+name: aabench
+services:
+  agentacta:
+    build: { context: .., dockerfile: bench/agentacta/Dockerfile }
+    image: aabench-agentacta:local
+    ports: ["127.0.0.1:14003:4003"]
+    volumes:
+      - ${BENCH_HOME:-~/agentacta-bench-env}/data/home:/data/home:ro
+      - agentacta-state:/state
+volumes:
+  agentacta-state:
