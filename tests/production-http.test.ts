@@ -69,6 +69,11 @@ describe('production HTTP routes', () => {
       JSON.stringify({ type: 'session', id: 'production-http-touches', timestamp: '2025-01-03T00:00:00Z' }),
       ...[1, 2, 3].map(n => JSON.stringify({ type: 'message', id: `touch-${n}`, timestamp: `2025-01-03T00:0${n}:00Z`, message: { role: 'assistant', content: [{ type: 'tool_use', id: `tc-${n}`, name: 'Read', input: { path: '/tmp/touched.js' } }] } })),
     ].join('\n') + '\n');
+    // A later subagent of the same parent: its activity is newer than every root.
+    fs.writeFileSync(path.join(SESSIONS_DIR, 'child-late.jsonl'), [
+      JSON.stringify({ type: 'session_meta', timestamp: '2025-01-09T00:00:00Z', payload: { id: 'production-http-child-late', timestamp: '2025-01-09T00:00:00Z', source: { subagent: { thread_spawn: { parent_thread_id: 'production-http-session' } } } } }),
+      JSON.stringify({ type: 'event_msg', timestamp: '2025-01-09T00:01:00Z', payload: { type: 'user_message', message: 'late child task' } }),
+    ].join('\n') + '\n');
     // A session that started but never recorded any message, so it has no end.
     fs.writeFileSync(path.join(SESSIONS_DIR, 'stale.jsonl'), JSON.stringify({ type: 'session', id: 'production-http-stale', timestamp: '2025-01-02T00:00:00Z' }) + '\n');
 
@@ -98,8 +103,9 @@ describe('production HTTP routes', () => {
   it('serves timeline events for the requested local calendar day', async () => {
     const response = await request('/api/timeline?date=2025-01-01');
     assert.strictEqual(response.status, 200);
-    const data = JSON.parse(response.body) as { date: string; events: Array<{ session_id: string }> };
+    const data = JSON.parse(response.body) as { date: string; events: Array<{ session_id: string; session_label?: unknown }> };
     assert.strictEqual(data.date, '2025-01-01');
+    assert.ok(data.events.every(e => 'session_label' in e), 'timeline rows carry the session title');
     assert.strictEqual(data.events.filter(e => e.session_id === 'production-http-session').length, 1);
   });
 
@@ -124,8 +130,9 @@ describe('production HTTP routes', () => {
     const tree = JSON.parse((await request('/api/sessions?roots=1')).body) as { sessions: Array<{ id: string; child_count: number; children: Array<{ id: string }> }> };
     assert.ok(!tree.sessions.some(s => s.id === 'production-http-child'), 'child is not a top-level row');
     const parent = tree.sessions.find(s => s.id === 'production-http-session');
-    assert.strictEqual(parent?.child_count, 1);
-    assert.strictEqual(parent?.children[0].id, 'production-http-child');
+    assert.strictEqual(parent?.child_count, 2);
+    assert.deepStrictEqual(parent?.children.map(c => c.id), ['production-http-child-late', 'production-http-child'], 'newest child first');
+    assert.strictEqual(tree.sessions[0].id, 'production-http-session', 'a group sorts by its newest activity, including subagents');
 
     const detail = JSON.parse((await request('/api/sessions/production-http-child')).body) as { parent: { id: string } };
     assert.strictEqual(detail.parent.id, 'production-http-session');

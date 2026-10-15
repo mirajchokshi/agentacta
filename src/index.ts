@@ -29,7 +29,7 @@ import type {
 } from './types.js';
 import { loadConfig } from './config.js';
 import { open, init, createStmts } from './db.js';
-import { discoverSessionDirs, listSessionFiles, indexFile, indexOpenClawDb, watchOpenClawDb, indexAll } from './indexer.js';
+import { discoverSessionDirs, listSessionFiles, listClaudeSubagentFiles, indexFile, indexOpenClawDb, watchOpenClawDb, indexAll } from './indexer.js';
 import { attributeSessionEvents, attributeEventDelta } from './project-attribution.js';
 import { loadDeltaAttributionContext } from './delta-attribution-context.js';
 import { analyzeSession, analyzeAll, getInsightsSummary } from './insights.js';
@@ -315,7 +315,9 @@ function refreshInsightsAndNotify(sessionIds: string[]): void {
 
 function reindexRecursiveDir(dir: SessionDir): void {
   try {
-    const files: string[] = listSessionFiles(dir);
+    // Claude project dirs: top-level transcripts are covered by fs.watch, so
+    // the interval only needs to poll the nested subagents/ folders.
+    const files: string[] = dir.subagents && !dir.recursive ? listClaudeSubagentFiles(dir.path) : listSessionFiles(dir);
     let changed: number = 0;
     for (const filePath of files) {
       const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
@@ -550,7 +552,12 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       if (rootsOnly) where.push('(s.parent_id IS NULL OR s.parent_id NOT IN (SELECT id FROM sessions))');
       const whereSql: string = where.length ? ` WHERE ${where.join(' AND ')}` : '';
       const nowMs: number = Date.now();
-      const rows = (db.prepare(`${SESSION_SELECT}${whereSql} ORDER BY COALESCE(s.end_time, s.start_time) DESC LIMIT ? OFFSET ?`)
+      // In roots mode a group sorts by its most recent activity, parent or child,
+      // so a quiet parent with a busy subagent stays near the top.
+      const orderBy: string = rootsOnly
+        ? `MAX(COALESCE(s.end_time, s.start_time), COALESCE((SELECT MAX(COALESCE(c.end_time, c.start_time)) FROM sessions c WHERE c.parent_id = s.id), ''))`
+        : 'COALESCE(s.end_time, s.start_time)';
+      const rows = (db.prepare(`${SESSION_SELECT}${whereSql} ORDER BY ${orderBy} DESC LIMIT ? OFFSET ?`)
         .all(...params, limit, offset) as SessionRow[]).map(r => withStatus(r, nowMs));
       const total: number = (db.prepare(`SELECT COUNT(*) as c FROM sessions s${whereSql}`).get(...params) as CountRow).c;
       const sessions = rootsOnly
@@ -752,7 +759,7 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       const limit: number = Math.min(parseInt(query.limit || '100', 10) || 100, 500);
       const offset: number = Math.max(parseInt(query.offset || '0', 10) || 0, 0);
       const events: TimelineEventRow[] = db.prepare(
-        `SELECT e.*, s.summary as session_summary FROM events e
+        `SELECT e.*, s.summary as session_summary, s.label as session_label FROM events e
          JOIN sessions s ON s.id = e.session_id
          WHERE e.timestamp >= ? AND e.timestamp <= ?
          ORDER BY e.timestamp DESC
@@ -779,7 +786,7 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       const onUpdate = (): void => {
         try {
           const rows: TimelineEventRow[] = db.prepare(
-            `SELECT e.*, s.summary as session_summary FROM events e
+            `SELECT e.*, s.summary as session_summary, s.label as session_label FROM events e
              JOIN sessions s ON s.id = e.session_id
              WHERE (e.timestamp > ?) OR (e.timestamp = ? AND e.id > ?)
              ORDER BY e.timestamp ASC, e.id ASC`

@@ -223,4 +223,69 @@ describe('subagent indexing', () => {
     assert.strictEqual((after.prepare('SELECT COUNT(*) AS c FROM index_state').get() as { c: number }).c, 1, 'no reset at the same version');
     after.close();
   });
+
+  it('files a Claude subagent spawned by another subagent under its real parent', () => {
+    const projDir = path.join(TMP, 'claude-nested');
+    const root = 'root-0000-0000-0000-000000000001';
+    writeJsonl(path.join(projDir, `${root}.jsonl`), [
+      { type: 'user', sessionId: root, uuid: 'r-1', timestamp: '2026-10-01T00:00:00Z', message: { role: 'user', content: 'Root task' } },
+    ]);
+    const subDir = path.join(projDir, root, 'subagents');
+    const a = path.join(subDir, 'agent-aaa.jsonl');
+    writeJsonl(a, [
+      { type: 'user', isSidechain: true, agentId: 'aaa', sessionId: root, uuid: 'a-1', timestamp: '2026-10-01T00:01:00Z', message: { role: 'user', content: 'Do part A' } },
+      { type: 'assistant', isSidechain: true, agentId: 'aaa', sessionId: root, uuid: 'a-2', timestamp: '2026-10-01T00:02:00Z', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_spawn_b', name: 'Task', input: { description: 'Part B' } }] } },
+    ]);
+    fs.writeFileSync(a.replace(/\.jsonl$/, '.meta.json'), JSON.stringify({ description: 'Part A', spawnDepth: 1, toolUseId: 'toolu_root_task' }));
+    const b = path.join(subDir, 'agent-bbb.jsonl');
+    writeJsonl(b, [
+      { type: 'user', isSidechain: true, agentId: 'bbb', sessionId: root, uuid: 'b-1', timestamp: '2026-10-01T00:03:00Z', message: { role: 'user', content: 'Do part B' } },
+    ]);
+    fs.writeFileSync(b.replace(/\.jsonl$/, '.meta.json'), JSON.stringify({ description: 'Part B', spawnDepth: 2, toolUseId: 'toolu_spawn_b' }));
+
+    const files = listSessionFiles({ path: projDir, agent: 'claude-code', subagents: true });
+    assert.ok(files.indexOf(a) < files.indexOf(b), 'shallower subagents are listed first');
+    for (const f of files) indexFile(db, f, 'claude-code', stmts, false, {} as never);
+    assert.strictEqual((db.prepare('SELECT parent_id FROM sessions WHERE id = ?').get('agent-aaa') as SessionRow).parent_id, root);
+    assert.strictEqual((db.prepare('SELECT parent_id FROM sessions WHERE id = ?').get('agent-bbb') as SessionRow).parent_id, 'agent-aaa');
+  });
+
+  it('keeps an OpenClaw session\'s lineage after its key rolls over to a new session', () => {
+    const dbp = path.join(TMP, 'openclaw-rollover.sqlite');
+    const src = new Database(dbp);
+    src.exec('CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, event_json TEXT, created_at INTEGER)');
+    src.exec('CREATE TABLE session_nodes (session_key TEXT, current_session_id TEXT, parent_session_key TEXT, spawned_by TEXT, status TEXT, label TEXT, entry_json TEXT)');
+    const ins = src.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?)');
+    for (const sid of ['ro-parent', 'ro-old', 'ro-new']) {
+      ins.run(sid, 1, JSON.stringify({ type: 'session', version: 3, id: sid, timestamp: '2026-10-01T00:00:00Z' }), 1);
+      ins.run(sid, 2, JSON.stringify({ type: 'message', id: `${sid}-m`, timestamp: '2026-10-01T00:01:00Z', message: { role: 'user', content: `Hello ${sid}` } }), 2);
+    }
+    src.prepare('INSERT INTO session_nodes VALUES (?, ?, ?, ?, ?, ?, ?)').run('k:parent', 'ro-parent', null, null, null, null, '{}');
+    src.prepare('INSERT INTO session_nodes VALUES (?, ?, ?, ?, ?, ?, ?)').run('k:child', 'ro-old', 'k:parent', null, 'done', 'Child job', JSON.stringify({ parentSessionId: 'ro-parent' }));
+    indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never);
+    assert.strictEqual((db.prepare('SELECT parent_id FROM sessions WHERE id = ?').get('ro-old') as SessionRow).parent_id, 'ro-parent');
+
+    // The key moves on to a new session, and the old one gets one more line.
+    src.prepare("UPDATE session_nodes SET current_session_id = 'ro-new', status = NULL WHERE session_key = 'k:child'").run();
+    ins.run('ro-old', 3, JSON.stringify({ type: 'message', id: 'ro-old-m2', timestamp: '2026-10-01T00:02:00Z', message: { role: 'assistant', content: 'late reply' } }), 3);
+    src.close();
+    indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never);
+    const old = db.prepare('SELECT parent_id, label, source_status FROM sessions WHERE id = ?').get('ro-old') as SessionRow;
+    assert.deepStrictEqual([old.parent_id, old.label, old.source_status], ['ro-parent', 'Child job', 'done']);
+  });
+
+  it('re-indexes an OpenClaw session when only its label changes', () => {
+    const dbp = path.join(TMP, 'openclaw-label.sqlite');
+    const src = new Database(dbp);
+    src.exec('CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, event_json TEXT, created_at INTEGER)');
+    src.exec('CREATE TABLE session_nodes (session_key TEXT, current_session_id TEXT, parent_session_key TEXT, spawned_by TEXT, status TEXT, label TEXT, entry_json TEXT)');
+    src.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?)').run('lb-1', 1, JSON.stringify({ type: 'session', version: 3, id: 'lb-1', timestamp: '2026-10-01T00:00:00Z' }), 1);
+    src.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?)').run('lb-1', 2, JSON.stringify({ type: 'message', id: 'lb-1-m', timestamp: '2026-10-01T00:01:00Z', message: { role: 'user', content: 'Hello' } }), 2);
+    src.prepare('INSERT INTO session_nodes VALUES (?, ?, ?, ?, ?, ?, ?)').run('k:lb', 'lb-1', null, null, null, 'Old name', '{}');
+    indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never);
+    src.prepare("UPDATE session_nodes SET label = 'New name'").run();
+    src.close();
+    assert.deepStrictEqual(indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never), ['lb-1']);
+    assert.strictEqual((db.prepare('SELECT label FROM sessions WHERE id = ?').get('lb-1') as SessionRow).label, 'New name');
+  });
 });

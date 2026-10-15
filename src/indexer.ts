@@ -57,7 +57,12 @@ function listClaudeSubagentFiles(projDir: string): string[] {
       if (f.endsWith('.jsonl')) out.push(path.join(subDir, f));
     }
   }
-  return out;
+  // Shallower subagents first, so a nested subagent's spawner is already
+  // indexed when it is resolved.
+  return out
+    .map(f => ({ f, depth: readClaudeSubagentMeta(f).spawnDepth }))
+    .sort((a, b) => a.depth - b.depth)
+    .map(x => x.f);
 }
 
 function listSessionFiles(dir: SessionDir): string[] {
@@ -66,14 +71,20 @@ function listSessionFiles(dir: SessionDir): string[] {
   return files;
 }
 
-function readClaudeSubagentLabel(filePath: string): string | null {
+interface ClaudeSubagentMeta { label: string | null; spawnDepth: number; toolUseId: string | null }
+
+function readClaudeSubagentMeta(filePath: string): ClaudeSubagentMeta {
   try {
     const meta = JSON.parse(fs.readFileSync(filePath.replace(/\.jsonl$/, '.meta.json'), 'utf8')) as Record<string, unknown>;
     const desc = typeof meta.description === 'string' ? meta.description.trim() : '';
     const type = typeof meta.agentType === 'string' ? meta.agentType.trim() : '';
-    return desc || type || null;
+    return {
+      label: desc || type || null,
+      spawnDepth: typeof meta.spawnDepth === 'number' ? meta.spawnDepth : 1,
+      toolUseId: typeof meta.toolUseId === 'string' ? meta.toolUseId : null,
+    };
   } catch {
-    return null;
+    return { label: null, spawnDepth: 1, toolUseId: null };
   }
 }
 
@@ -548,9 +559,18 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
       if (obj.isSidechain === true && obj.agentId) {
         sessionId = `agent-${obj.agentId}`;
         sessionStart = obj.timestamp || null;
+        // Every subagent line carries the ROOT session id. A subagent spawned by
+        // another subagent is found through the Task call that spawned it.
         if (obj.sessionId) parentId = obj.sessionId;
         sessionType = 'subagent';
-        if (!label && sourceKey.endsWith('.jsonl')) label = readClaudeSubagentLabel(sourceKey);
+        if (sourceKey.endsWith('.jsonl')) {
+          const meta = readClaudeSubagentMeta(sourceKey);
+          if (!label) label = meta.label;
+          if (meta.spawnDepth > 1 && meta.toolUseId) {
+            const spawner = db.prepare('SELECT session_id FROM events WHERE id = ?').get(meta.toolUseId) as { session_id: string } | undefined;
+            if (spawner && spawner.session_id !== sessionId) parentId = spawner.session_id;
+          }
+        }
         break;
       }
       if (obj.sessionId && obj.timestamp) {
@@ -977,11 +997,17 @@ function indexOpenClawDb(db: Database.Database, dbPath: string, agentName: strin
     const lineageById = loadOpenClawLineage(src);
     for (const s of sessions) {
       const sourceKey = `${dbPath}#${s.session_id}`;
-      const lineage: SessionLineage = lineageById.get(s.session_id) || {};
+      // session_nodes only names each key's CURRENT session; for older ones keep
+      // what was recorded while they were current instead of wiping it.
+      let lineage: SessionLineage | undefined = lineageById.get(s.session_id);
+      if (!lineage) {
+        const prev = db.prepare('SELECT parent_id, label, source_status FROM sessions WHERE id = ?').get(s.session_id) as { parent_id: string | null; label: string | null; source_status: string | null } | undefined;
+        lineage = prev ? { parentId: prev.parent_id, label: prev.label, sourceStatus: prev.source_status } : {};
+      }
       // Change marker: appends bump max_seq, rewrites change the count, and
       // in-place row updates virtually always change total byte length. Lineage
       // is included so a status flip (e.g. killed) re-indexes without new lines.
-      const stateToken = `seq:${s.max_seq}:${s.line_count}:${s.byte_count}:${lineage.parentId || ''}:${lineage.sourceStatus || ''}`;
+      const stateToken = `seq:${s.max_seq}:${s.line_count}:${s.byte_count}:${lineage.parentId || ''}:${lineage.sourceStatus || ''}:${lineage.label || ''}`;
       if (!REINDEX) {
         const state = stmts.getState.get(sourceKey) as IndexStateRow | undefined;
         if (state && state.last_modified === stateToken) continue;
@@ -1186,6 +1212,6 @@ function indexAll(db: Database.Database, config: AgentActaConfig): IndexAllResul
   return { sessions: stats.sessions, events: evStats.events, newSessions: totalSessions };
 }
 
-export { discoverSessionDirs, listJsonlFiles, listSessionFiles, indexFile, indexCronRunFile, indexOpenClawDb, watchOpenClawDb, indexAll };
+export { discoverSessionDirs, listJsonlFiles, listSessionFiles, listClaudeSubagentFiles, indexFile, indexCronRunFile, indexOpenClawDb, watchOpenClawDb, indexAll };
 
 if (require.main === module) run();
