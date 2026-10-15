@@ -23,17 +23,17 @@ import type {
   FileActivityRow,
   FileActivityAggRow,
   FileSessionRow,
-  AttributionResult,
 } from './types.js';
 import { loadConfig } from './config.js';
 import { open, init } from './db.js';
 import { discoverSessionDirs } from './indexer.js';
 import type { WorkerMessage } from './index-worker.js';
-import { attributeSessionEvents, attributeEventDelta } from './project-attribution.js';
+import { attributeEventDelta } from './project-attribution.js';
 import { loadDeltaAttributionContext } from './delta-attribution-context.js';
 import { analyzeSession, getInsightsSummary } from './insights.js';
 import { isValidDateKey, resolveStaticPath } from './http-utils.js';
-import { withStatus, attachChildren, sessionShape } from './session-status.js';
+import { withStatus, attachChildren } from './session-status.js';
+import { loadSessionEvents, loadOlderSessionEvents } from './session-detail.js';
 
 // --version / -v flag: print version and exit
 if (process.argv.includes('--version') || process.argv.includes('-v')) {
@@ -585,11 +585,17 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
       const id: string = pathname.split('/')[3];
       const row = db.prepare(`${SESSION_SELECT} WHERE s.id = ?`).get(id) as SessionRow | undefined;
       if (!row) { json(res, { error: 'Not found' }, 404); }
+      else if (query.before) {
+        // ?before=<timestamp>|<id>&limit=N: the next N older events while scrolling.
+        const sep: number = query.before.indexOf('|'); // ids may contain '|', timestamps don't
+        const limit: number = Math.min(Math.max(parseInt(query.limit) || 500, 1), 2000);
+        const older = loadOlderSessionEvents(db, withStatus(row, Date.now()), { timestamp: query.before.slice(0, sep), id: query.before.slice(sep + 1) }, limit)
+          .map(({ session_id: _sid, tool_result: _tr, project_confidence: _pc, ...e }) => e);
+        json(res, { events: older, hasMore: older.length === limit });
+      }
       else {
         const nowMs: number = Date.now();
         const session = withStatus(row, nowMs);
-        const events: EventRow[] = db.prepare('SELECT * FROM events WHERE session_id = ? ORDER BY timestamp DESC').all(id) as EventRow[];
-        const attributed: AttributionResult = attributeSessionEvents(session, events);
         const hasArchive: boolean = ARCHIVE_MODE && (db.prepare('SELECT COUNT(*) as c FROM archive WHERE session_id = ?').get(id) as CountRow).c > 0;
         const parentRow = session.parent_id
           ? db.prepare(`${SESSION_SELECT} WHERE s.id = ?`).get(session.parent_id) as SessionRow | undefined
@@ -600,10 +606,11 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
         // reads (the page fetches the rest when needed); the shape and project
         // filters still cover every event. Without limit, events are unchanged.
         const limit: number = parseInt(query.limit) || 0;
+        const detail = loadSessionEvents(db, session, limit);
         const page = limit > 0
-          ? attributed.events.slice(0, limit).map(({ session_id: _sid, tool_result: _tr, project_confidence: _pc, ...e }) => e)
-          : attributed.events;
-        json(res, { session, parent, children: tree.children || [], events: page, eventTotal: attributed.events.length, shape: sessionShape(session, events), projectFilters: attributed.projectFilters, hasArchive });
+          ? detail.events.map(({ session_id: _sid, tool_result: _tr, project_confidence: _pc, ...e }) => e)
+          : detail.events;
+        json(res, { session, parent, children: tree.children || [], events: page, eventTotal: detail.eventTotal, shape: detail.shape, projectFilters: detail.projectFilters, hasArchive });
       }
     }
     else if (pathname.match(/^\/api\/archive\/session\/[^/]+$/)) {

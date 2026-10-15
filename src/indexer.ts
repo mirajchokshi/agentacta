@@ -22,6 +22,7 @@ import type {
 } from './types.js';
 import { open, init, createStmts } from './db.js';
 import { loadConfig } from './config.js';
+import { storeSessionAttribution } from './attribution-store.js';
 
 const REINDEX: boolean = process.argv.includes('--reindex');
 const WATCH: boolean = process.argv.includes('--watch');
@@ -907,6 +908,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
     }
 
     stmts.upsertState.run(sourceKey, lines.length, stateToken);
+    storeSessionAttribution(db, sessionId as string);
   });
 
   commitIndex();

@@ -56,7 +56,10 @@ export function init(dbPath?: string): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_sessions_start_time ON sessions(start_time DESC);
-    CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
+    -- A session's events in order, with what its summary needs (shape, tool
+    -- counts), so opening a session reads bodies only for the page it shows.
+    CREATE INDEX IF NOT EXISTS idx_events_session_order ON events(session_id, timestamp, id, type, tool_name);
+    DROP INDEX IF EXISTS idx_events_session;
     -- Covers the day/agent activity rollups (timestamp range, type, session)
     -- so they never read event bodies; also serves plain timestamp ranges.
     CREATE INDEX IF NOT EXISTS idx_events_ts_cover ON events(timestamp, type, session_id);
@@ -114,6 +117,24 @@ export function init(dbPath?: string): void {
       confusion_score INTEGER DEFAULT 0,
       flagged INTEGER DEFAULT 0,
       computed_at TEXT,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    -- Stored project attribution (see attribution-store.ts): only attributed
+    -- events have a row; session_attr marks sessions computed at a version.
+    -- Clustered by session, so writing, counting and joining one session's
+    -- rows touches one contiguous range and needs no second index.
+    CREATE TABLE IF NOT EXISTS event_attr (
+      session_id TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      project TEXT NOT NULL,
+      confidence INTEGER NOT NULL,
+      PRIMARY KEY (session_id, event_id),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS session_attr (
+      session_id TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 

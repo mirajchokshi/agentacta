@@ -23,6 +23,8 @@ AgentActa is a local audit trail and search engine for AI agent sessions. It ind
 - `src/types.ts` — All TypeScript interfaces and type definitions
 - `src/insights.ts` — Session health scoring
 - `src/project-attribution.ts` — Project-scoped event attribution
+- `src/attribution-store.ts` — Stores each session's attribution at index time (event_attr), with backfill
+- `src/session-detail.ts` — Session events page / older pages / shape / project filters for the session endpoint
 - `src/delta-attribution-context.ts` — Delta attribution context loader
 - `public/app.js` — Frontend application (~1800 lines)
 - `public/style.css` — All styles
@@ -53,7 +55,7 @@ curl http://localhost:4003/api/context/agent?name=claude-code
 npm test
 ```
 
-Uses `node:test` and `node:assert`. Tests are in `tests/` as TypeScript, run via `tsx`. Currently 113 tests.
+Uses `node:test` and `node:assert`. Tests are in `tests/` as TypeScript, run via `tsx`. Currently 117 tests.
 
 ## Building
 

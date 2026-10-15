@@ -11,6 +11,7 @@ import { loadConfig } from './config.js';
 import { open, createStmts } from './db.js';
 import { discoverSessionDirs, listSessionFiles, listClaudeSubagentFiles, indexFile, indexOpenClawDb, watchOpenClawDb, indexAll } from './indexer.js';
 import { analyzeSession, analyzeAll, analyzeChanged } from './insights.js';
+import { backfillAttribution } from './attribution-store.js';
 
 export type WorkerMessage =
   | { type: 'ready'; changed: number; ms: number }
@@ -69,6 +70,14 @@ try {
   console.error('Error computing insights:', (err as Error).message);
 }
 post({ type: 'ready', changed: startupChanged.size, ms: Math.round(performance.now() - t0) });
+// Sessions indexed before attribution was stored get it now (one-time).
+try {
+  const tb: number = performance.now();
+  const n: number = backfillAttribution(db);
+  if (n) console.log(`Stored project attribution for ${n} session${n === 1 ? '' : 's'} (${Math.round(performance.now() - tb)} ms)`);
+} catch (err: unknown) {
+  console.error('Error storing attribution:', (err as Error).message);
+}
 // Pages opened while the pass ran were served the older index; let them catch up.
 if (startupChanged.size) post({ type: 'updated', ids: [...startupChanged] });
 

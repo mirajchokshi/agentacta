@@ -879,6 +879,24 @@ async function viewSession(id) {
     }
     return fullLoad;
   };
+  // Scrolling pulls older events a page at a time from the oldest one loaded,
+  // so even a very long session never downloads all of it just to scroll.
+  let olderLoad = null;
+  const loadOlderPage = () => {
+    if (complete) return Promise.resolve();
+    if (olderLoad) return olderLoad;
+    const oldest = allEvents[allEvents.length - 1];
+    if (!oldest) return ensureAllEvents();
+    olderLoad = api(`/sessions/${id}?before=${encodeURIComponent(`${oldest.timestamp}|${oldest.id}`)}&limit=500`).then(page => {
+      if (page._error || !Array.isArray(page.events)) { setTimeout(() => { olderLoad = null; }, 5000); return; }
+      for (const e of page.events) if (!knownIds.has(e.id)) { knownIds.add(e.id); allEvents.push(e); }
+      if (!page.hasMore) complete = true;
+      olderLoad = null;
+      updateEventsLabel();
+      syncScrollHandler();
+    });
+    return olderLoad;
+  };
   let activeProjectFilter = 'all';
   let rendered = 0;
   let onScroll = null;
@@ -954,14 +972,15 @@ async function viewSession(id) {
     onScroll = () => {
       if (loading) return;
       // Fetch the rest a page ahead of need so scrolling never waits on it.
-      if (!complete && rendered >= allEvents.length - PAGE_SIZE) ensureAllEvents();
+      if (!complete && rendered >= allEvents.length - PAGE_SIZE) loadOlderPage();
       const scrollBottom = window.innerHeight + window.scrollY;
       const threshold = document.body.offsetHeight - 300;
       if (scrollBottom >= threshold) {
         if (rendered >= getFilteredEvents().length) {
           if (complete) return;
           loading = true;
-          ensureAllEvents().then(() => { loading = false; if (complete && onScroll) onScroll(); });
+          const before = allEvents.length;
+          loadOlderPage().then(() => { loading = false; if (allEvents.length > before && onScroll) onScroll(); });
           return;
         }
         loading = true;

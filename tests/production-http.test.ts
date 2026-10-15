@@ -176,6 +176,14 @@ describe('production HTTP routes', () => {
     assert.ok('session_id' in full.events[0], 'the unlimited response keeps every field');
   });
 
+  it('serves older session events after a cursor', async () => {
+    const full = JSON.parse((await request('/api/sessions/production-http-session')).body) as { events: Array<{ id: string; timestamp: string }> };
+    const first = full.events[0];
+    const older = JSON.parse((await request(`/api/sessions/production-http-session?before=${encodeURIComponent(`${first.timestamp}|${first.id}`)}&limit=500`)).body) as { events: Array<{ id: string }>; hasMore: boolean };
+    assert.deepStrictEqual(older.events.map(e => e.id), full.events.slice(1).map(e => e.id));
+    assert.strictEqual(older.hasMore, false);
+  });
+
   it('pages the session list with offset', async () => {
     const first = JSON.parse((await request('/api/sessions?roots=1&limit=1&offset=0')).body) as { sessions: Array<{ id: string }>; total: number };
     const second = JSON.parse((await request('/api/sessions?roots=1&limit=1&offset=1')).body) as typeof first;
