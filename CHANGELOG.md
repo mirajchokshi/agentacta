@@ -1,5 +1,30 @@
 # Changelog
 
+## [2026.10.14] - 2026-10-14
+
+### Added
+- **Session status** - sessions show as live (activity in the last 15 minutes, a pulsing dot), stale (never recorded an end and went quiet), or finished. OpenClaw's own run status (done / failed / killed) is respected. AgentActa only reads transcripts, so it shows status; it does not stop agents.
+- **Nested subagent sessions** - child sessions sit under their parent with a collapsible count (including how many are live) in the list, and the session page links back to its parent and lists its subagents. Sources: Claude Code `<session>/subagents/` transcripts (previously not indexed at all), Codex threads spawned as subagents, and OpenClaw spawned sessions.
+- **Overview leads with today** - sessions, tool calls, messages and active agents against the 14-day average; tool calls per day for 14 days; tool calls by agent; all-time totals with tool calls per week since the first session.
+- **Session shape** - each session page opens with duration, messages, tool calls and tokens, an activity strip showing when it was busy, and its top tools.
+- **Real session titles** - Claude Code's own `ai-title` (or a `/rename`) becomes the session title; prompts that paste a message thread are titled by their newest message rather than the header.
+- **Keyboard navigation** - J/K move between rows, Enter opens, Esc goes back, / searches.
+- `GET /api/activity?days=N&tz=<offset>` - per-day and per-agent activity in the viewer's timezone.
+- `GET /api/sessions?roots=1` - top-level sessions with their subagent tree and child/descendant/live counts; session detail now includes `parent` and `children`, and every session row carries `status`.
+
+### Changed
+- **UI redesign** - lists instead of stacked cards, metadata as text instead of colored pills, a neutral palette with color reserved for status and event roles, higher text contrast, and tappable rows with clear hover/press states. Tool calls show the argument that matters (command, path, pattern, URL) with full arguments one click away; the timeline groups events under the session they belong to.
+- **Mobile** - immediate press feedback on taps, Back restores your place in lists, tab taps start at the top.
+- **Faster loads** - JSON responses and static assets are gzipped (a large session drops from ~3.4 MB to ~0.6 MB).
+- Index format version 3: existing installs re-read every source once on first start to pick up parent links and titles.
+
+### Fixed
+- Current Claude Code transcripts that open with metadata lines (`mode`, `permission-mode`, `agent-setting`, `ai-title`) were skipped entirely.
+- Claude Code subagent transcripts carry the parent's session id and would have overwritten the parent session if indexed.
+- A file's session list showed a session once per touch instead of once.
+- Codex sessions whose `source` is an object showed `source=[object Object]` in their summary.
+- The overview token total overflowed its card.
+
 ## [2026.8.31] - 2026-08-31
 
 ### Added

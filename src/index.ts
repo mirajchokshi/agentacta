@@ -1,6 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { EventEmitter } from 'node:events';
 import type Database from 'better-sqlite3';
 import type {
@@ -28,11 +29,12 @@ import type {
 } from './types.js';
 import { loadConfig } from './config.js';
 import { open, init, createStmts } from './db.js';
-import { discoverSessionDirs, listJsonlFiles, indexFile, indexOpenClawDb, watchOpenClawDb, indexAll } from './indexer.js';
+import { discoverSessionDirs, listSessionFiles, listClaudeSubagentFiles, indexFile, indexOpenClawDb, watchOpenClawDb, indexAll } from './indexer.js';
 import { attributeSessionEvents, attributeEventDelta } from './project-attribution.js';
 import { loadDeltaAttributionContext } from './delta-attribution-context.js';
 import { analyzeSession, analyzeAll, getInsightsSummary } from './insights.js';
 import { isValidDateKey, resolveStaticPath } from './http-utils.js';
+import { withStatus, attachChildren } from './session-status.js';
 
 // --version / -v flag: print version and exit
 if (process.argv.includes('--version') || process.argv.includes('-v')) {
@@ -69,9 +71,22 @@ const MIME: Record<string, string> = {
   '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json'
 };
 
+function acceptsGzip(req: http.IncomingMessage | undefined): boolean {
+  const ae = req?.headers['accept-encoding'];
+  return typeof ae === 'string' && /\bgzip\b/.test(ae);
+}
+
+// Session payloads are large, repetitive JSON (a long session is several MB);
+// gzip cuts them ~10x, which is most of the wait on a phone over Wi-Fi.
 function json(res: http.ServerResponse, data: unknown, status: number = 200): void {
+  const body: string = JSON.stringify(data);
+  if (body.length > 1024 && acceptsGzip(res.req)) {
+    res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
+    res.end(zlib.gzipSync(body, { level: 4 }));
+    return;
+  }
   res.writeHead(status, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(data));
+  res.end(body);
 }
 
 function isLoopbackHost(host: string): boolean {
@@ -137,7 +152,13 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): boole
   if (!fp) { res.writeHead(403); res.end(); return true; }
   if (fs.existsSync(fp) && fs.statSync(fp).isFile()) {
     const ext: string = path.extname(fp);
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    const type: string = MIME[ext] || 'application/octet-stream';
+    if (/^(text\/|application\/(javascript|json|manifest\+json)|image\/svg)/.test(type) && acceptsGzip(req)) {
+      res.writeHead(200, { 'Content-Type': type, 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
+      fs.createReadStream(fp).pipe(zlib.createGzip({ level: 6 })).pipe(res);
+      return true;
+    }
+    res.writeHead(200, { 'Content-Type': type });
     fs.createReadStream(fp).pipe(res);
     return true;
   }
@@ -253,7 +274,7 @@ for (const dir of sessionDirs) {
     }
     continue;
   }
-  const files: string[] = listJsonlFiles(dir.path, !!dir.recursive);
+  const files: string[] = listSessionFiles(dir);
   for (const filePath of files) {
     try {
       const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
@@ -294,7 +315,9 @@ function refreshInsightsAndNotify(sessionIds: string[]): void {
 
 function reindexRecursiveDir(dir: SessionDir): void {
   try {
-    const files: string[] = listJsonlFiles(dir.path, true);
+    // Claude project dirs: top-level transcripts are covered by fs.watch, so
+    // the interval only needs to poll the nested subagents/ folders.
+    const files: string[] = dir.subagents && !dir.recursive ? listClaudeSubagentFiles(dir.path) : listSessionFiles(dir);
     let changed: number = 0;
     for (const filePath of files) {
       const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
@@ -358,13 +381,32 @@ for (const dir of sessionDirs) {
       }, REINDEX_DEBOUNCE_MS));
     });
     console.log(`  Watching: ${dir.path}`);
-    if (dir.recursive) {
+    // Nested files (Codex date dirs, Claude <session>/subagents/) aren't seen by a
+    // non-recursive fs.watch, so rescan them on an interval.
+    if (dir.recursive || dir.subagents) {
       const timer: NodeJS.Timeout = setInterval(() => reindexRecursiveDir(dir), RECURSIVE_RESCAN_MS);
       timer.unref?.();
     }
   } catch (err: unknown) {
     console.error(`  Failed to watch ${dir.path}:`, (err as Error).message);
   }
+}
+
+const SESSION_SELECT: string = 'SELECT s.* FROM sessions s';
+const sessionSortKey = (r: { end_time: string | null; start_time: string }): string => r.end_time || r.start_time || '';
+
+// All descendants of the given sessions (UNION de-duplicates, so a parent cycle terminates).
+function loadDescendants(rootIds: string[], nowMs: number) {
+  if (!rootIds.length) return [];
+  const rows = db.prepare(
+    `WITH RECURSIVE tree(id) AS (
+       SELECT id FROM sessions WHERE parent_id IN (SELECT value FROM json_each(?))
+       UNION
+       SELECT c.id FROM sessions c JOIN tree t ON c.parent_id = t.id
+     )
+     ${SESSION_SELECT} WHERE s.id IN (SELECT id FROM tree)`
+  ).all(JSON.stringify(rootIds)) as SessionRow[];
+  return rows.map(r => withStatus(r, nowMs));
 }
 
 const server: http.Server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse): void => {
@@ -431,6 +473,56 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       }
       json(res, { suggestions });
     }
+    else if (pathname === '/api/activity') {
+      // Per local day for the last N days: events, tool calls, sessions with
+      // activity, and the same per agent. tz is the browser's getTimezoneOffset()
+      // (minutes behind UTC) so "today" means the viewer's day.
+      const days: number = Math.min(Math.max(parseInt(query.days) || 14, 1), 400);
+      const tz: number = Math.max(-840, Math.min(840, parseInt(query.tz) || 0));
+      const shift: string = `${-tz} minutes`;
+      const since: string = new Date(Date.now() - (days + 1) * 86400000).toISOString();
+      const perDay = db.prepare(
+        `SELECT date(timestamp, ?) AS day, COUNT(*) AS events, SUM(type = 'tool_call') AS tool_calls,
+                SUM(type = 'message') AS messages, COUNT(DISTINCT session_id) AS sessions
+         FROM events WHERE timestamp >= ? GROUP BY day ORDER BY day`
+      ).all(shift, since) as Array<{ day: string; events: number; tool_calls: number; messages: number; sessions: number }>;
+      const perAgentDay = db.prepare(
+        `SELECT date(e.timestamp, ?) AS day, s.agent AS agent, COUNT(*) AS events, SUM(e.type = 'tool_call') AS tool_calls,
+                COUNT(DISTINCT e.session_id) AS sessions
+         FROM events e JOIN sessions s ON s.id = e.session_id
+         WHERE e.timestamp >= ? GROUP BY day, s.agent`
+      ).all(shift, since) as Array<{ day: string; agent: string | null; events: number; tool_calls: number; sessions: number }>;
+      const local = (d: Date): string => new Date(d.getTime() - tz * 60000).toISOString().slice(0, 10);
+      const today: string = local(new Date());
+      const dayKeys: string[] = [];
+      for (let i = days - 1; i >= 0; i--) dayKeys.push(local(new Date(Date.now() - i * 86400000)));
+      const byDay = new Map(perDay.map(r => [r.day, r]));
+      const series = dayKeys.map(day => {
+        const r = byDay.get(day);
+        return { day, events: r?.events || 0, toolCalls: r?.tool_calls || 0, messages: r?.messages || 0, sessions: r?.sessions || 0 };
+      });
+      const agents = new Map<string, { agent: string; events: number; toolCalls: number; sessions: number; todayEvents: number; todaySessions: number }>();
+      for (const r of perAgentDay) {
+        if (!dayKeys.includes(r.day)) continue;
+        const name: string = normalizeAgentLabel(r.agent) || 'unknown';
+        const a = agents.get(name) || { agent: name, events: 0, toolCalls: 0, sessions: 0, todayEvents: 0, todaySessions: 0 };
+        a.events += r.events; a.toolCalls += r.tool_calls;
+        if (r.day === today) { a.todayEvents += r.events; a.todaySessions += r.sessions; }
+        agents.set(name, a);
+      }
+      // Distinct sessions per agent over the window (a session spanning two days counts once).
+      const firstDayUtc: string = new Date(Date.parse(dayKeys[0] + 'T00:00:00Z') + tz * 60000).toISOString();
+      const distinct = db.prepare(
+        `SELECT s.agent AS agent, COUNT(DISTINCT e.session_id) AS sessions
+         FROM events e JOIN sessions s ON s.id = e.session_id
+         WHERE e.timestamp >= ? GROUP BY s.agent`
+      ).all(firstDayUtc) as Array<{ agent: string | null; sessions: number }>;
+      for (const r of distinct) {
+        const a = agents.get(normalizeAgentLabel(r.agent) || 'unknown');
+        if (a) a.sessions += r.sessions;
+      }
+      json(res, { today, days: series, agents: [...agents.values()].sort((x, y) => y.events - x.events) });
+    }
     else if (pathname === '/api/stats') {
       const sessions: number = (db.prepare('SELECT COUNT(*) as c FROM sessions').get() as CountRow).c;
       const events: number = (db.prepare('SELECT COUNT(*) as c FROM events').get() as CountRow).c;
@@ -451,15 +543,27 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       const limit: number = parseInt(query.limit) || 50;
       const offset: number = parseInt(query.offset) || 0;
       const agent: string = query.agent || '';
-      let sql: string = 'SELECT * FROM sessions';
+      // roots=1: only top-level sessions, each with its subagent tree attached.
+      // A child whose parent was never indexed is shown as a root.
+      const rootsOnly: boolean = query.roots === '1';
+      const where: string[] = [];
       const params: Array<string | number> = [];
-      if (agent) { sql += ' WHERE agent = ?'; params.push(agent); }
-      sql += ' ORDER BY COALESCE(end_time, start_time) DESC LIMIT ? OFFSET ?';
-      params.push(limit, offset);
-      const rows: SessionRow[] = db.prepare(sql).all(...params) as SessionRow[];
-      const countSql: string = agent ? 'SELECT COUNT(*) as c FROM sessions WHERE agent = ?' : 'SELECT COUNT(*) as c FROM sessions';
-      const total: number = agent ? (db.prepare(countSql).get(agent) as CountRow).c : (db.prepare(countSql).get() as CountRow).c;
-      json(res, { sessions: rows, total, limit, offset });
+      if (agent) { where.push('s.agent = ?'); params.push(agent); }
+      if (rootsOnly) where.push('(s.parent_id IS NULL OR s.parent_id NOT IN (SELECT id FROM sessions))');
+      const whereSql: string = where.length ? ` WHERE ${where.join(' AND ')}` : '';
+      const nowMs: number = Date.now();
+      // In roots mode a group sorts by its most recent activity, parent or child,
+      // so a quiet parent with a busy subagent stays near the top.
+      const orderBy: string = rootsOnly
+        ? `MAX(COALESCE(s.end_time, s.start_time), COALESCE((SELECT MAX(COALESCE(c.end_time, c.start_time)) FROM sessions c WHERE c.parent_id = s.id), ''))`
+        : 'COALESCE(s.end_time, s.start_time)';
+      const rows = (db.prepare(`${SESSION_SELECT}${whereSql} ORDER BY ${orderBy} DESC LIMIT ? OFFSET ?`)
+        .all(...params, limit, offset) as SessionRow[]).map(r => withStatus(r, nowMs));
+      const total: number = (db.prepare(`SELECT COUNT(*) as c FROM sessions s${whereSql}`).get(...params) as CountRow).c;
+      const sessions = rootsOnly
+        ? attachChildren(rows, loadDescendants(rows.map(r => r.id), nowMs), sessionSortKey)
+        : rows;
+      json(res, { sessions, total, limit, offset });
     }
 
     else if (pathname.match(/^\/api\/sessions\/[^/]+\/events$/)) {
@@ -537,13 +641,20 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
     }
     else if (pathname.match(/^\/api\/sessions\/[^/]+$/) && !pathname.includes('export')) {
       const id: string = pathname.split('/')[3];
-      const session: SessionRow | undefined = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as SessionRow | undefined;
-      if (!session) { json(res, { error: 'Not found' }, 404); }
+      const row = db.prepare(`${SESSION_SELECT} WHERE s.id = ?`).get(id) as SessionRow | undefined;
+      if (!row) { json(res, { error: 'Not found' }, 404); }
       else {
+        const nowMs: number = Date.now();
+        const session = withStatus(row, nowMs);
         const events: EventRow[] = db.prepare('SELECT * FROM events WHERE session_id = ? ORDER BY timestamp DESC').all(id) as EventRow[];
         const attributed: AttributionResult = attributeSessionEvents(session, events);
         const hasArchive: boolean = ARCHIVE_MODE && (db.prepare('SELECT COUNT(*) as c FROM archive WHERE session_id = ?').get(id) as CountRow).c > 0;
-        json(res, { session, events: attributed.events, projectFilters: attributed.projectFilters, hasArchive });
+        const parentRow = session.parent_id
+          ? db.prepare(`${SESSION_SELECT} WHERE s.id = ?`).get(session.parent_id) as SessionRow | undefined
+          : undefined;
+        const parent = parentRow ? withStatus(parentRow, nowMs) : null;
+        const [tree] = attachChildren([{ ...session }], loadDescendants([id], nowMs), sessionSortKey);
+        json(res, { session, parent, children: tree.children || [], events: attributed.events, projectFilters: attributed.projectFilters, hasArchive });
       }
     }
     else if (pathname.match(/^\/api\/archive\/session\/[^/]+$/)) {
@@ -648,7 +759,7 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       const limit: number = Math.min(parseInt(query.limit || '100', 10) || 100, 500);
       const offset: number = Math.max(parseInt(query.offset || '0', 10) || 0, 0);
       const events: TimelineEventRow[] = db.prepare(
-        `SELECT e.*, s.summary as session_summary FROM events e
+        `SELECT e.*, s.summary as session_summary, s.label as session_label FROM events e
          JOIN sessions s ON s.id = e.session_id
          WHERE e.timestamp >= ? AND e.timestamp <= ?
          ORDER BY e.timestamp DESC
@@ -675,7 +786,7 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       const onUpdate = (): void => {
         try {
           const rows: TimelineEventRow[] = db.prepare(
-            `SELECT e.*, s.summary as session_summary FROM events e
+            `SELECT e.*, s.summary as session_summary, s.label as session_label FROM events e
              JOIN sessions s ON s.id = e.session_id
              WHERE (e.timestamp > ?) OR (e.timestamp = ? AND e.id > ?)
              ORDER BY e.timestamp ASC, e.id ASC`
@@ -904,13 +1015,17 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
     else if (pathname === '/api/files/sessions') {
       const fp: string = query.path || '';
       if (!fp) { json(res, { sessions: [] }); return; }
-      const rows: FileSessionRow[] = db.prepare(`
-        SELECT DISTINCT s.*, fa.operation, fa.timestamp as touch_time
+      // One row per session (a session that touched the file 50 times is still
+      // one session), with its operations combined and its latest touch.
+      const nowMs: number = Date.now();
+      const rows = (db.prepare(`
+        SELECT s.*, GROUP_CONCAT(DISTINCT fa.operation) AS operation, MAX(fa.timestamp) AS touch_time
         FROM file_activity fa
         JOIN sessions s ON s.id = fa.session_id
         WHERE fa.file_path = ?
-        ORDER BY fa.timestamp DESC
-      `).all(fp) as FileSessionRow[];
+        GROUP BY s.id
+        ORDER BY touch_time DESC
+      `).all(fp) as FileSessionRow[]).map(r => withStatus(r, nowMs));
       json(res, { file: fp, sessions: rows });
     }
     else if (pathname === '/api/insights') {

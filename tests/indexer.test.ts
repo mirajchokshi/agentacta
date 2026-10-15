@@ -446,4 +446,18 @@ describe('indexer', () => {
       process.env.HOME = originalHome;
     }
   });
+
+  it('indexes Claude Code transcripts that open with metadata lines', () => {
+    const fp = writeSession('claude-mode-first.jsonl', [
+      { type: 'mode', mode: 'default', sessionId: 'cc-mode-1' },
+      { type: 'permission-mode', permissionMode: 'auto', sessionId: 'cc-mode-1' },
+      { type: 'user', sessionId: 'cc-mode-1', uuid: 'u-1', timestamp: '2026-10-14T20:00:00Z', message: { role: 'user', content: 'Start from main' } },
+      { type: 'assistant', sessionId: 'cc-mode-1', uuid: 'a-1', timestamp: '2026-10-14T20:01:00Z', message: { role: 'assistant', content: 'On it' } },
+    ]);
+    const result: IndexResult = indexFile(db, fp, 'claude-code', stmts, false);
+    assert.strictEqual(result.sessionId, 'cc-mode-1');
+    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get('cc-mode-1') as SessionRow;
+    assert.strictEqual(sess.start_time, '2026-10-14T20:00:00Z');
+    assert.strictEqual(sess.message_count, 2);
+  });
 });

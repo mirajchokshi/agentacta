@@ -18,6 +18,7 @@ import type {
   CodexEventPayload,
   CountRow,
   HasEventsRow,
+  SessionLineage,
 } from './types.js';
 import { open, init, createStmts } from './db.js';
 import { loadConfig } from './config.js';
@@ -42,6 +43,68 @@ function listJsonlFiles(baseDir: string, recursive: boolean = false): string[] {
 
   walk(baseDir);
   return out;
+}
+
+// Claude Code writes subagent transcripts to <project>/<sessionId>/subagents/agent-*.jsonl.
+function listClaudeSubagentFiles(projDir: string): string[] {
+  if (!fs.existsSync(projDir)) return [];
+  const out: string[] = [];
+  for (const entry of fs.readdirSync(projDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const subDir = path.join(projDir, entry.name, 'subagents');
+    if (!fs.existsSync(subDir)) continue;
+    for (const f of fs.readdirSync(subDir)) {
+      if (f.endsWith('.jsonl')) out.push(path.join(subDir, f));
+    }
+  }
+  // Shallower subagents first, so a nested subagent's spawner is already
+  // indexed when it is resolved.
+  return out
+    .map(f => ({ f, depth: readClaudeSubagentMeta(f).spawnDepth }))
+    .sort((a, b) => a.depth - b.depth)
+    .map(x => x.f);
+}
+
+function listSessionFiles(dir: SessionDir): string[] {
+  const files = listJsonlFiles(dir.path, !!dir.recursive);
+  if (dir.subagents && !dir.recursive) files.push(...listClaudeSubagentFiles(dir.path));
+  return files;
+}
+
+interface ClaudeSubagentMeta { label: string | null; spawnDepth: number; toolUseId: string | null }
+
+function readClaudeSubagentMeta(filePath: string): ClaudeSubagentMeta {
+  try {
+    const meta = JSON.parse(fs.readFileSync(filePath.replace(/\.jsonl$/, '.meta.json'), 'utf8')) as Record<string, unknown>;
+    const desc = typeof meta.description === 'string' ? meta.description.trim() : '';
+    const type = typeof meta.agentType === 'string' ? meta.agentType.trim() : '';
+    return {
+      label: desc || type || null,
+      spawnDepth: typeof meta.spawnDepth === 'number' ? meta.spawnDepth : 1,
+      toolUseId: typeof meta.toolUseId === 'string' ? meta.toolUseId : null,
+    };
+  } catch {
+    return { label: null, spawnDepth: 1, toolUseId: null };
+  }
+}
+
+// Codex marks spawned threads with source: { subagent: { thread_spawn: { parent_thread_id } } }.
+function findCodexParentThreadId(source: unknown, depth: number = 0): string | null {
+  if (!source || typeof source !== 'object' || depth > 4) return null;
+  const obj = source as Record<string, unknown>;
+  if (typeof obj.parent_thread_id === 'string' && obj.parent_thread_id) return obj.parent_thread_id;
+  for (const v of Object.values(obj)) {
+    const found = findCodexParentThreadId(v, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+function describeCodexSource(source: unknown): string | null {
+  if (!source) return null;
+  if (typeof source === 'string') return source;
+  if (typeof source === 'object') return Object.keys(source as Record<string, unknown>)[0] || null;
+  return null;
 }
 
 function discoverSessionDirs(config: AgentActaConfig): SessionDir[] {
@@ -78,7 +141,7 @@ function discoverSessionDirs(config: AgentActaConfig): SessionDir[] {
         const projDir = path.join(p, proj);
         if (fs.statSync(projDir).isDirectory()) {
           const hasJsonl = fs.readdirSync(projDir).some(f => f.endsWith('.jsonl'));
-          if (hasJsonl) addDir({ path: projDir, agent: 'claude-code' });
+          if (hasJsonl) addDir({ path: projDir, agent: 'claude-code', subagents: true });
         }
       }
     } else if (normalized === normalizedCodex) {
@@ -162,6 +225,22 @@ function isSummaryCandidate(text: string | null): boolean {
   if (isHeartbeat(text)) return false;
   if (isBoilerplatePrompt(text)) return false;
   return true;
+}
+
+// Prompts that open with a pasted thread ("(Fresh session. Recent messages in
+// this thread, oldest first:" then "Name: message" lines) carry the actual
+// request on the last line, not the header.
+function summarySource(text: string): string {
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length > 1 && /(oldest first|recent messages[^:]*):\s*\)?$/i.test(lines[0])) {
+    // Newest message first; skip attachment markers, bare file paths and the
+    // "Attached file(s), read them with the Read tool:" line that precedes them.
+    for (let i = lines.length - 1; i >= 1; i--) {
+      const msg = lines[i].replace(/^[A-Z][\w .'-]{0,30}:\s+/, '');
+      if (msg.length > 3 && !/^(\[[^\]]*attachment[^\]]*\]|[~/][^\s]*|attached files?(\(s\))?[^:]*:)$/i.test(msg)) return msg;
+    }
+  }
+  return text;
 }
 
 function stripLeadingDatetimePrefix(text: string | null): string {
@@ -393,6 +472,16 @@ function indexCronRunFile(db: Database.Database, filePath: string, agentName: st
   return { sessionId, synthetic: true };
 }
 
+// Claude Code transcripts have no header. Newer versions open with metadata
+// lines (mode, permission-mode, agent-setting, ai-title, ...) before the first
+// message; every line carries the sessionId.
+const CLAUDE_CODE_LINE_TYPES = new Set(['user', 'assistant', 'system', 'summary', 'file-history-snapshot', 'queue-operation', 'mode', 'permission-mode', 'agent-setting', 'ai-title', 'custom-title', 'attachment']);
+
+function isClaudeCodeFirstLine(line: JsonlLine): boolean {
+  if (line.type && CLAUDE_CODE_LINE_TYPES.has(line.type)) return true;
+  return typeof line.sessionId === 'string' && line.type !== 'session' && line.type !== 'session_meta';
+}
+
 function indexFile(db: Database.Database, filePath: string, agentName: string, stmts: PreparedStatements, archiveMode: boolean, config: AgentActaConfig): IndexResult {
   const stat = fs.statSync(filePath);
   const mtime = stat.mtime.toISOString();
@@ -412,7 +501,7 @@ function indexFile(db: Database.Database, filePath: string, agentName: string, s
 // Core parser shared by file-backed sessions (indexFile) and DB-backed sessions
 // (indexOpenClawDb). sourceKey identifies the source in index_state (a file path,
 // or dbPath#sessionId); stateToken is the change marker stored as last_modified.
-function indexSessionLines(db: Database.Database, sourceKey: string, lines: string[], agentName: string, stmts: PreparedStatements, archiveMode: boolean, config: AgentActaConfig, stateToken: string, fallbackSessionId?: string): IndexResult {
+function indexSessionLines(db: Database.Database, sourceKey: string, lines: string[], agentName: string, stmts: PreparedStatements, archiveMode: boolean, config: AgentActaConfig, stateToken: string, fallbackSessionId?: string, lineage: SessionLineage = {}): IndexResult {
   let sessionId: string | null = null;
   let sessionStart: string | null = null;
   let sessionEnd: string | null = null;
@@ -437,6 +526,11 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
   let codexOriginator: string | null = null;
   let sawSnapshotRecord = false;
   let sawNonSnapshotRecord = false;
+  let parentId: string | null = lineage.parentId || null;
+  let label: string | null = lineage.label || null;
+  let customTitle: string | null = null;
+  let aiTitle: string | null = null;
+  const sourceStatus: string | null = lineage.sourceStatus || null;
 
   let firstLine: JsonlLine;
   try {
@@ -455,11 +549,30 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
     if (firstLine.agent) agent = firstLine.agent;
     if (firstLine.sessionType) sessionType = firstLine.sessionType;
     if (sessionId && sessionId.includes('subagent')) sessionType = 'subagent';
-  } else if (firstLine.type === 'user' || firstLine.type === 'assistant' || firstLine.type === 'file-history-snapshot' || firstLine.type === 'queue-operation') {
+  } else if (isClaudeCodeFirstLine(firstLine)) {
     // Claude Code format — no session header, extract from first message or queue-operation line
     isClaudeCode = true;
     for (const line of lines) {
       let obj: JsonlLine; try { obj = JSON.parse(line) as JsonlLine; } catch { continue; }
+      // Subagent (sidechain) transcripts carry the PARENT's sessionId; give them
+      // their own id so they don't overwrite the parent, and link them to it.
+      if (obj.isSidechain === true && obj.agentId) {
+        sessionId = `agent-${obj.agentId}`;
+        sessionStart = obj.timestamp || null;
+        // Every subagent line carries the ROOT session id. A subagent spawned by
+        // another subagent is found through the Task call that spawned it.
+        if (obj.sessionId) parentId = obj.sessionId;
+        sessionType = 'subagent';
+        if (sourceKey.endsWith('.jsonl')) {
+          const meta = readClaudeSubagentMeta(sourceKey);
+          if (!label) label = meta.label;
+          if (meta.spawnDepth > 1 && meta.toolUseId) {
+            const spawner = db.prepare('SELECT session_id FROM events WHERE id = ?').get(meta.toolUseId) as { session_id: string } | undefined;
+            if (spawner && spawner.session_id !== sessionId) parentId = spawner.session_id;
+          }
+        }
+        break;
+      }
       if (obj.sessionId && obj.timestamp) {
         sessionId = obj.sessionId;
         sessionStart = obj.timestamp;
@@ -489,9 +602,11 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
       modelsSet.add(meta.model);
     }
     codexProvider = meta.model_provider || null;
-    codexSource = meta.source || null;
+    codexSource = describeCodexSource(meta.source);
     codexOriginator = meta.originator || null;
     if (codexOriginator && codexOriginator.includes('symphony')) sessionType = 'codex-symphony';
+    const codexParent = findCodexParentThreadId(meta.source);
+    if (codexParent) { parentId = codexParent; sessionType = 'subagent'; }
   } else {
     return { skipped: true };
   }
@@ -515,6 +630,11 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
     if (obj.type === 'file-history-snapshot') sawSnapshotRecord = true;
     else sawNonSnapshotRecord = true;
 
+    // Claude Code titles: one the user set (/rename) wins over its own AI title;
+    // both can be rewritten during a session, so keep the latest.
+    if (obj.type === 'custom-title' && typeof obj.customTitle === 'string' && obj.customTitle.trim()) { customTitle = obj.customTitle.trim(); continue; }
+    if (obj.type === 'ai-title' && typeof obj.aiTitle === 'string' && obj.aiTitle.trim()) { aiTitle = obj.aiTitle.trim(); continue; }
+
     if (isCodexCli) {
       if (obj.type === 'session_meta') {
         const meta = (obj.payload || {}) as CodexSessionMeta;
@@ -525,9 +645,9 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
           modelsSet.add(meta.model);
         }
         if (meta.model_provider) codexProvider = meta.model_provider;
-        if (meta.source) codexSource = meta.source;
+        if (meta.source) codexSource = describeCodexSource(meta.source);
         if (meta.originator) codexOriginator = meta.originator;
-        if (codexOriginator && codexOriginator.includes('symphony')) sessionType = 'codex-symphony';
+        if (codexOriginator && codexOriginator.includes('symphony') && sessionType !== 'subagent') sessionType = 'codex-symphony';
         if (meta.model_provider && !model) model = meta.model_provider;
         continue;
       }
@@ -578,7 +698,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
           if (content) {
             pendingEvents.push([p.id || eventId, sessionId as string, ts, 'message', role, content, null, null, null]);
             msgCount++;
-            if (!summary && role === 'user' && isSummaryCandidate(content)) summary = content.slice(0, 200);
+            if (!summary && role === 'user' && isSummaryCandidate(content)) summary = summarySource(content).slice(0, 200);
             if (!initialPrompt && role === 'user' && isSummaryCandidate(content)) {
               initialPrompt = content.slice(0, 500);
               firstMessageId = p.id || eventId;
@@ -605,7 +725,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
         if (p.type === 'user_message' && p.message) {
           pendingEvents.push([eventId, sessionId as string, ts, 'message', 'user', p.message, null, null, null]);
           msgCount++;
-          if (!summary && isSummaryCandidate(p.message)) summary = p.message.slice(0, 200);
+          if (!summary && isSummaryCandidate(p.message)) summary = summarySource(p.message).slice(0, 200);
           if (!initialPrompt && isSummaryCandidate(p.message)) {
             initialPrompt = p.message.slice(0, 500);
             firstMessageId = eventId;
@@ -690,7 +810,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
         msgCount++;
         // Better summary: skip heartbeat/boilerplate messages
         if (!summary && role === 'user' && isSummaryCandidate(content)) {
-          summary = content.slice(0, 200);
+          summary = summarySource(content).slice(0, 200);
         }
         // Capture initial prompt from first substantial user message
         if (!initialPrompt && role === 'user' && isSummaryCandidate(content)) {
@@ -742,6 +862,8 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
     }
   }
 
+  if (!sessionType && parentId) sessionType = 'subagent';
+
   // Infer session type from first user message content
   if (!sessionType && initialPrompt) {
     const p = initialPrompt.toLowerCase();
@@ -771,6 +893,9 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
     stmts.deleteSession.run(sessionId);
 
     stmts.upsertSession.run(sessionId, sessionStart, sessionEnd, msgCount, toolCount, model, summary, agent, sessionType, totalCost, totalTokens, totalInputTokens, totalOutputTokens, totalCacheReadTokens, totalCacheWriteTokens, initialPrompt, firstMessageId, firstMessageTimestamp, modelsJson, projectsJson);
+    if (parentId === sessionId) parentId = null;
+    if (!label) label = customTitle || aiTitle;
+    if (parentId || label || sourceStatus) stmts.setSessionLineage.run(parentId, label, sourceStatus, sessionId);
     for (const ev of pendingEvents) stmts.insertEvent.run(...ev);
     for (const fa of fileActivities) stmts.insertFileActivity.run(...fa);
 
@@ -816,6 +941,36 @@ function openClawDbProbeToken(dbPath: string): string | null {
   }
 }
 
+// session_nodes (when present) records who spawned each session and its run
+// status. parentSessionId in entry_json is exact; parent_session_key only names
+// the parent's *current* session, so it is the fallback.
+function loadOpenClawLineage(src: Database.Database): Map<string, SessionLineage> {
+  const out = new Map<string, SessionLineage>();
+  let rows: Array<{ session_key: string; current_session_id: string | null; parent_session_key: string | null; spawned_by: string | null; status: string | null; label: string | null; entry_json: string | null }>;
+  try {
+    rows = src.prepare('SELECT session_key, current_session_id, parent_session_key, spawned_by, status, label, entry_json FROM session_nodes').all() as typeof rows;
+  } catch {
+    return out; // older stores have no session_nodes table
+  }
+  const currentByKey = new Map<string, string>();
+  for (const r of rows) if (r.current_session_id) currentByKey.set(r.session_key, r.current_session_id);
+  for (const r of rows) {
+    if (!r.current_session_id) continue;
+    let entry: Record<string, unknown> = {};
+    try { entry = r.entry_json ? JSON.parse(r.entry_json) as Record<string, unknown> : {}; } catch { /* ignore */ }
+    const parentKey = r.parent_session_key || r.spawned_by;
+    const parentId = (typeof entry.parentSessionId === 'string' && entry.parentSessionId)
+      || (parentKey ? currentByKey.get(parentKey) || null : null);
+    const status = r.status || (typeof entry.status === 'string' ? entry.status : null);
+    out.set(r.current_session_id, {
+      parentId: parentId && parentId !== r.current_session_id ? parentId : null,
+      label: r.label || (typeof entry.label === 'string' ? entry.label : null),
+      sourceStatus: status,
+    });
+  }
+  return out;
+}
+
 function indexOpenClawDb(db: Database.Database, dbPath: string, agentName: string, stmts: PreparedStatements, archiveMode: boolean, config: AgentActaConfig): string[] {
   // Probe before reading: a write that lands mid-pass leaves a stale stored
   // probe, so the next tick re-runs rather than missing the update.
@@ -839,11 +994,20 @@ function indexOpenClawDb(db: Database.Database, dbPath: string, agentName: strin
       'SELECT session_id, COUNT(*) AS line_count, MAX(seq) AS max_seq, TOTAL(LENGTH(event_json)) AS byte_count FROM transcript_events GROUP BY session_id'
     ).all() as Array<{ session_id: string; line_count: number; max_seq: number; byte_count: number }>;
     const selectLines = src.prepare('SELECT event_json FROM transcript_events WHERE session_id = ? ORDER BY seq');
+    const lineageById = loadOpenClawLineage(src);
     for (const s of sessions) {
       const sourceKey = `${dbPath}#${s.session_id}`;
+      // session_nodes only names each key's CURRENT session; for older ones keep
+      // what was recorded while they were current instead of wiping it.
+      let lineage: SessionLineage | undefined = lineageById.get(s.session_id);
+      if (!lineage) {
+        const prev = db.prepare('SELECT parent_id, label, source_status FROM sessions WHERE id = ?').get(s.session_id) as { parent_id: string | null; label: string | null; source_status: string | null } | undefined;
+        lineage = prev ? { parentId: prev.parent_id, label: prev.label, sourceStatus: prev.source_status } : {};
+      }
       // Change marker: appends bump max_seq, rewrites change the count, and
-      // in-place row updates virtually always change total byte length.
-      const stateToken = `seq:${s.max_seq}:${s.line_count}:${s.byte_count}`;
+      // in-place row updates virtually always change total byte length. Lineage
+      // is included so a status flip (e.g. killed) re-indexes without new lines.
+      const stateToken = `seq:${s.max_seq}:${s.line_count}:${s.byte_count}:${lineage.parentId || ''}:${lineage.sourceStatus || ''}:${lineage.label || ''}`;
       if (!REINDEX) {
         const state = stmts.getState.get(sourceKey) as IndexStateRow | undefined;
         if (state && state.last_modified === stateToken) continue;
@@ -851,7 +1015,7 @@ function indexOpenClawDb(db: Database.Database, dbPath: string, agentName: strin
       const lines = (selectLines.all(s.session_id) as Array<{ event_json: string }>).map(r => r.event_json).filter(Boolean);
       const result: IndexResult = lines.length === 0
         ? { skipped: true }
-        : indexSessionLines(db, sourceKey, lines, agentName, stmts, archiveMode, config, stateToken, s.session_id);
+        : indexSessionLines(db, sourceKey, lines, agentName, stmts, archiveMode, config, stateToken, s.session_id, lineage);
       if (result.skipped) {
         // Record state anyway so an unparseable session is not re-read on every
         // tick; any later change to its rows changes the token and retries it.
@@ -918,7 +1082,7 @@ function run(): void {
   let allFiles: FileEntry[] = [];
   for (const dir of sessionDirs) {
     if (dir.sourceType === 'openclaw-db') continue;
-    const files: FileEntry[] = listJsonlFiles(dir.path, !!dir.recursive)
+    const files: FileEntry[] = listSessionFiles(dir)
       .map(filePath => ({ path: filePath, agent: dir.agent, sourceType: dir.sourceType || 'transcript' }));
     allFiles.push(...files);
   }
@@ -1031,7 +1195,7 @@ function indexAll(db: Database.Database, config: AgentActaConfig): IndexAllResul
       }
       continue;
     }
-    const files = listJsonlFiles(dir.path, !!dir.recursive);
+    const files = listSessionFiles(dir);
     for (const filePath of files) {
       try {
         const result = dir.sourceType === 'cron-run'
@@ -1048,6 +1212,6 @@ function indexAll(db: Database.Database, config: AgentActaConfig): IndexAllResul
   return { sessions: stats.sessions, events: evStats.events, newSessions: totalSessions };
 }
 
-export { discoverSessionDirs, listJsonlFiles, indexFile, indexCronRunFile, indexOpenClawDb, watchOpenClawDb, indexAll };
+export { discoverSessionDirs, listJsonlFiles, listSessionFiles, listClaudeSubagentFiles, indexFile, indexCronRunFile, indexOpenClawDb, watchOpenClawDb, indexAll };
 
 if (require.main === module) run();

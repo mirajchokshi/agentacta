@@ -1,0 +1,291 @@
+import { describe, it, before, after } from 'node:test';
+import assert from 'node:assert';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import Database from 'better-sqlite3';
+
+import { open, init, createStmts } from '../src/db.js';
+import { discoverSessionDirs, listSessionFiles, indexFile, indexOpenClawDb } from '../src/indexer.js';
+import { computeSessionStatus, attachChildren, LIVE_WINDOW_MS } from '../src/session-status.js';
+import type { PreparedStatements, SessionRow, SessionDir } from '../src/types.js';
+import type { SessionTreeNode } from '../src/session-status.js';
+
+const TMP = path.join(os.tmpdir(), `agentacta-test-tree-${Date.now()}`);
+const TEST_DB = path.join(TMP, 'test.db');
+
+function row(partial: Partial<SessionRow>): SessionRow {
+  return { id: 'x', start_time: '2026-01-01T00:00:00Z', end_time: '2026-01-01T00:10:00Z', source_status: null, ...partial } as SessionRow;
+}
+
+function writeJsonl(fp: string, lines: Record<string, unknown>[]): void {
+  fs.mkdirSync(path.dirname(fp), { recursive: true });
+  fs.writeFileSync(fp, lines.map(l => JSON.stringify(l)).join('\n') + '\n');
+}
+
+describe('session status', () => {
+  const now = Date.parse('2026-01-01T12:00:00Z');
+
+  it('is live when there was activity inside the window', () => {
+    const s = row({ end_time: new Date(now - 60_000).toISOString() });
+    assert.strictEqual(computeSessionStatus(s, now).status, 'live');
+  });
+
+  it('is stale when no end was recorded and it has been quiet past the window', () => {
+    const s = row({ start_time: new Date(now - LIVE_WINDOW_MS - 1000).toISOString(), end_time: null });
+    assert.strictEqual(computeSessionStatus(s, now).status, 'stale');
+  });
+
+  it('is ended (inactive) when quiet with an end time', () => {
+    const st = computeSessionStatus(row({}), now);
+    assert.deepStrictEqual([st.status, st.ended_reason], ['ended', 'inactive']);
+  });
+
+  it('treats terminal source statuses as ended even when recent', () => {
+    const st = computeSessionStatus(row({ end_time: new Date(now - 1000).toISOString(), source_status: 'killed' }), now);
+    assert.deepStrictEqual([st.status, st.ended_reason], ['ended', 'source']);
+  });
+});
+
+describe('attachChildren', () => {
+  it('nests descendants with counts and survives parent cycles', () => {
+    const mk = (id: string, parent_id: string | null, status: 'live' | 'ended' = 'ended', ts = '2026-01-01T00:00:00Z') =>
+      ({ id, parent_id, status, end_time: ts, start_time: ts }) as SessionTreeNode & { end_time: string; start_time: string };
+    const root = mk('root', null);
+    const pool = [
+      mk('a', 'root', 'ended', '2026-01-01T01:00:00Z'),
+      mk('b', 'root', 'live', '2026-01-01T02:00:00Z'),
+      mk('a1', 'a', 'live'),
+      mk('loop1', 'loop2'), mk('loop2', 'loop1'),
+    ];
+    const [tree] = attachChildren([root], pool, s => (s as { end_time: string }).end_time);
+    assert.deepStrictEqual(tree.children!.map(c => c.id), ['b', 'a'], 'newest child first');
+    assert.strictEqual(tree.child_count, 2);
+    assert.strictEqual(tree.descendant_count, 3);
+    assert.strictEqual(tree.live_descendant_count, 2);
+
+    const [loop] = attachChildren([pool[3]], pool, () => '');
+    assert.strictEqual(loop.descendant_count, 1, 'cycle is cut instead of recursing forever');
+  });
+});
+
+describe('subagent indexing', () => {
+  let db: Database.Database;
+  let stmts: PreparedStatements;
+
+  before(() => {
+    fs.mkdirSync(TMP, { recursive: true });
+    init(TEST_DB);
+    db = open(TEST_DB);
+    stmts = createStmts(db);
+  });
+
+  after(() => {
+    db.close();
+    fs.rmSync(TMP, { recursive: true, force: true });
+  });
+
+  it('indexes Claude Code subagent transcripts as children without clobbering the parent', () => {
+    const projDir = path.join(TMP, 'claude-proj');
+    const parentId = '11111111-2222-3333-4444-555555555555';
+    writeJsonl(path.join(projDir, `${parentId}.jsonl`), [
+      { type: 'user', sessionId: parentId, uuid: 'p-1', timestamp: '2026-10-01T00:00:00Z', message: { role: 'user', content: 'Parent task here' } },
+      { type: 'assistant', sessionId: parentId, uuid: 'p-2', timestamp: '2026-10-01T00:05:00Z', message: { role: 'assistant', content: 'Spawning a helper' } },
+    ]);
+    const subPath = path.join(projDir, parentId, 'subagents', 'agent-abc123.jsonl');
+    writeJsonl(subPath, [
+      { type: 'user', isSidechain: true, agentId: 'abc123', sessionId: parentId, uuid: 's-1', timestamp: '2026-10-01T00:01:00Z', message: { role: 'user', content: 'Do the helper thing' } },
+      { type: 'assistant', isSidechain: true, agentId: 'abc123', sessionId: parentId, uuid: 's-2', timestamp: '2026-10-01T00:02:00Z', message: { role: 'assistant', content: 'Done' } },
+    ]);
+    fs.writeFileSync(subPath.replace(/\.jsonl$/, '.meta.json'), JSON.stringify({ agentType: 'general-purpose', description: 'Build the helper' }));
+
+    const dir: SessionDir = { path: projDir, agent: 'claude-code', subagents: true };
+    const files = listSessionFiles(dir);
+    assert.ok(files.includes(subPath), 'subagent transcript is discovered');
+    // Index the subagent after the parent: it must not overwrite the parent row.
+    for (const f of files.sort((a, b) => a.length - b.length)) indexFile(db, f, 'claude-code', stmts, false, {} as never);
+
+    const parent = db.prepare('SELECT * FROM sessions WHERE id = ?').get(parentId) as SessionRow;
+    assert.strictEqual(parent.summary, 'Parent task here');
+    assert.strictEqual(parent.parent_id, null);
+    const child = db.prepare('SELECT * FROM sessions WHERE id = ?').get('agent-abc123') as SessionRow;
+    assert.strictEqual(child.parent_id, parentId);
+    assert.strictEqual(child.session_type, 'subagent');
+    assert.strictEqual(child.label, 'Build the helper');
+    const parentEvents = (db.prepare('SELECT COUNT(*) AS c FROM events WHERE session_id = ?').get(parentId) as { c: number }).c;
+    assert.strictEqual(parentEvents, 2);
+  });
+
+  it('marks discovered Claude project dirs for subagent scanning', () => {
+    const originalHome = process.env.HOME;
+    const home = path.join(TMP, 'home-claude');
+    const proj = path.join(home, '.claude', 'projects', '-tmp-x');
+    writeJsonl(path.join(proj, 's.jsonl'), [{ type: 'user', sessionId: 's', timestamp: '2026-10-01T00:00:00Z', message: { role: 'user', content: 'hi' } }]);
+    process.env.HOME = home;
+    try {
+      const dirs = discoverSessionDirs({ sessionsPath: null } as never);
+      assert.strictEqual(dirs.find(d => d.path === proj)?.subagents, true);
+    } finally {
+      process.env.HOME = originalHome;
+    }
+  });
+
+  it('links Codex subagent threads to their parent thread', () => {
+    const fp = path.join(TMP, 'codex', 'rollout-child.jsonl');
+    writeJsonl(fp, [
+      { type: 'session_meta', timestamp: '2026-10-01T00:00:00Z', payload: { id: 'codex-child', timestamp: '2026-10-01T00:00:00Z', source: { subagent: { thread_spawn: { parent_thread_id: 'codex-parent', depth: 1 } } }, originator: 'codex_cli_rs' } },
+      { type: 'event_msg', timestamp: '2026-10-01T00:00:01Z', payload: { type: 'user_message', message: 'Child task' } },
+    ]);
+    indexFile(db, fp, 'codex-cli', stmts, false, {} as never);
+    const child = db.prepare('SELECT * FROM sessions WHERE id = ?').get('codex-child') as SessionRow;
+    assert.strictEqual(child.parent_id, 'codex-parent');
+    assert.strictEqual(child.session_type, 'subagent');
+    assert.ok(!child.summary!.includes('[object Object]'));
+  });
+
+  it('reads OpenClaw parent links and status from session_nodes, re-indexing on status change', () => {
+    const dbp = path.join(TMP, 'openclaw-lineage.sqlite');
+    const src = new Database(dbp);
+    src.exec('CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, event_json TEXT, created_at INTEGER)');
+    src.exec('CREATE TABLE session_nodes (session_key TEXT, current_session_id TEXT, parent_session_key TEXT, spawned_by TEXT, status TEXT, label TEXT, entry_json TEXT)');
+    const ins = src.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?)');
+    for (const sid of ['oc-parent', 'oc-child', 'oc-child2']) {
+      ins.run(sid, 1, JSON.stringify({ type: 'session', version: 3, id: sid, timestamp: '2026-10-01T00:00:00Z' }), 1);
+      ins.run(sid, 2, JSON.stringify({ type: 'message', id: `${sid}-m`, timestamp: '2026-10-01T00:01:00Z', message: { role: 'user', content: `Hello ${sid}` } }), 2);
+    }
+    const node = src.prepare('INSERT INTO session_nodes VALUES (?, ?, ?, ?, ?, ?, ?)');
+    node.run('agent:main:chat', 'oc-parent', null, null, null, null, '{}');
+    node.run('agent:main:dash:1', 'oc-child', 'agent:main:chat', 'agent:main:chat', 'running', 'Deck work', JSON.stringify({ parentSessionId: 'oc-parent' }));
+    // No parentSessionId in entry_json: falls back to the parent key's current session.
+    node.run('agent:main:dash:2', 'oc-child2', 'agent:main:chat', null, 'done', null, JSON.stringify({ label: 'From entry' }));
+
+    indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never);
+    const child = db.prepare('SELECT * FROM sessions WHERE id = ?').get('oc-child') as SessionRow;
+    assert.deepStrictEqual([child.parent_id, child.label, child.source_status, child.session_type], ['oc-parent', 'Deck work', 'running', 'subagent']);
+    const child2 = db.prepare('SELECT * FROM sessions WHERE id = ?').get('oc-child2') as SessionRow;
+    assert.deepStrictEqual([child2.parent_id, child2.label, child2.source_status], ['oc-parent', 'From entry', 'done']);
+
+    src.prepare("UPDATE session_nodes SET status = 'killed' WHERE current_session_id = 'oc-child'").run();
+    src.close();
+    const reindexed = indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never);
+    assert.deepStrictEqual(reindexed, ['oc-child'], 'a status flip alone re-indexes the session');
+    assert.strictEqual((db.prepare('SELECT source_status FROM sessions WHERE id = ?').get('oc-child') as SessionRow).source_status, 'killed');
+  });
+
+
+  it('labels Claude sessions with their custom title, else their AI title', () => {
+    const fp = path.join(TMP, 'claude-titles', 'titled.jsonl');
+    writeJsonl(fp, [
+      { type: 'mode', mode: 'default', sessionId: 'cc-titled' },
+      { type: 'user', sessionId: 'cc-titled', uuid: 't-1', timestamp: '2026-10-01T00:00:00Z', message: { role: 'user', content: 'Please do the thing' } },
+      { type: 'ai-title', aiTitle: 'First guess', sessionId: 'cc-titled' },
+      { type: 'ai-title', aiTitle: 'Better title', sessionId: 'cc-titled' },
+    ]);
+    indexFile(db, fp, 'claude-code', stmts, false, {} as never);
+    assert.strictEqual((db.prepare('SELECT label FROM sessions WHERE id = ?').get('cc-titled') as SessionRow).label, 'Better title');
+
+    fs.appendFileSync(fp, JSON.stringify({ type: 'custom-title', customTitle: 'Ops notes', sessionId: 'cc-titled' }) + '\n');
+    const future = new Date(Date.now() + 5000);
+    fs.utimesSync(fp, future, future);
+    indexFile(db, fp, 'claude-code', stmts, false, {} as never);
+    assert.strictEqual((db.prepare('SELECT label FROM sessions WHERE id = ?').get('cc-titled') as SessionRow).label, 'Ops notes');
+  });
+
+  it('summarizes a pasted-thread prompt by its last message, not the header', () => {
+    const fp = path.join(TMP, 'claude-thread', 'thread.jsonl');
+    writeJsonl(fp, [
+      { type: 'user', sessionId: 'cc-thread', uuid: 'th-1', timestamp: '2026-10-01T00:00:00Z', message: { role: 'user', content: '(Fresh session. Recent messages in this thread, oldest first:\nSam: Done with the draft.\nAlex: Did anything break?' } },
+    ]);
+    indexFile(db, fp, 'claude-code', stmts, false, {} as never);
+    assert.strictEqual((db.prepare('SELECT summary FROM sessions WHERE id = ?').get('cc-thread') as SessionRow).summary, 'Did anything break?');
+
+    const fp2 = path.join(TMP, 'claude-thread', 'thread2.jsonl');
+    writeJsonl(fp2, [
+      { type: 'user', sessionId: 'cc-thread2', uuid: 'th-2', timestamp: '2026-10-01T00:00:00Z', message: { role: 'user', content: '(Fresh session. Recent messages in this thread, oldest first:\nAlex: Update the stack list please\n[Message attachment: IMG_1.png]\nAttached file(s), read them with the Read tool:\n/home/me/.local/state/inbox/IMG_1.png' } },
+    ]);
+    indexFile(db, fp2, 'claude-code', stmts, false, {} as never);
+    assert.strictEqual((db.prepare('SELECT summary FROM sessions WHERE id = ?').get('cc-thread2') as SessionRow).summary, 'Update the stack list please');
+  });
+
+  it('re-parses every source once when the index version goes up', () => {
+    const dbp = path.join(TMP, 'version.db');
+    init(dbp);
+    const v = open(dbp);
+    v.prepare('INSERT INTO index_state (file_path, last_offset, last_modified) VALUES (?, ?, ?)').run('/x.jsonl', 1, 'm');
+    v.prepare("UPDATE agentacta_meta SET value = '1' WHERE key = 'index_version'").run();
+    v.close();
+    init(dbp);
+    const after = open(dbp);
+    assert.strictEqual((after.prepare('SELECT COUNT(*) AS c FROM index_state').get() as { c: number }).c, 0);
+    init(dbp);
+    after.prepare('INSERT INTO index_state (file_path, last_offset, last_modified) VALUES (?, ?, ?)').run('/y.jsonl', 1, 'm');
+    init(dbp);
+    assert.strictEqual((after.prepare('SELECT COUNT(*) AS c FROM index_state').get() as { c: number }).c, 1, 'no reset at the same version');
+    after.close();
+  });
+
+  it('files a Claude subagent spawned by another subagent under its real parent', () => {
+    const projDir = path.join(TMP, 'claude-nested');
+    const root = 'root-0000-0000-0000-000000000001';
+    writeJsonl(path.join(projDir, `${root}.jsonl`), [
+      { type: 'user', sessionId: root, uuid: 'r-1', timestamp: '2026-10-01T00:00:00Z', message: { role: 'user', content: 'Root task' } },
+    ]);
+    const subDir = path.join(projDir, root, 'subagents');
+    const a = path.join(subDir, 'agent-aaa.jsonl');
+    writeJsonl(a, [
+      { type: 'user', isSidechain: true, agentId: 'aaa', sessionId: root, uuid: 'a-1', timestamp: '2026-10-01T00:01:00Z', message: { role: 'user', content: 'Do part A' } },
+      { type: 'assistant', isSidechain: true, agentId: 'aaa', sessionId: root, uuid: 'a-2', timestamp: '2026-10-01T00:02:00Z', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_spawn_b', name: 'Task', input: { description: 'Part B' } }] } },
+    ]);
+    fs.writeFileSync(a.replace(/\.jsonl$/, '.meta.json'), JSON.stringify({ description: 'Part A', spawnDepth: 1, toolUseId: 'toolu_root_task' }));
+    const b = path.join(subDir, 'agent-bbb.jsonl');
+    writeJsonl(b, [
+      { type: 'user', isSidechain: true, agentId: 'bbb', sessionId: root, uuid: 'b-1', timestamp: '2026-10-01T00:03:00Z', message: { role: 'user', content: 'Do part B' } },
+    ]);
+    fs.writeFileSync(b.replace(/\.jsonl$/, '.meta.json'), JSON.stringify({ description: 'Part B', spawnDepth: 2, toolUseId: 'toolu_spawn_b' }));
+
+    const files = listSessionFiles({ path: projDir, agent: 'claude-code', subagents: true });
+    assert.ok(files.indexOf(a) < files.indexOf(b), 'shallower subagents are listed first');
+    for (const f of files) indexFile(db, f, 'claude-code', stmts, false, {} as never);
+    assert.strictEqual((db.prepare('SELECT parent_id FROM sessions WHERE id = ?').get('agent-aaa') as SessionRow).parent_id, root);
+    assert.strictEqual((db.prepare('SELECT parent_id FROM sessions WHERE id = ?').get('agent-bbb') as SessionRow).parent_id, 'agent-aaa');
+  });
+
+  it('keeps an OpenClaw session\'s lineage after its key rolls over to a new session', () => {
+    const dbp = path.join(TMP, 'openclaw-rollover.sqlite');
+    const src = new Database(dbp);
+    src.exec('CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, event_json TEXT, created_at INTEGER)');
+    src.exec('CREATE TABLE session_nodes (session_key TEXT, current_session_id TEXT, parent_session_key TEXT, spawned_by TEXT, status TEXT, label TEXT, entry_json TEXT)');
+    const ins = src.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?)');
+    for (const sid of ['ro-parent', 'ro-old', 'ro-new']) {
+      ins.run(sid, 1, JSON.stringify({ type: 'session', version: 3, id: sid, timestamp: '2026-10-01T00:00:00Z' }), 1);
+      ins.run(sid, 2, JSON.stringify({ type: 'message', id: `${sid}-m`, timestamp: '2026-10-01T00:01:00Z', message: { role: 'user', content: `Hello ${sid}` } }), 2);
+    }
+    src.prepare('INSERT INTO session_nodes VALUES (?, ?, ?, ?, ?, ?, ?)').run('k:parent', 'ro-parent', null, null, null, null, '{}');
+    src.prepare('INSERT INTO session_nodes VALUES (?, ?, ?, ?, ?, ?, ?)').run('k:child', 'ro-old', 'k:parent', null, 'done', 'Child job', JSON.stringify({ parentSessionId: 'ro-parent' }));
+    indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never);
+    assert.strictEqual((db.prepare('SELECT parent_id FROM sessions WHERE id = ?').get('ro-old') as SessionRow).parent_id, 'ro-parent');
+
+    // The key moves on to a new session, and the old one gets one more line.
+    src.prepare("UPDATE session_nodes SET current_session_id = 'ro-new', status = NULL WHERE session_key = 'k:child'").run();
+    ins.run('ro-old', 3, JSON.stringify({ type: 'message', id: 'ro-old-m2', timestamp: '2026-10-01T00:02:00Z', message: { role: 'assistant', content: 'late reply' } }), 3);
+    src.close();
+    indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never);
+    const old = db.prepare('SELECT parent_id, label, source_status FROM sessions WHERE id = ?').get('ro-old') as SessionRow;
+    assert.deepStrictEqual([old.parent_id, old.label, old.source_status], ['ro-parent', 'Child job', 'done']);
+  });
+
+  it('re-indexes an OpenClaw session when only its label changes', () => {
+    const dbp = path.join(TMP, 'openclaw-label.sqlite');
+    const src = new Database(dbp);
+    src.exec('CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, event_json TEXT, created_at INTEGER)');
+    src.exec('CREATE TABLE session_nodes (session_key TEXT, current_session_id TEXT, parent_session_key TEXT, spawned_by TEXT, status TEXT, label TEXT, entry_json TEXT)');
+    src.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?)').run('lb-1', 1, JSON.stringify({ type: 'session', version: 3, id: 'lb-1', timestamp: '2026-10-01T00:00:00Z' }), 1);
+    src.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?)').run('lb-1', 2, JSON.stringify({ type: 'message', id: 'lb-1-m', timestamp: '2026-10-01T00:01:00Z', message: { role: 'user', content: 'Hello' } }), 2);
+    src.prepare('INSERT INTO session_nodes VALUES (?, ?, ?, ?, ?, ?, ?)').run('k:lb', 'lb-1', null, null, null, 'Old name', '{}');
+    indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never);
+    src.prepare("UPDATE session_nodes SET label = 'New name'").run();
+    src.close();
+    assert.deepStrictEqual(indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never), ['lb-1']);
+    assert.strictEqual((db.prepare('SELECT label FROM sessions WHERE id = ?').get('lb-1') as SessionRow).label, 'New name');
+  });
+});

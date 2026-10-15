@@ -17,8 +17,10 @@ npx agentacta
 ```
 
 <p align="center">
-  <img src="screenshots/demo.gif" alt="AgentActa demo" width="800">
+  <img src="screenshots/demo.gif" alt="AgentActa demo: overview, nested subagent sessions, a live session, timeline, insights and search" width="800">
 </p>
+
+<p align="center"><a href="screenshots/demo.mp4">Watch the full-quality video</a> · recorded from the bundled demo data (<code>npm run record-demo</code>)</p>
 
 ## Why this exists
 
@@ -30,19 +32,21 @@ AgentActa gives you one place to inspect the full trail.
 
 ## What you get
 
-- 🔍 Full-text search across messages, tool calls, and results
-- 📋 Session browser with summaries, token breakdowns, and model info
+- 🔍 Full-text search across messages, tool calls, and results (⌘K)
+- 📋 Session browser with real titles, token breakdowns, and model info
+- 🟢 Live / stale status for every session, and subagents nested under the session that spawned them
+- 📈 Overview of today against your 14-day average, activity per day and per agent, and usage per week
+- 🧩 Session pages that show when a session was busy and which tools it leaned on
 - 🧭 Project-scoped session filtering with per-event attribution
 - 🤖 Clear Codex run visibility for direct and Symphony-origin sessions
-- 📅 Timeline view with live updates for today
+- 📅 Timeline of any day, grouped by session, with live updates for today
 - 📁 File activity across all indexed sessions
 - 🌗 Light and dark themes
 - 📊 Stats for sessions, messages, tools, and tokens
 - ⚡ Live indexing via file watching
 - 📱 Mobile-optimized UI with floating navigation
 - 🏥 Session health scoring - reliability scores, issue detection, and per-signal breakdowns
-- 💡 Search suggestions based on real data
-- ⌨️ Command palette (⌘K / Ctrl+K) for quick navigation
+- ⌨️ Command palette (⌘K / Ctrl+K) and keyboard navigation (J/K, Enter, Esc)
 - 🎨 Theme settings (system, light, dark, OLED)
 - 🏥 Health endpoint for monitoring (`/api/health`)
 
@@ -60,12 +64,13 @@ agentacta
 
 Open: `http://localhost:4003`
 
-Auto-detected session paths:
-- `~/.openclaw/agents/*/sessions/` (OpenClaw)
-- `~/.claude/projects/*/` (Claude Code)
+Auto-detected session sources:
+- `~/.openclaw/agents/*/agent/openclaw-agent.sqlite` (OpenClaw 2026.8+), or `~/.openclaw/agents/*/sessions/` for older versions
+- `~/.openclaw/cron/runs/` (OpenClaw cron runs without a transcript)
+- `~/.claude/projects/*/`, including each session's `subagents/` transcripts (Claude Code)
 - `~/.codex/sessions/` (Codex CLI)
 
-Custom path:
+Add more session folders (auto-detection still runs):
 
 ```bash
 AGENTACTA_SESSIONS_PATH=/path/to/sessions agentacta
@@ -75,21 +80,25 @@ AGENTACTA_SESSIONS_PATH=/path/to/sessions agentacta
 
 ### Search
 
-SQLite FTS5 full-text search with filters for message type (messages, tool calls, results) and role (user, assistant).
+Press ⌘K (Ctrl+K, or `/`) to search. Results cover matching events (SQLite FTS5 full-text search over messages, tool calls and results), sessions and files, and the palette also jumps between views.
 
-Suggestions come from your own dataset: top tools, common topics, frequently touched files.
+The search API adds filters for event type (`message`, `tool_call`, `tool_result`) and role (`user`, `assistant`), and suggests queries from your own data (top tools, common topics, frequently touched files).
 
 ### Sessions
 
-Browse indexed sessions with auto-generated summaries, token splits (input/output), and model details. Click into any session to see the full event history.
+Browse indexed sessions with real titles (Claude Code's own session title or your `/rename`, otherwise the first request), agent, project and model, timing, and message and tool-call counts. Click into any session for its full event history, opened by its duration, messages, tool calls and tokens, a strip showing when it was busy, and the tools it used most. Tool calls show the argument that matters (the command, file, pattern or URL), with the full arguments one click away.
 
 Session detail view supports project-scoped filtering, so mixed-project sessions can be narrowed down without losing the full underlying transcript. The Initial Prompt jump still resolves from full session context even when a project filter is active.
+
+Subagent sessions nest under the session that spawned them (Claude Code `subagents/` transcripts, Codex spawned threads, OpenClaw spawned sessions), with a collapsible count on the parent and a link back to the parent from the child.
+
+Sessions show as **Live** (activity in the last 15 minutes) or **Stale** (never recorded an end and has gone quiet). A live session's page shows new events as they arrive. AgentActa only reads transcripts, so it can't stop a running agent.
 
 Session types get tagged so noisy categories are easier to spot (cron, sub-agent, heartbeat). Codex-backed work is also distinguished more clearly, including direct Codex runs and Symphony-origin Codex sessions.
 
 ### Timeline
 
-Pick a date, see everything that happened, newest first. Today's view updates live as new events come in.
+Pick a date, see everything that happened, newest first, grouped under the session each event belongs to. Today's view updates live as new events come in.
 
 ### Insights
 
@@ -97,7 +106,7 @@ The Insights tab surfaces session health across your entire history.
 
 It tracks five issue signals - repeated tool loops, sessions that produced no output, high error rates, vague instructions, and incomplete sessions. Each signal is severity-scaled so scores reflect how bad the problem actually was, not just whether it occurred.
 
-The reliability score (0-100) is the inverse of the confusion score: higher means the agent completed work cleanly. The issue rate shows what percentage of possible signal types were detected in a session.
+The reliability score (0-100) is the inverse of the confusion score: higher means the agent completed work cleanly. The page shows what share of sessions had at least one issue, the average reliability, how often each signal fired, and the flagged sessions with their signals (repeats counted, e.g. "Repeated Actions ×3").
 
 ### File Activity
 
@@ -107,20 +116,20 @@ Sort by recency, frequency, or session count. Filter by extension. Group by dire
 
 ### Export
 
-Export sessions or search results as Markdown or JSON.
+Export a session as Markdown or JSON from its page (plus the raw JSONL in archive mode), or search results through the API (`/api/export/search`).
 
 Useful for handoffs, incident writeups, and audit archives.
 
 ## How it works
 
-AgentActa parses JSONL session files (OpenClaw, Claude Code, Codex CLI), then indexes events into local SQLite with FTS5.
+AgentActa parses session transcripts (JSONL files from Claude Code, Codex CLI and older OpenClaw, and OpenClaw's per-agent SQLite stores), then indexes events into local SQLite with FTS5.
 
 The UI is a single-page app served by a lightweight Node HTTP server.
 
 No framework build pipeline. Minimal moving parts.
 
 ```text
-Session JSONL files -> SQLite + FTS5 index -> HTTP API -> Web UI
+Session transcripts -> SQLite + FTS5 index -> HTTP API -> Web UI
 ```
 
 Everything stays on your machine.
@@ -131,20 +140,22 @@ On first run, AgentActa creates:
 - `~/.config/agentacta/config.json`
 - or `agentacta.config.json` in current directory (if present)
 
-Default config shape (auto-generated on first run - session directories are detected automatically):
+Config written on first run (`sessionsPath` lists whichever known session folders exist on your machine, or is `null`):
 
 ```json
 {
   "port": 4003,
   "storage": "reference",
-  "sessionsPath": null,
+  "sessionsPath": ["/home/you/.claude/projects", "/home/you/.codex/sessions"],
   "dbPath": "./agentacta.db",
-  "projectAliases": {}
+  "projectAliases": {},
+  "authToken": null
 }
 ```
 
-Leave `sessionsPath` as `null` to use auto-discovery, or set it to add custom session roots.
-It accepts a string, a colon-delimited string, or a JSON array.
+`sessionsPath` adds session roots on top of auto-discovery. It accepts a string, a colon-delimited string, or a JSON array.
+
+`dbPath` is resolved against the directory you start AgentActa from, so `./agentacta.db` puts the database wherever you run it. For a long-running install, set an absolute path (for example `~/.local/share/agentacta/agentacta.db`, written out in full).
 
 ### Storage modes
 
@@ -158,27 +169,36 @@ It accepts a string, a colon-delimited string, or a JSON array.
 | `PORT` | `4003` | Server port |
 | `AGENTACTA_HOST` | `127.0.0.1` | Bind address |
 | `AGENTACTA_SESSIONS_PATH` | auto-detected | Custom sessions directory |
-| `AGENTACTA_DB_PATH` | `./agentacta.db` | Database path |
+| `AGENTACTA_DB_PATH` | `./agentacta.db` | Database path (relative paths resolve against the working directory) |
 | `AGENTACTA_STORAGE` | `reference` | `reference` or `archive` |
 | `AGENTACTA_PROJECT_ALIASES_JSON` | unset | Rename inferred project labels |
+| `AGENTACTA_AUTH_TOKEN` | unset | Shared token required for API and UI access (see Security) |
+| `AGENTACTA_ALLOW_UNAUTHENTICATED_NETWORK` | unset | Set to `1` to allow a non-loopback bind without a token (trusted networks only) |
 
 ## API
 
 | Endpoint | Description |
 |---|---|
 | `GET /api/stats` | Session/message/tool/token totals |
-| `GET /api/sessions` | Session list with metadata |
-| `GET /api/sessions/:id` | Full session events |
+| `GET /api/sessions` | Session list with metadata and `status` (`live` / `stale` / `ended`); `?roots=1` returns top-level sessions with their subagent tree |
+| `GET /api/sessions/:id` | Full session events, plus `parent` and nested `children` |
+| `GET /api/sessions/:id/events?after=<ts>&afterId=<id>` | Events after a cursor (paged) |
 | `GET /api/sessions/:id/stream?after=<ts>` | SSE stream for live session-detail updates |
+| `GET /api/activity?days=14&tz=<offset>` | Per-day and per-agent activity (events, tool calls, sessions) in the viewer's timezone |
 | `GET /api/search?q=<query>` | Full-text search + filters |
 | `GET /api/suggestions` | Search suggestions |
 | `GET /api/timeline?date=YYYY-MM-DD` | Events for one day |
 | `GET /api/files` | Touched-file inventory |
-| `GET /api/export/session/:id?format=md` | Export one session |
+| `GET /api/files/sessions?path=<file>` | Sessions that touched a file (one row per session) |
+| `GET /api/export/session/:id?format=md` | Export one session (`md` or `json`) |
 | `GET /api/timeline/stream?after=<ts>` | SSE stream for live timeline updates |
 | `POST /api/maintenance` | VACUUM + WAL checkpoint (returns size before/after) |
+| `POST /api/reindex` | Re-scan all session sources |
+| `GET /api/config` | Effective storage mode, DB path and size, session sources |
 | `GET /api/health` | Server status, version, uptime, session count |
 | `GET /api/insights` | Session health summary - reliability scores, issue counts, top flagged sessions |
+| `GET /api/insights/session/:id` | Health signals for one session |
+| `GET /api/archive/session/:id`, `GET /api/archive/export/:id` | Raw JSONL lines (archive mode) |
 | `GET /api/export/search?q=<query>&format=md` | Export search results |
 
 ### Context API

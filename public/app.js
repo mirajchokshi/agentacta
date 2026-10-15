@@ -26,7 +26,7 @@ function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) {
-    const color = theme === 'light' ? '#f5f7fb' : (theme === 'oled' ? '#000000' : '#0a0e1a');
+    const color = theme === 'light' ? '#f7f7f8' : (theme === 'oled' ? '#000000' : '#0d0e10');
     meta.setAttribute('content', color);
   }
 }
@@ -113,10 +113,69 @@ function dlExport(url, filename) {
 
 function fmtTokens(n) {
   if (!n) return '0';
-  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(4) + 'B';
+  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2).replace(/\.?0+$/, '') + 'B';
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
   if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, '') + 'K';
   return n.toLocaleString();
+}
+
+// Compact for scanning (55.4K, 6.28B); callers put the exact value in a title.
+function fmtCompact(n) {
+  n = Number(n) || 0;
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return (n / 1e9).toFixed(abs >= 1e10 ? 1 : 2).replace(/\.0+$/, '') + 'B';
+  if (abs >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (abs >= 1e4) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+  return n.toLocaleString();
+}
+
+// ---- Small charts (no library) ----
+// Columns: one series, thin bars from a shared baseline. `highlight` marks the
+// one bar the story is about (today, the busiest bucket); only it and the peak
+// get a direct label. Every column is focusable and shows its exact value on
+// hover/focus/tap; a visually hidden table carries all values for screen readers.
+function renderColumnChart({ points, height = 96, caption, unit = '', axis = [] }) {
+  if (!points.length) return '';
+  const max = Math.max(1, ...points.map(p => p.value));
+  const peakIdx = points.reduce((best, p, i) => (p.value > points[best].value ? i : best), 0);
+  const heights = points.map(p => (p.value ? Math.max(2, Math.round((p.value / max) * height)) : 0));
+  // A label sits above its bar only if neither neighbor is taller (it would
+  // collide); callers put the highlighted value in the heading instead.
+  const clear = i => (heights[i - 1] ?? 0) <= heights[i] && (heights[i + 1] ?? 0) <= heights[i];
+  const cols = points.map((p, i) => {
+    const h = heights[i];
+    const label = ((p.highlight || (i === peakIdx && p.value > 0)) && clear(i)) ? `<span class="col-val">${fmtCompact(p.value)}</span>` : '';
+    const edge = i === 0 ? ' edge-l' : (i === points.length - 1 ? ' edge-r' : '');
+    return `<div class="col${p.highlight ? ' is-hl' : ''}${edge}" tabindex="0" role="img" aria-label="${escHtml(p.tip)}" data-tip="${escHtml(p.tip)}">
+      <div class="col-bar" style="height:${h}px">${label}</div>
+    </div>`;
+  }).join('');
+  return `<figure class="colchart" style="--plot-h:${height}px">
+    <div class="colchart-plot">${cols}</div>
+    ${axis.length ? `<div class="colchart-axis">${axis.map(a => `<span>${escHtml(a)}</span>`).join('')}</div>` : ''}
+    <div class="sr-only"><table><caption>${escHtml(caption)}</caption><tbody>${points.map(p => `<tr><th>${escHtml(p.label)}</th><td>${p.value}${unit}</td></tr>`).join('')}</tbody></table></div>
+  </figure>`;
+}
+
+// Ranked horizontal bars for nominal categories (agents, tools): one color,
+// length = magnitude, value in a text column so it is never color-only.
+function renderBarList(rows, { valueLabel = v => fmtCompact(v), max } = {}) {
+  if (!rows.length) return '';
+  const top = max || Math.max(1, ...rows.map(r => r.value));
+  return `<ul class="barlist">${rows.map(r => `
+    <li class="barlist-row" title="${escHtml(r.tip || '')}">
+      <span class="barlist-name">${escHtml(r.name)}</span>
+      <span class="barlist-track"><span class="barlist-bar" style="width:${Math.max(1, (r.value / top) * 100)}%"></span></span>
+      <span class="barlist-val">${valueLabel(r.value)}${r.sub ? `<span class="barlist-sub"> ${escHtml(r.sub)}</span>` : ''}</span>
+    </li>`).join('')}</ul>`;
+}
+
+function renderStatTiles(items) {
+  return `<dl class="tiles">${items.map(m => `<div class="tile"><dt>${escHtml(m.label)}</dt><dd title="${escHtml(m.title || String(m.value))}">${escHtml(String(m.value))}</dd>${m.note ? `<p class="tile-note">${escHtml(m.note)}</p>` : ''}</div>`).join('')}</dl>`;
+}
+
+function renderMetrics(items) {
+  return `<dl class="metrics">${items.map(m => `<div class="metric"><dt>${escHtml(m.label)}</dt><dd title="${escHtml(m.title || String(m.value))}">${escHtml(String(m.value))}</dd>${m.note ? `<p class="metric-note">${escHtml(m.note)}</p>` : ''}</div>`).join('')}</dl>`;
 }
 
 function fmtDate(ts) {
@@ -165,18 +224,46 @@ function shortSessionId(id) {
   return id.length > 24 ? `${id.slice(0, 8)}\u2026${id.slice(-8)}` : id;
 }
 
-function badgeClass(type, role) {
-  if (type === 'tool_call') return 'badge-tool_call';
-  if (type === 'tool_result') return 'badge-tool_result';
-  if (role === 'user') return 'badge-user';
-  if (role === 'assistant') return 'badge-assistant';
-  return 'badge-message';
-}
-
+// One short fade per navigation: the skeleton fades in, the real content
+// that replaces it a moment later does not fade again.
 function transitionView() {
+  window.hideChartTip?.();
+  const now = performance.now();
+  if (now - (window._lastViewFade || 0) < 700) return;
+  window._lastViewFade = now;
   content.classList.remove('view-enter');
   void content.offsetWidth;
   content.classList.add('view-enter');
+}
+
+// Lists the user returns to are restored instantly from the last render, then
+// refreshed in place. Going Back also restores the scroll position; arriving
+// by tapping the tab starts at the top, as a tab bar should.
+const viewCache = {};
+const VIEW_CACHE_MS = 5 * 60 * 1000;
+function rememberCurrentView() {
+  const v = (location.hash || '').slice(1) || 'overview';
+  content.querySelectorAll('.is-pressed').forEach(el => el.classList.remove('is-pressed'));
+  if (v === 'sessions' || v === 'overview') viewCache[v] = { html: content.innerHTML, y: window.scrollY, at: Date.now() };
+}
+function restoreView(name) {
+  const c = viewCache[name];
+  const keepScroll = window._restoreScroll;
+  window._restoreScroll = false;
+  if (!c || Date.now() - c.at > VIEW_CACHE_MS) return false;
+  window.hideChartTip?.();
+  content.innerHTML = c.html;
+  window.scrollTo(0, keepScroll ? c.y : 0);
+  return true;
+}
+function stillOn(name) {
+  const v = (location.hash || '').slice(1) || 'overview';
+  return v === name;
+}
+function renderInPlace(html) {
+  const y = window.scrollY;
+  content.innerHTML = html;
+  window.scrollTo(0, y);
 }
 
 function skeletonLine(width = '100%', height = '12px') {
@@ -184,35 +271,21 @@ function skeletonLine(width = '100%', height = '12px') {
 }
 
 function skeletonRows(count = 6, kind = 'event') {
-  if (kind === 'session') {
-    return Array.from({ length: count }).map(() => `
-      <div class="session-item skeleton-card">
-        <div class="skeleton-line" style="width:58%;height:12px"></div>
-        <div class="skeleton-line" style="width:90%;height:14px"></div>
-        <div class="skeleton-line" style="width:72%;height:14px"></div>
-      </div>
-    `).join('');
+  if (kind === 'session' || kind === 'file') {
+    return `<div class="skeleton-list">${Array.from({ length: count }).map(() => `
+      <div class="skeleton-row">
+        <div class="skeleton-line" style="width:56%;height:13px"></div>
+        <div class="skeleton-line" style="width:32%;height:11px;margin-top:7px"></div>
+      </div>`).join('')}</div>`;
   }
   if (kind === 'stats') {
-    return Array.from({ length: count }).map(() => `
-      <div class="stat-card skeleton-card">
-        <div class="skeleton-line" style="width:44%;height:10px"></div>
-        <div class="skeleton-line" style="width:66%;height:28px;margin-top:8px"></div>
-      </div>
-    `).join('');
-  }
-  if (kind === 'file') {
-    return Array.from({ length: count }).map(() => `
-      <div class="file-item skeleton-card">
-        <div class="skeleton-line" style="width:62%;height:13px"></div>
-        <div class="skeleton-line" style="width:86%;height:12px;margin-top:10px"></div>
-      </div>
-    `).join('');
+    return `<div class="metrics">${Array.from({ length: count }).map(() => `
+      <div class="metric"><div class="skeleton-line" style="width:60px;height:10px"></div><div class="skeleton-line" style="width:84px;height:22px;margin-top:8px"></div></div>`).join('')}</div>`;
   }
   return Array.from({ length: count }).map(() => `
     <div class="event-item skeleton-row">
-      <div class="skeleton-line" style="width:72px;height:10px"></div>
-      <div class="skeleton-line" style="width:60px;height:16px"></div>
+      <div class="skeleton-line" style="width:64px;height:10px"></div>
+      <div class="skeleton-line" style="width:44px;height:10px"></div>
       <div class="event-body">
         <div class="skeleton-line" style="width:82%;height:12px"></div>
         <div class="skeleton-line" style="width:66%;height:12px;margin-top:8px"></div>
@@ -262,7 +335,7 @@ function handleRoute() {
     if (id) { viewSession(id); return; }
   }
 
-  const normalized = raw === 'search' ? 'overview' : raw;
+  const normalized = raw === 'search' ? 'overview' : raw; // old #search links land on Overview
   const view = normalized === 'overview' || normalized === 'sessions' || normalized === 'timeline' || normalized === 'files' || normalized === 'stats' || normalized === 'insights' ? normalized : 'overview';
   window._lastView = view;
   updateNavActive(view);
@@ -277,71 +350,73 @@ function handleRoute() {
 
 window.addEventListener('popstate', () => {
   if (window._navDepth > 0) window._navDepth--;
+  window._restoreScroll = true; // browser back/forward and swipe-back
   handleRoute();
 });
 
+const EVENT_ROLE_LABELS = { tool: 'Tool', result: 'Result', user: 'User', assistant: 'Assistant' };
+const TOOL_SUMMARY_KEYS = ['command', 'cmd', 'file_path', 'path', 'filePath', 'pattern', 'query', 'q', 'url', 'description', 'prompt', 'name'];
+
+function eventKind(ev) {
+  if (ev.type === 'tool_call') return 'tool';
+  if (ev.type === 'tool_result') return 'result';
+  if (ev.role === 'user') return 'user';
+  if (ev.role === 'assistant') return 'assistant';
+  return 'other';
+}
+
+// The one argument a reader needs to know what a call did: the shell command,
+// the file, the pattern, the URL. Falls back to the first string argument.
+function summarizeToolArgs(raw) {
+  if (!raw) return { summary: '', pretty: '' };
+  let args;
+  try { args = JSON.parse(raw); } catch { return { summary: raw.split('\n')[0], pretty: raw }; }
+  const pretty = JSON.stringify(args, null, 2);
+  if (!args || typeof args !== 'object') return { summary: String(args), pretty };
+  const key = TOOL_SUMMARY_KEYS.find(k => typeof args[k] === 'string' && args[k].trim());
+  const value = key ? args[key] : Object.values(args).find(v => typeof v === 'string' && v.trim());
+  return { summary: value ? value.replace(/\s+/g, ' ').trim() : '', pretty };
+}
+
 function renderEvent(ev) {
-  const badge = `<span class="event-badge ${badgeClass(ev.type, ev.role)}">${ev.type === 'tool_call' ? 'tool' : ev.role || ev.type}</span>`;
+  const kind = eventKind(ev);
+  const role = EVENT_ROLE_LABELS[kind] || escHtml(ev.role || ev.type || '');
   let body = '';
 
-  if (ev.type === 'tool_call') {
-    body = `<span class="tool-name">${escHtml(fmtToolName(ev.tool_name))}</span>`;
-    if (ev.tool_args) {
-      try {
-        const args = JSON.parse(ev.tool_args);
-        body += `<div class="tool-args">${escHtml(JSON.stringify(args, null, 2))}</div>`;
-      } catch {
-        body += `<div class="tool-args">${escHtml(ev.tool_args)}</div>`;
-      }
-    }
-  } else if (ev.type === 'tool_result') {
-    body = `<span class="tool-name">\u2192 ${escHtml(fmtToolName(ev.tool_name))}</span>`;
-    if (ev.content) {
-      body += `<div class="tool-args">${escHtml(truncate(ev.content, 500))}</div>`;
-    }
+  if (kind === 'tool') {
+    const { summary, pretty } = summarizeToolArgs(ev.tool_args);
+    body = `<div class="tool-line"><span class="tool-name">${escHtml(fmtToolName(ev.tool_name))}</span>${summary ? `<code class="tool-summary">${escHtml(truncate(summary, 220))}</code>` : ''}</div>
+      ${pretty ? `<details class="tool-detail"><summary>Arguments</summary><pre>${escHtml(pretty)}</pre></details>` : ''}`;
+  } else if (kind === 'result') {
+    const out = ev.content || '';
+    const first = out.split('\n').find(l => l.trim()) || '';
+    const lines = out ? out.split('\n').length : 0;
+    body = `<div class="tool-line"><span class="tool-name">${escHtml(fmtToolName(ev.tool_name) || 'Output')}</span>${first ? `<code class="tool-summary">${escHtml(truncate(first.trim(), 220))}</code>` : '<span class="tool-empty">no output</span>'}</div>
+      ${out && (lines > 1 || out.length > 220) ? `<details class="tool-detail"><summary>Output \u00b7 ${lines} line${lines === 1 ? '' : 's'}</summary><pre>${escHtml(truncate(out, 4000))}</pre></details>` : ''}`;
   } else {
     body = `<div class="event-content">${escHtml(ev.content || '')}</div>`;
   }
 
-  return `<div class="event-item" data-event-id="${ev.id}">
-    <div class="event-time">${fmtTimeShort(ev.timestamp)}</div>
-    ${badge}
+  return `<div class="event-item ev-${kind}" data-event-id="${escHtml(ev.id)}">
+    <time class="event-time" datetime="${escHtml(ev.timestamp || '')}">${fmtTimeShort(ev.timestamp)}</time>
+    <span class="event-role">${role}</span>
     <div class="event-body">${body}</div>
   </div>`;
 }
 
-function renderTimelineEvent(ev) {
-  const typeClass = ev.type === 'tool_call' || ev.type === 'tool_result' ? 'type-tool' :
-                    ev.role === 'user' ? 'type-user' :
-                    ev.role === 'assistant' ? 'type-assistant' : '';
-
-  const badge = `<span class="event-badge ${badgeClass(ev.type, ev.role)}">${ev.type === 'tool_call' ? 'tool' : ev.role || ev.type}</span>`;
-  let body = '';
-
-  if (ev.type === 'tool_call') {
-    body = `<span class="tool-name">${escHtml(fmtToolName(ev.tool_name))}</span>`;
-    if (ev.tool_args) {
-      try {
-        const args = JSON.parse(ev.tool_args);
-        body += `<div class="tool-args">${escHtml(JSON.stringify(args, null, 2))}</div>`;
-      } catch {
-        body += `<div class="tool-args">${escHtml(ev.tool_args)}</div>`;
-      }
+// Timeline interleaves sessions; a session line marks each change of session so
+// every event has context, and opens that session on click.
+function renderTimelineEvents(events, prevSessionId = null) {
+  let prev = prevSessionId;
+  return events.map(ev => {
+    let head = '';
+    if (ev.session_id && ev.session_id !== prev) {
+      const title = ev.session_label || cleanSessionSummary(ev.session_summary || '', '');
+      head = `<button class="tl-session" data-open-session="${escHtml(ev.session_id)}"><span class="tl-session-title">${escHtml(truncate(title, 110))}</span><span class="tl-session-id">${escHtml(shortSessionId(ev.session_id))}</span><span class="tl-open">Open${icon('chevron', 12)}</span></button>`;
+      prev = ev.session_id;
     }
-  } else if (ev.type === 'tool_result') {
-    body = `<span class="tool-name">\u2192 ${escHtml(fmtToolName(ev.tool_name))}</span>`;
-    if (ev.content) {
-      body += `<div class="tool-args">${escHtml(truncate(ev.content, 500))}</div>`;
-    }
-  } else {
-    body = `<div class="event-content">${escHtml(ev.content || '')}</div>`;
-  }
-
-  return `<div class="timeline-event ${typeClass}" data-event-id="${ev.id}">
-    <div class="event-time">${fmtTimeShort(ev.timestamp)}</div>
-    ${badge}
-    <div class="event-body">${body}</div>
-  </div>`;
+    return head + renderEvent(ev);
+  }).join('');
 }
 
 function fmtDuration(start, end) {
@@ -424,224 +499,248 @@ function isInternalProjectTag(tag) {
   return false;
 }
 
-function renderProjectTags(s) {
-  let projects = [];
-  if (s.projects) {
-    try { projects = JSON.parse(s.projects); } catch {}
-  }
-  const visible = [...new Set(projects)].filter(p => !isInternalProjectTag(p));
-  return visible.map(p => `<span class="session-project">${escHtml(p)}</span>`).join('');
+const expandedSessionGroups = new Set();
+
+const ICON_PATHS = {
+  chevron: '<path d="m9 18 6-6-6-6"/>',
+  toStart: '<path d="M5 3h14"/><path d="m18 13-6-6-6 6"/><path d="M12 7v14"/>',
+  download: '<path d="M12 15V3"/><path d="m7 10 5 5 5-5"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>',
+  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
+  up: '<path d="M14 9 9 4 4 9"/><path d="M20 20h-7a4 4 0 0 1-4-4V4"/>',
+};
+
+function icon(name, size = 14) {
+  return `<svg class="i i-${name}" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_PATHS[name]}</svg>`;
 }
 
-function renderModelTags(s) {
-  let models = [];
-  if (s.models) {
-    try { models = JSON.parse(s.models); } catch {}
+// A status glyph in a fixed leading column, readable at a glance: a pulsing
+// dot while live, a dashed ring when stale, a check when it finished, an x
+// when the source says it failed.
+function statusIcon(s) {
+  let kind = 'done';
+  let label = 'Finished';
+  if (s.status === 'live') { kind = 'live'; label = 'Live: activity in the last 15 minutes'; }
+  else if (s.status === 'stale') { kind = 'stale'; label = 'Stale: never recorded an end'; }
+  else if (s.ended_reason === 'source' && s.source_status && !/^(done|completed?)$/i.test(s.source_status)) { kind = 'failed'; label = s.source_status; }
+  const g = {
+    live: '<circle class="ring" cx="8" cy="8" r="3.5"/><circle cx="8" cy="8" r="3.5" fill="currentColor" stroke="none"/>',
+    stale: '<circle cx="8" cy="8" r="5.5" stroke-dasharray="2.4 2.2"/>',
+    done: '<circle cx="8" cy="8" r="5.5"/><path d="M5.7 8.2l1.6 1.6 3.1-3.3"/>',
+    failed: '<circle cx="8" cy="8" r="6" fill="currentColor" stroke="none"/><path d="M6 6l4 4M10 6l-4 4" stroke="var(--bg-surface)"/>',
+  }[kind];
+  return `<span class="sicon sicon-${kind}" title="${escHtml(label)}" role="img" aria-label="${escHtml(label)}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${g}</svg></span>`;
+}
+
+
+// Status is plain colored text; only exceptions get ink (a quietly finished
+// session renders nothing). Live alone gets a dot because it changes as you watch.
+function renderSessionStatus(s) {
+  if (s.status === 'live') return ''; // the pulsing status orb says it
+  if (s.status === 'stale') return '<span class="st st-stale" title="No end was recorded and it has been quiet for over 15 minutes">Stale</span>';
+  if (s.ended_reason === 'source' && s.source_status && !/^(done|completed?)$/i.test(s.source_status)) {
+    return `<span class="st st-failed">${escHtml(s.source_status)}</span>`;
   }
+  return '';
+}
+
+function sessionProjects(s) {
+  let projects = [];
+  if (s.projects) { try { projects = JSON.parse(s.projects); } catch {} }
+  return [...new Set(projects)].filter(p => !isInternalProjectTag(p));
+}
+
+function sessionModels(s) {
+  let models = [];
+  if (s.models) { try { models = JSON.parse(s.models); } catch {} }
   if (!models.length && s.model) models = [s.model];
-  return models.map(m => `<span class="session-model">${escHtml(m)}</span>`).join('');
+  return models;
+}
+
+// Who/where/what as one quiet line: agent, type, project, model. Plain text in
+// a fixed order reads faster than a row of colored chips.
+function renderSessionMeta(s) {
+  const agent = normalizeAgentLabel(s.agent || '');
+  const parts = [];
+  if (agent) parts.push(`<span class="m-agent">${escHtml(agent)}</span>`);
+  if (s.session_type && s.session_type !== agent) parts.push(escHtml(s.session_type));
+  const projects = sessionProjects(s);
+  if (projects.length) parts.push(`<span class="m-project">${escHtml(projects.slice(0, 2).join(', '))}${projects.length > 2 ? ` +${projects.length - 2}` : ''}</span>`);
+  const models = sessionModels(s);
+  if (models.length) parts.push(`<span class="m-model">${escHtml(models[0])}${models.length > 1 ? ` +${models.length - 1}` : ''}</span>`);
+  return parts.join('<span class="sep" aria-hidden="true"> \u00b7 </span>');
 }
 
 function renderSessionItem(s) {
-  const duration = fmtDuration(s.start_time, s.end_time);
-  const timeRange = `${fmtTime(s.start_time)} \u2192 ${s.end_time ? fmtTimeOnly(s.end_time) : 'now'}`;
-  const isSubagent = s.session_type === 'subagent';
-  const showAgentTag = s.agent && s.agent !== 'main' && !isSubagent;
-
+  const isStale = s.status === 'stale';
+  const duration = isStale ? 'never closed' : fmtDuration(s.start_time, s.end_time || s.start_time);
+  const headline = s.label || cleanSessionSummary(s.summary, s.initial_prompt);
   return `
-    <div class="session-item" data-id="${s.id}">
-      <div class="session-header">
-        <span class="session-time">${timeRange} \u00b7 ${duration}</span>
-        <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-          ${renderProjectTags(s)}
-          ${showAgentTag ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
-          ${s.session_type && s.session_type !== normalizeAgentLabel(s.agent || '') ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
-          ${renderModelTags(s)}
-        </span>
+    <div class="session-item" data-id="${escHtml(s.id)}" role="link" tabindex="0">
+      ${statusIcon(s)}
+      <div class="si-main">
+        <div class="si-title">${renderSessionStatus(s)}<span class="si-headline">${escHtml(truncate(headline, 160))}</span></div>
+        <div class="si-meta">${renderSessionMeta(s)}</div>
       </div>
-      <div class="session-summary">${escHtml(truncate(cleanSessionSummary(s.summary, s.initial_prompt), 120))}</div>
-      <div class="session-meta">
-        <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> ${s.message_count}</span>
-        <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> ${s.tool_count}</span>
-      </div>
+      <div class="si-when"><span>${fmtTime(s.start_time)}</span><span class="si-dur">${duration}</span></div>
+      <div class="si-counts"><span title="${s.message_count} messages">${fmtCompact(s.message_count)} msg</span><span title="${s.tool_count} tool calls">${fmtCompact(s.tool_count)} tools</span></div>
+      <span class="si-go" aria-hidden="true">${icon('chevron', 16)}</span>
     </div>
   `;
 }
 
-// --- Views ---
-
-async function viewSearch(query = '') {
-  clearJumpUi();
-  const typeFilter = window._searchType || '';
-  const roleFilter = window._searchRole || '';
-
-  let html = `<div class="page-title">Search</div>
-    <div class="search-bar">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-      <input type="text" id="searchInput" placeholder="Search messages, tool calls, files\u2026" value="${escHtml(query)}">
-    </div>
-    <div class="filters">
-      <span class="filter-chip ${typeFilter===''?'active':''}" data-filter="type" data-val="">All</span>
-      <span class="filter-chip ${typeFilter==='message'?'active':''}" data-filter="type" data-val="message">Messages</span>
-      <span class="filter-chip ${typeFilter==='tool_call'?'active':''}" data-filter="type" data-val="tool_call">Tool Calls</span>
-      <span class="filter-chip ${typeFilter==='tool_result'?'active':''}" data-filter="type" data-val="tool_result">Results</span>
-      <span class="filter-chip ${roleFilter==='user'?'active':''}" data-filter="role" data-val="user">User</span>
-      <span class="filter-chip ${roleFilter==='assistant'?'active':''}" data-filter="role" data-val="assistant">Assistant</span>
-    </div>
-    <div id="results">
-      <div class="search-bar skeleton-card" style="margin-top:6px">
-        <div class="skeleton-line" style="height:16px;width:40%"></div>
-      </div>
-      ${skeletonRows(4, 'session')}
-    </div>`;
-
-  content.innerHTML = html;
-  transitionView();
-
-  const input = $('#searchInput');
-  input.focus();
-  let debounce;
-  input.addEventListener('input', () => {
-    clearTimeout(debounce);
-    debounce = setTimeout(() => doSearch(input.value), 250);
-  });
-
-  $$('.filter-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      const f = chip.dataset.filter;
-      const v = chip.dataset.val;
-      if (f === 'type') window._searchType = v === window._searchType ? '' : v;
-      if (f === 'role') window._searchRole = v === window._searchRole ? '' : v;
-      viewSearch(input.value);
-    });
-  });
-
-  if (query) doSearch(query);
-  else showSearchHome();
+function renderSessionList(sessions, { tree = false } = {}) {
+  if (!sessions.length) return '';
+  return `<div class="session-list">${sessions.map(s => tree ? renderSessionTree(s) : renderSessionItem(s)).join('')}</div>`;
 }
 
-async function showSearchHome() {
-  const el = $('#results');
-  const reqId = (window._searchReqSeq = (window._searchReqSeq || 0) + 1);
-  el.innerHTML = `${skeletonRows(4, 'session')}`;
+function renderChildrenToggle(s, expanded) {
+  const n = s.child_count || 0;
+  const extra = (s.descendant_count || 0) > n ? ` (${s.descendant_count} total)` : '';
+  const live = s.live_descendant_count ? `, <span class="st-live">${s.live_descendant_count} live</span>` : '';
+  return `<button class="subagent-toggle" data-toggle-children="${escHtml(s.id)}" aria-expanded="${expanded}">${n} subagent${n === 1 ? '' : 's'}${extra}${live}</button>`;
+}
 
-  const stats = await api('/stats');
-  const sessions = await api('/sessions?limit=5');
-  if (reqId !== window._searchReqSeq) return;
-  if (stats._error || sessions._error) {
-    el.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
+function isGroupExpanded(s) {
+  if (expandedSessionGroups.has(s.id)) return true;
+  if (expandedSessionGroups.has('!' + s.id)) return false;
+  return s.live_descendant_count > 0;
+}
+
+// One line per subagent: status, title, when, how much. Columns line up so a
+// long list can be scanned; the parent card already carries tags and models.
+function renderSubagentRow(s) {
+  const when = s.status === 'stale' ? `${fmtTime(s.start_time)} \u00b7 never closed` : `${fmtTime(s.start_time)} \u00b7 ${fmtDuration(s.start_time, s.end_time || s.start_time)}`;
+  const title = s.label || cleanSessionSummary(s.summary, s.initial_prompt);
+  return `<div class="subagent-row" data-open-session="${escHtml(s.id)}" role="link" tabindex="0">
+    <span class="subagent-status">${statusIcon(s)}${renderSessionStatus(s)}</span>
+    <span class="subagent-title" title="${escHtml(title)}">${escHtml(truncate(title, 140))}</span>
+    <span class="subagent-meta">${when} \u00b7 ${s.message_count} msg \u00b7 ${s.tool_count} tools</span>
+    <span class="si-go" aria-hidden="true">${icon('chevron', 14)}</span>
+  </div>`;
+}
+
+function renderSubagentList(kids, hidden) {
+  return `<div class="subagent-list"${hidden ? ' hidden' : ''}>${kids.map(renderSubagentNode).join('')}</div>`;
+}
+
+function renderSubagentNode(s) {
+  const kids = Array.isArray(s.children) ? s.children : [];
+  if (!kids.length) return renderSubagentRow(s);
+  const open = isGroupExpanded(s);
+  return renderSubagentRow(s) + renderChildrenToggle(s, open) + renderSubagentList(kids, !open);
+}
+
+// A top-level session card with its subagents listed beneath it. Groups with
+// a live descendant start expanded so running work is visible at a glance.
+function renderSessionTree(s) {
+  const kids = Array.isArray(s.children) ? s.children : [];
+  if (!kids.length) return renderSessionItem(s);
+  const open = isGroupExpanded(s);
+  return `<div class="session-group">${renderSessionItem(s)}${renderChildrenToggle(s, open)}${renderSubagentList(kids, !open)}</div>`;
+}
+
+// Delegated in the capture phase so these controls never also trigger the
+// card's own "open session" click handler.
+content.addEventListener('click', async (e) => {
+  const toggle = e.target.closest('[data-toggle-children]');
+  const row = e.target.closest('[data-open-session]') || e.target.closest('.session-item[data-id]');
+  if (!toggle && !row) return;
+  e.stopPropagation();
+  e.preventDefault();
+
+  if (toggle) {
+    const id = toggle.dataset.toggleChildren;
+    const list = toggle.nextElementSibling;
+    if (!list || !list.classList.contains('subagent-list')) return;
+    const open = list.hasAttribute('hidden');
+    list.toggleAttribute('hidden', !open);
+    toggle.setAttribute('aria-expanded', String(open));
+    if (open) { expandedSessionGroups.add(id); expandedSessionGroups.delete('!' + id); }
+    else { expandedSessionGroups.delete(id); expandedSessionGroups.add('!' + id); }
     return;
   }
 
-  let suggestions = [];
-  try { const r = await fetch('/api/suggestions'); const d = await r.json(); suggestions = d.suggestions || []; } catch(e) { suggestions = []; }
-  if (reqId !== window._searchReqSeq) return;
+  viewSession(row.dataset.openSession || row.dataset.id);
+}, true);
 
-  let html = `
-    <div class="search-stats" style="margin-top:8px">
-      <div class="search-stat"><div class="num">${stats.sessions}</div><div class="lbl">Sessions</div></div>
-      <div class="search-stat"><div class="num">${stats.messages.toLocaleString()}</div><div class="lbl">Messages</div></div>
-      <div class="search-stat"><div class="num">${stats.toolCalls.toLocaleString()}</div><div class="lbl">Tool Calls</div></div>
-      <div class="search-stat"><div class="num">${fmtTokens(stats.totalTokens || 0)}</div><div class="lbl">Tokens</div></div>
-    </div>
-
-    ${suggestions.length ? `<div class="section-label">Quick Search</div>
-    <div class="filters" id="suggestions">
-      ${suggestions.map(s => `<span class="suggestion-chip" data-q="${s}">${s}</span>`).join('')}
-    </div>` : ''}
-
-    <div class="section-label">Recent Sessions</div>
-    ${sessions.sessions.map(renderSessionItem).join('')}
-  `;
-
-  el.innerHTML = html;
-
-  $$('.suggestion-chip', el).forEach(chip => {
-    chip.addEventListener('click', () => {
-      $('#searchInput').value = chip.dataset.q;
-      doSearch(chip.dataset.q);
-    });
-  });
-
-  $$('.session-item', el).forEach(item => {
-    item.addEventListener('click', () => {
-      window._lastView = 'search';
-      window._lastSearchQuery = $('#searchInput')?.value || '';
-      viewSession(item.dataset.id);
-    });
-  });
-}
-
-async function doSearch(q) {
-  const el = $('#results');
-  const reqId = (window._searchReqSeq = (window._searchReqSeq || 0) + 1);
-  if (!q.trim()) { el.innerHTML = '<div class="empty"><h2>Type to search</h2><p>Search across all sessions, messages, and tool calls</p></div>'; return; }
-
-  el.innerHTML = `${skeletonRows(6, 'event')}`;
-
-  const type = window._searchType || '';
-  const role = window._searchRole || '';
-  let url = `/search?q=${encodeURIComponent(q)}&limit=100`;
-  if (type) url += `&type=${type}`;
-  if (role) url += `&role=${role}`;
-
-  const data = await api(url);
-  if (reqId !== window._searchReqSeq) return;
-
-  if (data._error || data.error) { el.innerHTML = `<div class="empty"><p>${escHtml(data.error || 'Server error')}</p></div>`; return; }
-  if (!data.results.length) { el.innerHTML = '<div class="empty"><h2>No results</h2><p>Try a different search term or adjust filters</p></div>'; return; }
-
-  let header = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--space-md)">
-    <span class="section-label" style="margin:0">${data.results.length} results</span>
-    <div style="display:flex;gap:8px">
-      <a class="export-btn" href="#" onclick="dlExport('/api/export/search?q=${encodeURIComponent(q)}&format=md','search.md');return false">MD</a>
-      <a class="export-btn" href="#" onclick="dlExport('/api/export/search?q=${encodeURIComponent(q)}&format=json','search.json');return false">JSON</a>
-    </div>
-  </div>`;
-
-  el.innerHTML = header + data.results.map(r => `
-    <div class="result-item">
-      <div class="result-meta">
-        <span class="event-badge ${badgeClass(r.type, r.role)}">${r.type === 'tool_call' ? 'tool' : r.role || r.type}</span>
-        <span class="session-time">${fmtTime(r.timestamp)}</span>
-        ${r.tool_name ? `<span class="tool-name">${escHtml(fmtToolName(r.tool_name))}</span>` : ''}
-        <span class="session-link" data-session="${r.session_id}">view session \u2192</span>
-      </div>
-      <div class="result-content">${escHtml(truncate(r.content || r.tool_args || r.tool_result || '', 400))}</div>
-    </div>
-  `).join('');
-
-  $$('.session-link', el).forEach(link => {
-    link.addEventListener('click', () => {
-      window._lastView = 'search';
-      window._lastSearchQuery = q;
-      viewSession(link.dataset.session);
-    });
-  });
-}
+content.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const row = e.target.closest && e.target.closest('[data-open-session], .session-item[data-id]');
+  if (!row || e.target !== row) return;
+  e.preventDefault();
+  viewSession(row.dataset.openSession || row.dataset.id);
+});
 
 async function viewSessions() {
   clearJumpUi();
   window._currentSessionId = null;
-  content.innerHTML = `<div class="page-title">Sessions</div>${skeletonRows(4, 'session')}`;
-  transitionView();
-  const data = await api('/sessions?limit=200');
+  const restored = restoreView('sessions');
+  if (!restored) {
+    content.innerHTML = `<div class="page-title">Sessions</div>${skeletonRows(4, 'session')}`;
+    transitionView();
+  }
+  const data = await api('/sessions?limit=200&roots=1');
+  if (!stillOn('sessions')) return;
   if (data._error) {
+    if (restored) return;
     content.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
     return;
   }
 
-  let html = `<div class="page-title">Sessions</div>`;
-  html += data.sessions.map(renderSessionItem).join('');
-  content.innerHTML = html;
-  transitionView();
+  let html = `<header class="page-head"><h1 class="page-title">Sessions</h1><span class="page-count">${data.total.toLocaleString()} top-level</span></header>`;
+  html += renderSessionList(data.sessions, { tree: true });
+  if (restored) renderInPlace(html);
+  else { content.innerHTML = html; transitionView(); }
+}
 
-  $$('.session-item').forEach(item => {
-    item.addEventListener('click', () => viewSession(item.dataset.id));
-  });
+// At-a-glance picture of one session: the numbers, when it was busy, and
+// what it spent its tool calls on. Built from the events already loaded.
+function renderSessionShape(s, events) {
+  const startMs = Date.parse(s.start_time);
+  const endMs = Date.parse(s.end_time || '') || (events.length ? Date.parse(events[0].timestamp) : startMs);
+  const durMs = Math.max(0, endMs - startMs);
+  const tokens = s.output_tokens ? (s.output_tokens + (s.input_tokens || 0) + (s.cache_read_tokens || 0)) : (s.total_tokens || 0);
+  let html = renderStatTiles([
+    { label: 'Duration', value: s.end_time || s.status === 'live' ? fmtDuration(s.start_time, s.end_time || null) : '\u2013' },
+    { label: 'Messages', value: fmtCompact(s.message_count), title: s.message_count.toLocaleString() },
+    { label: 'Tool calls', value: fmtCompact(s.tool_count), title: s.tool_count.toLocaleString() },
+    { label: 'Tokens', value: fmtCompact(tokens), title: `${tokens.toLocaleString()} tokens${s.output_tokens ? ` (${s.output_tokens.toLocaleString()} output)` : ''}`, note: s.output_tokens ? `${fmtCompact(s.output_tokens)} output` : '' },
+  ]);
+
+  const stamped = events.map(e => Date.parse(e.timestamp)).filter(t => Number.isFinite(t) && t >= startMs);
+  if (stamped.length >= 6 && durMs >= 60000) {
+    const n = Math.min(40, Math.max(12, Math.round(durMs / 60000)));
+    const step = durMs / n;
+    const counts = new Array(n).fill(0);
+    for (const t of stamped) counts[Math.min(n - 1, Math.floor((t - startMs) / step))]++;
+    const fmt = ms => new Date(ms).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    const points = counts.map((c, i) => ({
+      label: `${fmt(startMs + i * step)}\u2013${fmt(startMs + (i + 1) * step)}`,
+      value: c,
+      tip: `${fmt(startMs + i * step)}\u2013${fmt(startMs + (i + 1) * step)}: ${c} event${c === 1 ? '' : 's'}`,
+    }));
+    html += `<section class="panel-block"><h2 class="section-label">Activity <span class="count">events over the session</span></h2>
+      ${renderColumnChart({ points, height: 56, caption: 'Events over the session', unit: ' events', axis: [fmt(startMs), fmt(startMs + durMs / 2), s.status === 'live' ? 'now' : fmt(endMs)] })}</section>`;
+  }
+
+  const toolCounts = new Map();
+  for (const e of events) if (e.type === 'tool_call' && e.tool_name) {
+    const name = fmtToolName(e.tool_name);
+    toolCounts.set(name, (toolCounts.get(name) || 0) + 1);
+  }
+  const ranked = [...toolCounts.entries()].sort((a, b) => b[1] - a[1]);
+  if (ranked.length >= 2) {
+    const top = ranked.slice(0, 5).map(([name, value]) => ({ name, value, tip: `${name}: ${value} calls` }));
+    const rest = ranked.slice(5);
+    if (rest.length) top.push({ name: `${rest.length} other tool${rest.length === 1 ? '' : 's'}`, value: rest.reduce((n, [, v]) => n + v, 0), tip: rest.map(([n, v]) => `${n} ${v}`).join(', ') });
+    html += `<section class="panel-block"><h2 class="section-label">Top tools</h2>${renderBarList(top)}</section>`;
+  }
+  return `<div class="session-shape">${html}</div>`;
 }
 
 async function viewSession(id) {
+  rememberCurrentView();
+  window.hideChartTip?.();
   clearJumpUi();
   window._recentSessionIds = [id, ...(window._recentSessionIds || []).filter(x => x !== id)].slice(0, 5);
   if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
@@ -662,45 +761,49 @@ async function viewSession(id) {
   const projectFilters = Array.isArray(data.projectFilters)
     ? data.projectFilters.filter(p => p && p.project && Number.isFinite(Number(p.eventCount)))
     : [];
+  const parent = data.parent || null;
+  const children = Array.isArray(data.children) ? data.children : [];
+  const childTotal = children.reduce((n, c) => n + 1 + (c.descendant_count || 0), 0);
+  const childrenCollapsed = children.length > 10 && !children.some(c => c.status === 'live');
+  const headline = s.label || cleanSessionSummary(s.summary, s.initial_prompt);
+  const endText = s.end_time ? fmtTimeShort(s.end_time) : (s.status === 'live' ? 'now' : 'no end recorded');
   let html = `
-    <div class="back-btn" id="backBtn">\u2190 Back</div>
-    <div class="page-title">Session</div>
-    <div class="session-id-row">
-      <span class="session-id-label">ID</span>
-      <span class="session-id-value" title="${escHtml(id)}">${escHtml(id)}</span>
-      <button class="session-id-copy" id="copySessionId" title="Copy session ID">\u29c9</button>
-      <span class="session-id-copied" id="copyConfirm">Copied!</span>
-    </div>
-    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
-      ${s.first_message_id ? `<button class="jump-to-start-btn" id="jumpToStartBtn" title="Jump to initial prompt">Initial Prompt</button>` : ''}
-      ${data.hasArchive ? `<a class="export-btn" href="#" onclick="dlExport('/api/archive/export/${id}','session.jsonl');return false">JSONL</a>` : ''}
-      <a class="export-btn" href="#" onclick="dlExport('/api/export/session/${id}?format=md','session.md');return false">MD</a>
-      <a class="export-btn" href="#" onclick="dlExport('/api/export/session/${id}?format=json','session.json');return false">JSON</a>
-    </div>
-    <div class="session-detail-card">
-      <div class="session-header" style="margin-bottom:12px">
-        <span class="session-time">${fmtDate(s.start_time)} \u00b7 ${fmtTimeShort(s.start_time)} \u2013 ${fmtTimeShort(s.end_time)}</span>
-        <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-          ${s.agent && s.agent !== 'main' ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
-          ${s.session_type && s.session_type !== normalizeAgentLabel(s.agent || '') ? `<span class="session-type">${escHtml(s.session_type)}</span>` : ''}
-          ${renderModelTags(s)}
+    <button class="back-btn" id="backBtn">\u2190 Back</button>
+    ${parent ? `<button class="session-parent-link" id="parentSessionLink" title="Open parent session">${icon('up', 13)}Subagent of <span>${escHtml(truncate(parent.label || cleanSessionSummary(parent.summary, parent.initial_prompt), 90))}</span></button>` : ''}
+    <header class="detail-head">
+      <h1 class="page-title detail-title">${escHtml(truncate(headline, 240))}</h1>
+      <p class="detail-meta">${renderSessionMeta(s)}</p>
+      <p class="detail-meta">${fmtDate(s.start_time)}, ${fmtTimeShort(s.start_time)} \u2013 ${endText}</p>
+      <div class="detail-actions">
+        <span id="sessionStatusSlot" class="detail-status"></span>
+        ${s.first_message_id ? `<button class="btn" id="jumpToStartBtn" title="Scroll to the first user prompt">${icon('toStart', 12)}Initial prompt</button>` : ''}
+        <span class="btn-group" role="group" aria-label="Export">
+          <button class="btn" onclick="dlExport('/api/export/session/${id}?format=md','session.md')" title="Download as Markdown">${icon('download', 12)}Markdown</button>
+          <button class="btn" onclick="dlExport('/api/export/session/${id}?format=json','session.json')" title="Download as JSON">JSON</button>
+          ${data.hasArchive ? `<button class="btn" onclick="dlExport('/api/archive/export/${id}','session.jsonl')" title="Download raw JSONL">JSONL</button>` : ''}
+        </span>
+        <span class="session-id-row">
+          <code class="session-id-value" title="${escHtml(id)}">${escHtml(id)}</code>
+          <button class="session-id-copy" id="copySessionId" title="Copy session ID" aria-label="Copy session ID">${icon('copy', 13)}</button>
+          <span class="session-id-copied" id="copyConfirm" role="status">Copied</span>
         </span>
       </div>
-      <div class="session-detail-grid">
-        <span><span class="detail-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span> ${s.message_count} messages</span>
-        <span><span class="detail-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></span> ${s.tool_count} tools</span>
-        ${s.output_tokens ? `<span><span class="detail-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/></svg></span> ${fmtTokens(s.output_tokens)} output</span><span><span class="detail-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></span> ${fmtTokens(s.input_tokens + s.cache_read_tokens)} input</span>` : s.total_tokens ? `<span><span class="detail-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg></span> ${fmtTokens(s.total_tokens)} tokens</span><span></span>` : '<span></span><span></span>'}
+    </header>
+    ${renderSessionShape(s, data.events || [])}
+    ${projectFilters.length ? `
+      <div class="seg" id="sessionProjectFilters" role="group" aria-label="Filter events by project">
+        <button class="filter-chip active" data-project-filter="all">All projects</button>
+        ${projectFilters.map(p => `<button class="filter-chip" data-project-filter="${escHtml(p.project)}">${escHtml(p.project)} <span class="count">${p.eventCount}</span></button>`).join('')}
       </div>
-      ${projectFilters.length ? `
-        <div class="section-label" style="margin-top:14px">Project Filter</div>
-        <div class="filters" id="sessionProjectFilters" style="margin-bottom:4px">
-          <span class="filter-chip active" data-project-filter="all">All</span>
-          ${projectFilters.map(p => `<span class="filter-chip" data-project-filter="${escHtml(p.project)}">${escHtml(p.project)} · ${p.eventCount}</span>`).join('')}
-        </div>
-      ` : ''}
-    </div>
-    <div class="section-label" id="sessionEventsLabel">Events</div>
-    <div id="eventsContainer"></div>
+    ` : ''}
+    ${children.length ? `
+      <section class="detail-subagents">
+        <button class="section-label subagent-heading" data-toggle-children="${escHtml(id)}" aria-expanded="${!childrenCollapsed}">Subagents (${children.length}${childTotal > children.length ? `, ${childTotal} total` : ''})</button>
+        ${renderSubagentList(children, childrenCollapsed)}
+      </section>
+    ` : ''}
+    <h2 class="section-label" id="sessionEventsLabel">Events</h2>
+    <div id="eventsContainer" class="event-list"></div>
     <div class="empty" id="sessionEventsEmpty" style="display:none"><h2>No events</h2><p>This session has no events to display.</p></div>
     <div id="sessionInsightsPanel" class="loading" style="margin-top:var(--space-xl)">Loading insights...</div>
   `;
@@ -814,6 +917,7 @@ async function viewSession(id) {
 
   $('#backBtn').addEventListener('click', () => {
     clearJumpUi();
+    window._restoreScroll = true;
     if (window._navDepth > 0) {
       history.back();
     } else {
@@ -822,6 +926,9 @@ async function viewSession(id) {
       handleRoute();
     }
   });
+
+  const parentLink = $('#parentSessionLink');
+  if (parentLink) parentLink.addEventListener('click', () => viewSession(parent.id));
 
   $('#copySessionId').addEventListener('click', async () => {
     const conf = $('#copyConfirm');
@@ -999,6 +1106,7 @@ async function viewSession(id) {
   // Subscribe to real-time updates via SSE, with polling as a fallback.
   let lastSeenTs = allEvents.length ? allEvents[0].timestamp : new Date(0).toISOString();
   let lastSeenId = allEvents.length ? allEvents[0].id : '';
+  let sessionState = { status: s.status, ended_reason: s.ended_reason, ended_at: s.ended_at, source_status: s.source_status };
   const pollNewEvents = async () => {
     try {
       const latest = await api(`/sessions/${id}/events?after=${encodeURIComponent(lastSeenTs)}&afterId=${encodeURIComponent(lastSeenId)}&limit=50`);
@@ -1015,32 +1123,55 @@ async function viewSession(id) {
   };
 
   let pollInterval = null;
+  let eventSource = null;
+  let following = false;
+
   const startPolling = () => {
-    if (pollInterval) return;
+    if (pollInterval || !following) return;
     pollInterval = setInterval(pollNewEvents, 3000);
   };
 
-  let eventSource = null;
-  if ('EventSource' in window) {
-    eventSource = new EventSource(`/api/sessions/${encodeURIComponent(id)}/stream?after=${encodeURIComponent(lastSeenTs)}&afterId=${encodeURIComponent(lastSeenId)}`);
-    eventSource.onmessage = (event) => {
-      try {
-        const incoming = JSON.parse(event.data) || [];
-        if (incoming.length) {
-          const tail = incoming[incoming.length - 1];
-          lastSeenTs = tail.timestamp || lastSeenTs;
-          lastSeenId = tail.id || lastSeenId;
-          applyIncomingEvents(incoming);
+  const startFollowing = () => {
+    if (following) return;
+    following = true;
+    if ('EventSource' in window) {
+      eventSource = new EventSource(`/api/sessions/${encodeURIComponent(id)}/stream?after=${encodeURIComponent(lastSeenTs)}&afterId=${encodeURIComponent(lastSeenId)}`);
+      eventSource.onmessage = (event) => {
+        try {
+          const incoming = JSON.parse(event.data) || [];
+          if (incoming.length) {
+            const tail = incoming[incoming.length - 1];
+            lastSeenTs = tail.timestamp || lastSeenTs;
+            lastSeenId = tail.id || lastSeenId;
+            applyIncomingEvents(incoming);
+            // New activity always means the session is live again.
+            if (sessionState.status !== 'live') { sessionState = { ...sessionState, status: 'live', ended_reason: null }; renderStatusControls(); }
+          }
+        } catch (err) {
+          // malformed SSE payload; fallback polling can recover on the next tick
+          startPolling();
         }
-      } catch (err) {
-        // malformed SSE payload; fallback polling can recover on the next tick
-        startPolling();
-      }
-    };
-    eventSource.onerror = () => startPolling();
-  } else {
-    startPolling();
+      };
+      eventSource.onerror = () => startPolling();
+    } else {
+      startPolling();
+    }
+    renderStatusControls();
+  };
+
+  function renderStatusControls() {
+    const slot = document.getElementById('sessionStatusSlot');
+    if (!slot) return;
+    const st = { ...s, ...sessionState };
+    slot.innerHTML = `
+      <span class="detail-state">${statusIcon(st)}${st.status === 'live' ? '' : (renderSessionStatus(st) || '<span class="st st-ended">Finished</span>')}</span>
+    `;
   }
+
+  // Sessions their source reports as finished open without a live stream;
+  // everything else follows as before.
+  if (s.status === 'ended' && s.ended_reason === 'source') renderStatusControls();
+  else startFollowing();
 
   const sseScrollHandler = () => {
     if (window.scrollY < 100) {
@@ -1052,6 +1183,7 @@ async function viewSession(id) {
 
   window._sseCleanup = () => {
     if (onScroll) { window.removeEventListener('scroll', onScroll); onScroll = null; }
+    following = false;
     if (eventSource) eventSource.close();
     if (pollInterval) clearInterval(pollInterval);
     window.removeEventListener('scroll', sseScrollHandler);
@@ -1075,8 +1207,8 @@ async function viewTimeline(date) {
   window._lastView = 'timeline';
   window._timelineState = { date, limit: 100, offset: 0, hasMore: true, loading: false, seenEventIds: new Set() };
 
-  content.innerHTML = `<div class="page-title">Timeline</div>
-    <input type="date" class="date-input" id="dateInput" value="${date}">
+  content.innerHTML = `<header class="page-head"><h1 class="page-title">Timeline</h1>
+    <input type="date" class="date-input" id="dateInput" value="${date}" aria-label="Day"></header>
     <div id="timelineContent">${skeletonRows(8, 'event')}</div>
     <div id="timelineLoadMore" class="loading-more" style="display:none">Loading more…</div>`;
   transitionView();
@@ -1104,16 +1236,18 @@ async function viewTimeline(date) {
 
     if (!append) {
       if (!data.events.length) {
-        el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"><div class="timeline-line"></div><div class="empty" id="timelineEmpty"><h2>No activity</h2><p>Nothing recorded on this day</p></div></div>`;
+        el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"><div class="empty" id="timelineEmpty"><h2>No activity</h2><p>Nothing recorded on this day</p></div></div>`;
         return;
       }
-      el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"><div class="timeline-line"></div>${data.events.map(renderTimelineEvent).join('')}</div>`;
+      el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap">${renderTimelineEvents(data.events)}</div>`;
+      state.lastSessionId = data.events[data.events.length - 1].session_id;
       return;
     }
 
     const wrap = $('#timelineWrap');
     if (wrap) {
-      wrap.insertAdjacentHTML('beforeend', data.events.map(renderTimelineEvent).join(''));
+      wrap.insertAdjacentHTML('beforeend', renderTimelineEvents(data.events, state.lastSessionId));
+      if (data.events.length) state.lastSessionId = data.events[data.events.length - 1].session_id;
     }
   }
 
@@ -1146,15 +1280,20 @@ async function viewTimeline(date) {
 
         let wrap = $('#timelineWrap');
         if (!wrap) {
-          el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"><div class="timeline-line"></div></div>`;
+          el.innerHTML = `<div class="timeline-events-wrap" id="timelineWrap"></div>`;
           wrap = $('#timelineWrap');
         }
 
         const empty = $('#timelineEmpty');
         if (empty) empty.remove();
 
-        const html = fresh.map(renderTimelineEvent).join('');
-        wrap.insertAdjacentHTML('afterbegin', html);
+        // The list is newest first; the stream delivers oldest first.
+        const batch = fresh.slice().sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+        const seam = wrap.firstElementChild;
+        wrap.insertAdjacentHTML('afterbegin', renderTimelineEvents(batch));
+        // The run continues the same session that was on top: drop its old header.
+        const lastNew = batch[batch.length - 1];
+        if (seam && seam.matches('.tl-session') && seam.dataset.openSession === lastNew.session_id) seam.remove();
         state.offset += fresh.length;
 
         // Flash new events
@@ -1172,57 +1311,149 @@ async function viewTimeline(date) {
   });
 }
 
+function fmtDayShort(day) {
+  const d = new Date(day + 'T12:00:00');
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function renderTodaySection(act) {
+  if (!act || !Array.isArray(act.days) || !act.days.length) return '';
+  const days = act.days;
+  const today = days[days.length - 1];
+  const past = days.slice(0, -1);
+  const avg = key => past.length ? past.reduce((n, d) => n + d[key], 0) / past.length : 0;
+  const note = key => `${fmtCompact(Math.round(avg(key)))}/day avg`;
+  const agentsToday = (act.agents || []).filter(a => a.todayEvents > 0).length;
+
+  const points = days.map((d, i) => ({
+    label: d.day,
+    value: d.toolCalls,
+    highlight: i === days.length - 1,
+    tip: `${i === days.length - 1 ? 'Today' : fmtDayShort(d.day)}: ${d.toolCalls.toLocaleString()} tool calls, ${d.sessions} session${d.sessions === 1 ? '' : 's'}`,
+  }));
+  const mid = Math.floor((days.length - 1) / 2);
+  const axis = [fmtDayShort(days[0].day), fmtDayShort(days[mid].day), 'Today'];
+
+  const agents = (act.agents || []).slice();
+  const shown = agents.slice(0, 5);
+  const rest = agents.slice(5);
+  if (rest.length) shown.push({ agent: `${rest.length} other${rest.length === 1 ? '' : 's'}`, toolCalls: rest.reduce((n, a) => n + a.toolCalls, 0), sessions: rest.reduce((n, a) => n + a.sessions, 0) });
+
+  return `
+    ${renderStatTiles([
+      { label: 'Sessions today', value: today.sessions.toLocaleString(), note: note('sessions') },
+      { label: 'Tool calls today', value: fmtCompact(today.toolCalls), title: today.toolCalls.toLocaleString(), note: note('toolCalls') },
+      { label: 'Messages today', value: fmtCompact(today.messages), title: today.messages.toLocaleString(), note: note('messages') },
+      { label: 'Agents active', value: String(agentsToday), note: `of ${agents.length} in 14 days` },
+    ])}
+    <section class="panel-block">
+      <h2 class="section-label">Tool calls per day <span class="count">last ${days.length} days</span></h2>
+      ${renderColumnChart({ points, height: 88, caption: 'Tool calls per day', unit: ' tool calls', axis })}
+    </section>
+    ${shown.length ? `<section class="panel-block">
+      <h2 class="section-label">By agent <span class="count">tool calls, last ${days.length} days</span></h2>
+      ${renderBarList(shown.map(a => ({ name: a.agent, value: a.toolCalls, sub: `${a.sessions} session${a.sessions === 1 ? '' : 's'}`, tip: `${a.agent}: ${a.toolCalls.toLocaleString()} tool calls in ${a.sessions} sessions` })))}
+    </section>` : ''}
+  `;
+}
+
+// Lifetime totals with a time frame, plus tool calls per week since the first
+// session: the one thing an all-time view says that "today" can't (is usage growing?).
+function renderAllTimeSection(stats, act) {
+  const earliest = stats.dateRange?.earliest ? new Date(stats.dateRange.earliest) : null;
+  const since = earliest ? earliest.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+  let chart = '';
+  if (act && !act._error && Array.isArray(act.days) && act.days.length > 14) {
+    // Weeks start Monday; the current week is partial and highlighted.
+    const weeks = [];
+    for (const d of act.days) {
+      const date = new Date(d.day + 'T12:00:00');
+      const monday = new Date(date);
+      monday.setDate(date.getDate() - ((date.getDay() + 6) % 7));
+      const key = monday.toISOString().slice(0, 10);
+      const w = weeks[weeks.length - 1];
+      if (!w || w.key !== key) weeks.push({ key, start: monday, toolCalls: d.toolCalls });
+      else w.toolCalls += d.toolCalls;
+    }
+    const points = weeks.map((w, i) => {
+      const last = i === weeks.length - 1;
+      const label = w.start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      return { label: `Week of ${label}`, value: w.toolCalls, highlight: last, tip: `${last ? 'This week (so far)' : `Week of ${label}`}: ${w.toolCalls.toLocaleString()} tool calls` };
+    });
+    // Months with years on the axis: this chart spans months, so day numbers add noise.
+    const mid = Math.floor((weeks.length - 1) / 2);
+    const monthYear = d => d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    const axis = [monthYear(weeks[0].start), monthYear(weeks[mid].start), 'This week'];
+    const thisWeek = weeks[weeks.length - 1].toolCalls;
+    chart = `<section class="panel-block"><h3 class="sub-label">Tool calls per week <span class="count">${thisWeek.toLocaleString()} this week so far</span></h3>
+      ${renderColumnChart({ points, height: 64, caption: 'Tool calls per week since the first session', unit: ' tool calls', axis })}</section>`;
+  }
+  return `<section class="alltime">
+    <h2 class="section-label">All time${since ? ` <span class="count">since ${escHtml(since)}</span>` : ''}</h2>
+    <dl class="tiles tiles-quiet">
+      <div class="tile"><dt>Sessions</dt><dd title="${stats.sessions.toLocaleString()}">${fmtCompact(stats.sessions)}</dd></div>
+      <div class="tile"><dt>Messages</dt><dd title="${stats.messages.toLocaleString()}">${fmtCompact(stats.messages)}</dd></div>
+      <div class="tile"><dt>Tool calls</dt><dd title="${stats.toolCalls.toLocaleString()}">${fmtCompact(stats.toolCalls)}</dd></div>
+      <div class="tile"><dt>Tokens</dt><dd title="${(stats.totalTokens || 0).toLocaleString()}">${fmtCompact(stats.totalTokens || 0)}</dd></div>
+    </dl>
+    ${chart}
+  </section>`;
+}
+
 async function viewOverview() {
   clearJumpUi();
-  content.innerHTML = `<div class="page-title">Overview</div><div class="stat-grid">${skeletonRows(5, 'stats')}</div>`;
-  transitionView();
-  const data = await api('/stats');
-  const sessionsRes = await api('/sessions?limit=30');
+  const restored = restoreView('overview');
+  if (!restored) {
+    content.innerHTML = `<h1 class="page-title">Overview</h1>${skeletonRows(4, 'stats')}${skeletonRows(4, 'session')}`;
+    transitionView();
+  }
+  const tz = new Date().getTimezoneOffset();
+  const [data, sessionsRes, act] = await Promise.all([api('/stats'), api('/sessions?limit=30&roots=1'), api(`/activity?days=14&tz=${tz}`)]);
+  if (!stillOn('overview')) return;
   if (data._error || sessionsRes._error) {
+    if (restored) return;
     content.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
     return;
   }
 
   const sessions = sessionsRes.sessions || [];
-  const nowMs = Date.now();
-  const ACTIVE_WINDOW_MIN = 15;
   const activeNow = sessions
-    .filter(s => {
-      const t = s.end_time || s.start_time;
-      if (!t) return false;
-      const ageMin = (nowMs - new Date(t).getTime()) / 60000;
-      return ageMin >= 0 && ageMin <= ACTIVE_WINDOW_MIN;
-    })
+    .filter(s => s.status === 'live' || s.live_descendant_count > 0)
     .slice(0, 4);
   const activeIds = new Set(activeNow.map(s => s.id));
   const recentSessions = sessions.filter(s => !activeIds.has(s.id)).slice(0, 6);
-  const uniqueTools = new Set((data.tools || []).filter(t => t).map(t => fmtToolGroup(t)));
+  const todayLabel = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
 
-  let html = `<div class="page-title">Overview</div>
+  let html = `<header class="page-head"><h1 class="page-title">Overview</h1><span class="page-count">${todayLabel}</span></header>
+    ${act && !act._error ? renderTodaySection(act) : ''}
 
-    <div class="section-label">Key Metrics</div>
-    <div class="stat-grid">
-      <div class="stat-card accent-blue"><div class="label">Sessions</div><div class="value">${data.sessions}</div></div>
-      <div class="stat-card accent-green"><div class="label">Messages</div><div class="value">${data.messages.toLocaleString()}</div></div>
-      <div class="stat-card accent-amber"><div class="label">Tool Calls</div><div class="value">${data.toolCalls.toLocaleString()}</div></div>
-      <div class="stat-card accent-teal"><div class="label">Total Tokens</div><div class="value">${(data.totalTokens || 0).toLocaleString()}</div></div>
-    </div>
+    <h2 class="section-label">Active now${activeNow.length ? ` <span class="count">${activeNow.length}</span>` : ''}</h2>
+    ${activeNow.length ? renderSessionList(activeNow, { tree: true }) : `<p class="quiet-note">Nothing has written in the last 15 minutes.</p>`}
 
-    <div class="section-label">Active Now (${activeNow.length})</div>
-    ${activeNow.length ? activeNow.map(renderSessionItem).join('') : `<div class="empty" style="margin-bottom:var(--space-xl)"><p>No active sessions right now</p></div>`}
+    <h2 class="section-label">Recent</h2>
+    ${renderSessionList(recentSessions, { tree: true })}
 
-    <div class="section-label">Recent Sessions</div>
-    ${recentSessions.map(renderSessionItem).join('')}
+    ${renderAllTimeSection(data, window._lifetimeActivity || null)}
   `;
 
-  content.innerHTML = html;
-  transitionView();
-  $$('.session-item').forEach(item => item.addEventListener('click', () => viewSession(item.dataset.id)));
+  if (restored) renderInPlace(html);
+  else { content.innerHTML = html; transitionView(); }
+
+  // The weekly chart scans the whole history, so it loads after the page is up
+  // (showing the last result meanwhile) and swaps into place.
+  const spanDays = data.dateRange?.earliest ? Math.min(400, Math.ceil((Date.now() - Date.parse(data.dateRange.earliest)) / 86400000) + 1) : 0;
+  if (spanDays > 14) {
+    const lifetime = await api(`/activity?days=${spanDays}&tz=${tz}`);
+    if (lifetime._error || !stillOn('overview')) return;
+    window._lifetimeActivity = lifetime;
+    const section = content.querySelector('.alltime');
+    if (section) section.outerHTML = renderAllTimeSection(data, lifetime);
+  }
 }
 
 async function viewStats() {
   clearJumpUi();
-  content.innerHTML = `<div class="page-title">Settings</div>${skeletonRows(4, 'session')}`;
+  content.innerHTML = `<h1 class="page-title">Settings</h1>${skeletonRows(4, 'session')}`;
   transitionView();
   const data = await api('/stats');
   if (data._error) {
@@ -1234,79 +1465,60 @@ async function viewStats() {
   const themeMode = lsGet(THEME_MODE_KEY) || 'light';
   const darkVariant = lsGet(THEME_DARK_VARIANT_KEY) || 'default';
 
+  const dirs = data.sessionDirs || [];
+  const isClaude = d => d.agent === 'claude-code' || /^claude-/.test(d.agent || '');
+  const claudeDirs = dirs.filter(isClaude);
+  const pathRows = [];
+  if (claudeDirs.length) pathRows.push(['~/.claude/projects/*', `claude-code, ${claudeDirs.length} workspace${claudeDirs.length === 1 ? '' : 's'}`]);
+  for (const d of dirs.filter(d => !isClaude(d))) {
+    pathRows.push([(d.path || '').replace(/^\/home\/[^/]+/, '~').replace(/^\/Users\/[^/]+/, '~'), normalizeAgentLabel(d.agent)]);
+  }
+  const tools = [...uniqueTools].sort((a, b) => a.localeCompare(b));
+
   let html = `<div class="settings-page">
-    <div class="page-title">Settings</div>
+    <h1 class="page-title">Settings</h1>
 
-    <div class="section-label">System</div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:var(--space-md);margin-bottom:var(--space-md)">
-      <div class="config-card"><div class="config-label">Storage Mode</div><div class="config-value">${escHtml(data.storageMode || 'reference')}</div></div>
-      <div class="config-card"><div class="config-label">DB Size</div><div class="config-value" id="dbSizeValue">${escHtml(data.dbSize?.display || 'N/A')}</div></div>
+    <h2 class="section-label">Appearance</h2>
+    <div class="form-row">
+      <label>Theme <select id="themeModeSelect" class="select">
+        <option value="system" ${themeMode==='system'?'selected':''}>System</option>
+        <option value="light" ${themeMode==='light'?'selected':''}>Light</option>
+        <option value="dark" ${themeMode==='dark'?'selected':''}>Dark</option>
+      </select></label>
+      <label>Dark variant <select id="darkVariantSelect" class="select">
+        <option value="default" ${darkVariant==='default'?'selected':''}>Default</option>
+        <option value="trueblack" ${darkVariant==='trueblack'?'selected':''}>True black</option>
+      </select></label>
     </div>
-    <p class="settings-help" style="margin-bottom:var(--space-sm)">Date range: ${fmtDate(data.dateRange?.earliest)} to ${fmtDate(data.dateRange?.latest)}</p>
+
+    <h2 class="section-label">Database</h2>
+    <dl class="facts">
+      <dt>Storage mode</dt><dd>${escHtml(data.storageMode || 'reference')}</dd>
+      <dt>Size</dt><dd id="dbSizeValue">${escHtml(data.dbSize?.display || 'N/A')}</dd>
+      <dt>Date range</dt><dd>${fmtDate(data.dateRange?.earliest)} to ${fmtDate(data.dateRange?.latest)}</dd>
+      <dt>Indexed sessions</dt><dd id="sysSessions">\u2026</dd>
+    </dl>
     <div class="settings-maintenance">
-      <button class="export-btn" id="optimizeDbBtn">Optimize Database</button>
-      <span id="optimizeDbStatus" class="settings-maintenance-status"></span>
+      <button class="btn" id="optimizeDbBtn">Optimize database</button>
+      <span id="optimizeDbStatus" class="settings-maintenance-status" role="status"></span>
     </div>
-    <p class="settings-help">Reclaims unused space and merges pending writes. Safe to run anytime, doesn't delete any data.</p>
+    <p class="settings-help">Reclaims unused space and merges pending writes. Safe to run anytime; it doesn't delete data.</p>
 
-    <div class="section-label">Appearance</div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:var(--space-md);margin-bottom:var(--space-xl)">
-      <div class="config-card">
-        <div class="config-label">Theme Mode</div>
-        <select id="themeModeSelect" class="settings-select">
-          <option value="system" ${themeMode==='system'?'selected':''}>System</option>
-          <option value="light" ${themeMode==='light'?'selected':''}>Light</option>
-          <option value="dark" ${themeMode==='dark'?'selected':''}>Dark</option>
-        </select>
-      </div>
-      <div class="config-card">
-        <div class="config-label">Dark Variant</div>
-        <select id="darkVariantSelect" class="settings-select">
-          <option value="default" ${darkVariant==='default'?'selected':''}>Default</option>
-          <option value="trueblack" ${darkVariant==='trueblack'?'selected':''}>True Black</option>
-        </select>
-      </div>
-    </div>
+    ${pathRows.length ? `<h2 class="section-label">Session sources</h2>
+    <dl class="facts facts-paths">${pathRows.map(([p, a]) => `<dt class="mono">${escHtml(p)}</dt><dd>${escHtml(a)}</dd>`).join('')}</dl>` : ''}
 
-    ${data.sessionDirs && data.sessionDirs.length ? (() => {
-      const dirs = data.sessionDirs || [];
-      const claudeDirs = dirs.filter(d => d.agent === 'claude-code' || /^claude-/.test(d.agent || ''));
-      const otherDirs = dirs.filter(d => !(d.agent === 'claude-code' || /^claude-/.test(d.agent || '')));
+    <h2 class="section-label">Server</h2>
+    <dl class="facts">
+      <dt>Version</dt><dd id="sysVersion">\u2026</dd>
+      <dt>Uptime</dt><dd id="sysUptime">\u2026</dd>
+      <dt>Node.js</dt><dd id="sysNode">\u2026</dd>
+      ${data.agents && data.agents.length ? `<dt>Agents</dt><dd>${data.agents.map(escHtml).join(', ')}</dd>` : ''}
+    </dl>
 
-      const lines = [];
-
-      if (claudeDirs.length) {
-        const projects = new Set();
-        for (const d of claudeDirs) {
-          const m = (d.path || '').match(/[\\/]\\.claude[\\/]projects[\\/]([^\\/]+)$/);
-          if (m && m[1]) projects.add(m[1]);
-        }
-        const projectCount = projects.size || claudeDirs.length;
-        lines.push(`<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-subtle)"><span style="color:var(--text-tertiary)">~/.claude/projects/*</span> <span style="color:var(--accent);font-size:12px">claude-code \u00b7 ${projectCount} workspace${projectCount === 1 ? '' : 's'}</span></div>`);
-      }
-
-      for (const d of otherDirs) {
-        const display = (d.path || '').replace(/^\/home\/[^/]+/, '~').replace(/^\/Users\/[^/]+/, '~');
-        lines.push(`<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-subtle)"><span style="color:var(--text-tertiary)">${escHtml(display)}</span> <span style="color:var(--accent);font-size:12px">${escHtml(normalizeAgentLabel(d.agent))}</span></div>`);
-      }
-
-      return `<div class="section-label">Session Paths</div>
-      <div class="config-card" style="margin-bottom:var(--space-xl)">
-        <div style="font-size:12.5px;font-family:var(--font-mono)">${lines.join('')}</div>
-      </div>`;
-    })() : ''}
-
-    ${data.agents && data.agents.length > 1 ? `<div class="section-label">Agents</div><div class="filters" style="margin-bottom:var(--space-xl)">${data.agents.map(a => `<span class="filter-chip">${escHtml(a)}</span>`).join('')}</div>` : ''}
-    <div class="section-label">Tools Used</div>
-    <div class="tools-grid">${[...new Set((data.tools||[]).filter(t => t).map(t => fmtToolGroup(t)))].sort().map(t => `<span class="tool-chip">${escHtml(t)}</span>`).join('')}</div>
-
-    <div class="section-label">System Info</div>
-    <div id="systemInfoContainer" style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:var(--space-md);margin-bottom:var(--space-md)">
-      <div class="config-card"><div class="config-label">Version</div><div class="config-value" id="sysVersion">…</div></div>
-      <div class="config-card"><div class="config-label">Uptime</div><div class="config-value" id="sysUptime">…</div></div>
-      <div class="config-card"><div class="config-label">Indexed Sessions</div><div class="config-value" id="sysSessions">…</div></div>
-      <div class="config-card"><div class="config-label">Node.js</div><div class="config-value" id="sysNode">…</div></div>
-    </div>
+    <details class="tools-used">
+      <summary class="section-label">Tools seen <span class="count">${tools.length}</span></summary>
+      <ul class="tools-grid">${tools.map(t => `<li>${escHtml(t)}</li>`).join('')}</ul>
+    </details>
   </div>`;
 
   content.innerHTML = html;
@@ -1376,7 +1588,7 @@ async function viewStats() {
 async function viewFiles() {
   clearJumpUi();
   window._lastView = 'files';
-  content.innerHTML = `<div class="page-title">Files</div>${skeletonRows(6, 'file')}`;
+  content.innerHTML = `<h1 class="page-title">Files</h1>${skeletonRows(6, 'file')}`;
   transitionView();
   const data = await api('/files?limit=500');
   if (data._error) {
@@ -1422,24 +1634,19 @@ function renderFiles() {
 
   const exts = [...new Set(window._allFiles.map(f => getFileExt(f.file_path)))].sort();
 
-  let html = `<div class="page-title">Files</div>
-    <div class="search-bar" style="margin-bottom:12px">
+  const sortBtn = (val, label) => `<button class="filter-chip${sort === val ? ' active' : ''}" data-sort="${val}" aria-pressed="${sort === val}">${label}</button>`;
+  let html = `<header class="page-head"><h1 class="page-title">Files</h1><span class="page-count">${files.length.toLocaleString()} of ${window._allFiles.length.toLocaleString()}</span></header>
+    <div class="search-bar">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
       <input type="text" id="fileSearchInput" placeholder="Filter by filename or path\u2026" value="${escHtml(window._fileSearch)}">
     </div>
-    <div class="filters" style="margin-bottom:8px">
-      <span class="filter-chip ${sort==='touches'?'active':''}" data-sort="touches">Most touched</span>
-      <span class="filter-chip ${sort==='recent'?'active':''}" data-sort="recent">Recent</span>
-      <span class="filter-chip ${sort==='sessions'?'active':''}" data-sort="sessions">Most sessions</span>
-      <span class="filter-chip ${sort==='name'?'active':''}" data-sort="name">A\u2013Z</span>
-    </div>
-    <div class="filters" style="margin-bottom:12px">
-      <span class="filter-chip ext-chip ${!window._fileFilter?'active':''}" data-ext="">All</span>
-      ${exts.map(e => `<span class="filter-chip ext-chip ${window._fileFilter===e?'active':''}" data-ext="${e}">${e}</span>`).join('')}
-    </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-      <span style="color:var(--text-tertiary);font-size:12px;font-weight:500">${files.length} files</span>
-      <span class="filter-chip ${window._fileGrouped?'active':''}" id="groupToggle" style="cursor:pointer">Group by directory</span>
+    <div class="toolbar">
+      <div class="seg" role="group" aria-label="Sort">${sortBtn('touches', 'Most touched')}${sortBtn('recent', 'Recent')}${sortBtn('sessions', 'Most sessions')}${sortBtn('name', 'A\u2013Z')}</div>
+      <select id="extSelect" class="select" aria-label="File type">
+        <option value="">All types</option>
+        ${exts.map(e => `<option value="${escHtml(e)}"${window._fileFilter === e ? ' selected' : ''}>${escHtml(e)}</option>`).join('')}
+      </select>
+      <button class="btn${window._fileGrouped ? ' active' : ''}" id="groupToggle" aria-pressed="${window._fileGrouped}">Group by directory</button>
     </div>
     <div id="filesList"></div>`;
 
@@ -1467,18 +1674,19 @@ function renderFiles() {
       return groupMetric(b[1]) - groupMetric(a[1]);
     });
 
+    listEl.className = 'file-list';
     listEl.innerHTML = sortedGroups.map(([dir, dirFiles]) => {
       const totalTouches = dirFiles.reduce((s, f) => s + f.touch_count, 0);
       const totalSessions = dirFiles.reduce((s, f) => s + f.session_count, 0);
       const groupStat = sort === 'sessions' ? `${totalSessions} sessions` : `${totalTouches} touches`;
       return `
         <div class="file-group">
-          <div class="file-group-header" data-dir="${escHtml(dir)}">
-            <span class="file-group-arrow">\u25b6</span>
+          <button class="file-group-header" data-dir="${escHtml(dir)}" aria-expanded="false">
             <span class="file-group-name">~/${escHtml(dir)}</span>
-            <span style="color:var(--text-tertiary);font-size:12px;margin-left:auto">${dirFiles.length} files \u00b7 ${groupStat}</span>
-          </div>
-          <div class="file-group-items" style="display:none">
+            <span class="file-group-stat">${dirFiles.length} files</span>
+            <span class="file-group-stat">${groupStat}</span>
+          </button>
+          <div class="file-group-items" hidden>
             ${dirFiles.map(f => renderFileItem(f)).join('')}
           </div>
         </div>`;
@@ -1487,17 +1695,13 @@ function renderFiles() {
     $$('.file-group-header').forEach(h => {
       h.addEventListener('click', () => {
         const items = h.nextElementSibling;
-        const arrow = h.querySelector('.file-group-arrow');
-        if (items.style.display === 'none') {
-          items.style.display = 'block';
-          arrow.textContent = '\u25bc';
-        } else {
-          items.style.display = 'none';
-          arrow.textContent = '\u25b6';
-        }
+        const open = items.hasAttribute('hidden');
+        items.toggleAttribute('hidden', !open);
+        h.setAttribute('aria-expanded', String(open));
       });
     });
   } else {
+    listEl.className = 'file-list';
     listEl.innerHTML = files.map(f => renderFileItem(f)).join('');
   }
 
@@ -1516,14 +1720,13 @@ function renderFiles() {
     chip.onclick = () => { window._fileSort = chip.dataset.sort; renderFiles(); };
   });
 
-  $$('.ext-chip').forEach(chip => {
-    chip.onclick = () => { window._fileFilter = chip.dataset.ext; renderFiles(); };
-  });
+  $('#extSelect').addEventListener('change', e => { window._fileFilter = e.target.value; renderFiles(); });
 
   $('#groupToggle').addEventListener('click', () => { window._fileGrouped = !window._fileGrouped; renderFiles(); });
 
   $$('.file-item').forEach(item => {
     item.addEventListener('click', () => viewFileDetail(item.dataset.path));
+    item.addEventListener('keydown', e => { if (e.key === 'Enter') viewFileDetail(item.dataset.path); });
   });
 
   searchInput.addEventListener('keyup', () => { window._fileCursorPos = searchInput.selectionStart; });
@@ -1531,16 +1734,14 @@ function renderFiles() {
 
 function renderFileItem(f) {
   const fname = f.file_path.split('/').pop();
-  const dir = f.file_path.split('/').slice(0, -1).join('/');
+  const dir = f.file_path.split('/').slice(0, -1).join('/').replace(/^\/home\/[^/]+/, '~').replace(/^\/Users\/[^/]+/, '~');
   return `
-    <div class="file-item" data-path="${escHtml(f.file_path)}">
-      <div class="file-path"><span style="color:var(--text-primary);font-weight:500">${escHtml(fname)}</span> <span style="color:var(--text-tertiary);font-size:12px">${escHtml(dir)}/</span></div>
-      <div class="file-meta">
-        <span>${f.touch_count} touches</span>
-        <span>${f.session_count} sessions</span>
-        <span style="color:var(--amber)">${escHtml(f.operations)}</span>
-        <span class="session-time">${fmtTime(f.last_touched)}</span>
-      </div>
+    <div class="file-item" data-path="${escHtml(f.file_path)}" role="link" tabindex="0">
+      <div class="file-path"><span class="file-name">${escHtml(fname)}</span><span class="file-dir">${escHtml(dir)}/</span></div>
+      <span class="file-stat" title="${f.touch_count} touches">${fmtCompact(f.touch_count)}</span>
+      <span class="file-stat" title="${f.session_count} sessions">${fmtCompact(f.session_count)} sess</span>
+      <span class="file-ops">${escHtml(f.operations)}</span>
+      <time class="file-when">${fmtTime(f.last_touched)}</time>
     </div>
   `;
 }
@@ -1556,18 +1757,16 @@ async function viewFileDetail(filePath) {
 
   let html = `
     <div class="back-btn" id="backBtn">\u2190 Back</div>
-    <div class="page-title" style="word-break:break-all;font-size:16px">${escHtml(filePath)}</div>
-    <div class="section-label">${data.sessions.length} sessions touched this file</div>
+    <h1 class="page-title file-title">${escHtml(filePath.split('/').pop())}</h1>
+    <p class="page-sub mono">${escHtml(filePath)}</p>
+    <h2 class="section-label">${data.sessions.length} session${data.sessions.length === 1 ? '' : 's'} touched this file</h2>
   `;
 
-  html += data.sessions.map(s => renderSessionItem(s)).join('');
+  html += renderSessionList(data.sessions);
   content.innerHTML = html;
   transitionView();
 
   $('#backBtn').addEventListener('click', () => viewFiles());
-  $$('.session-item').forEach(item => {
-    item.addEventListener('click', () => viewSession(item.dataset.id));
-  });
 }
 
 // --- Insights helpers ---
@@ -1595,52 +1794,45 @@ const SIGNAL_COLORS = {
   long_prompt_short_session: 'accent'
 };
 
-function renderSignalTag(sig) {
+function renderSignalTag(sig, count = 1) {
   const label = SIGNAL_LABELS[sig.type] || sig.type;
   const color = SIGNAL_COLORS[sig.type] || 'muted';
   const desc = SIGNAL_DESCRIPTIONS[sig.type] || '';
-  return `<span class="signal-tag signal-${color}"${desc ? ` title="${escHtml(desc)}"` : ''}><span class="signal-dot"></span>${escHtml(label)}</span>`;
+  return `<span class="signal-tag signal-${color}"${desc ? ` title="${escHtml(desc)}"` : ''}>${escHtml(label)}${count > 1 ? `<span class="signal-count"> \u00d7${count}</span>` : ''}</span>`;
 }
 
-function renderReliabilityBadge(score) {
-  const reliability = 100 - score;
-  return `<span class="insight-score-value" title="Reliability score: higher means fewer errors">${reliability}</span>`;
-}
-
-function renderIssueRateBadge(signals) {
-  const TOTAL_SIGNAL_TYPES = 5;
-  const uniqueTypes = new Set((signals || []).map(s => s.type)).size;
-  const rate = Math.round((uniqueTypes / TOTAL_SIGNAL_TYPES) * 100);
-  return `<span class="insight-score-value" title="${uniqueTypes} of ${TOTAL_SIGNAL_TYPES} issue types detected">${rate}%</span>`;
+// One entry per signal type with a count, most frequent first.
+function renderSignalSummary(signals) {
+  const counts = new Map();
+  for (const sig of signals || []) counts.set(sig.type, (counts.get(sig.type) || 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])
+    .map(([type, n]) => renderSignalTag({ type }, n)).join('<span class="sep" aria-hidden="true">, </span>');
 }
 
 function renderInsightsPanel(insights) {
   if (!insights || !insights.signals || !insights.signals.length) {
-    return `<div class="insights-panel insights-clean"><span style="color:var(--text-tertiary);font-size:13px">No issues detected</span></div>`;
+    return `<section class="insights-panel insights-clean"><h2 class="section-label">Health</h2><p class="quiet-note">No issues detected.</p></section>`;
   }
-  return `<div class="insights-panel">
-    <div class="section-label" style="margin-top:0">Session Health ${renderReliabilityBadge(insights.confusion_score)}</div>
-    <div class="insights-signals">
+  return `<section class="insights-panel">
+    <h2 class="section-label">Health <span class="count">reliability ${100 - insights.confusion_score}/100</span></h2>
+    <ul class="insights-signals">
       ${insights.signals.map(sig => {
         let detail = '';
-        if (sig.type === 'tool_retry_loop') detail = `${escHtml(sig.tool)} called ${sig.count}x consecutively`;
+        if (sig.type === 'tool_retry_loop') detail = `${escHtml(sig.tool)} called ${sig.count}\u00d7 in a row`;
         else if (sig.type === 'session_bail') detail = `${sig.tool_calls} tool calls with no file writes`;
         else if (sig.type === 'high_error_rate') detail = `${sig.rate}% error rate (${sig.error_count}/${sig.total})`;
-        else if (sig.type === 'long_prompt_short_session') detail = `${sig.prompt_words} word prompt, ${sig.tool_calls} tool calls`;
+        else if (sig.type === 'long_prompt_short_session') detail = `${sig.prompt_words}-word prompt, ${sig.tool_calls} tool calls`;
         else if (sig.type === 'no_completion') detail = `Ended on ${escHtml(sig.last_event_type)}${sig.last_tool ? ': ' + escHtml(sig.last_tool) : ''}`;
-        return `<div class="insight-callout">
-          ${renderSignalTag(sig)}
-          <span class="insight-detail">${detail}</span>
-        </div>`;
+        return `<li class="insight-callout">${renderSignalTag(sig)}<span class="insight-detail">${detail}</span></li>`;
       }).join('')}
-    </div>
-  </div>`;
+    </ul>
+  </section>`;
 }
 
 async function viewInsights() {
   clearJumpUi();
   window._lastView = 'insights';
-  content.innerHTML = `<div class="page-title">Insights</div><div class="stat-grid">${skeletonRows(3, 'stats')}</div>`;
+  content.innerHTML = `<h1 class="page-title">Insights</h1>${skeletonRows(2, 'stats')}${skeletonRows(5, 'session')}`;
   transitionView();
 
   const data = await api('/insights');
@@ -1659,14 +1851,13 @@ async function viewInsights() {
   // Reliability score (inverted struggle score)
   const reliabilityScore = 100 - (data.avg_confusion_score || 0);
 
-  let html = `<div class="page-title">Insights</div>
+  let html = `<h1 class="page-title">Insights</h1>
+    ${renderMetrics([
+      { label: 'Sessions with an issue', value: `${issueRate}%`, note: `${data.flagged_count.toLocaleString()} of ${data.total_sessions.toLocaleString()}` },
+      { label: 'Reliability', value: `${reliabilityScore}/100`, note: 'Average; higher means cleaner runs' },
+    ])}
 
-    <div class="stat-grid">
-      <div class="stat-card accent-amber"><div class="label">Issue Rate</div><div class="value">${issueRate}%</div><div class="stat-desc">${data.flagged_count} of ${data.total_sessions} sessions had at least one detected issue</div></div>
-      <div class="stat-card accent-purple"><div class="label">Reliability Score</div><div class="value">${reliabilityScore}</div><div class="stat-desc">How often the agent completed tasks cleanly, out of 100</div></div>
-    </div>
-
-    <div class="section-label">Issue Types</div>
+    <h2 class="section-label">Issue types</h2>
     <div class="signal-chart">
       ${signalTypes.map(type => {
         const count = data.signal_counts[type] || 0;
@@ -1690,27 +1881,22 @@ async function viewInsights() {
       }).join('')}
     </div>
 
-    <div class="section-label">Sessions with Issues (${data.flagged_count})</div>
-    <div id="insightsList">
+    <h2 class="section-label">Sessions with issues <span class="count">${data.flagged_count.toLocaleString()}</span></h2>
+    <div id="insightsList" class="session-list insight-list">
       ${data.top_flagged.length ? [...data.top_flagged].sort((a, b) => {
         const aRate = new Set((a.signals||[]).map(s=>s.type)).size;
         const bRate = new Set((b.signals||[]).map(s=>s.type)).size;
         return bRate - aRate || b.confusion_score - a.confusion_score;
       }).map(s => {
         const summary = cleanSessionSummary(s.summary, '');
-        return `<div class="session-item insight-row" data-id="${escHtml(s.session_id)}">
-          <div class="session-header">
-            <span class="session-time">${fmtTime(s.start_time)}</span>
-            <span class="insight-scores">issue rate ${renderIssueRateBadge(s.signals)} · reliability ${renderReliabilityBadge(s.confusion_score)}</span>
+        return `<div class="session-item insight-row" data-id="${escHtml(s.session_id)}" role="link" tabindex="0">
+          <div class="si-main">
+            <div class="si-title"><span class="si-headline">${escHtml(truncate(summary, 160))}</span></div>
+            <div class="si-meta">${renderSignalSummary(s.signals)}</div>
           </div>
-          <div class="session-summary">${escHtml(truncate(summary, 120))}</div>
-          <div class="session-meta">
-            <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-              ${s.agent ? `<span class="session-agent">${escHtml(normalizeAgentLabel(s.agent))}</span>` : ''}
-              ${s.model ? `<span class="session-model">${escHtml(s.model)}</span>` : ''}
-            </span>
-            <span class="insight-signal-tags">${s.signals.map(sig => renderSignalTag(sig)).join('')}</span>
-          </div>
+          <div class="si-when"><span>${fmtTime(s.start_time)}</span><span class="si-dur">${escHtml(normalizeAgentLabel(s.agent || ''))}</span></div>
+          <div class="si-counts" title="Reliability score: higher means fewer errors"><span>${100 - s.confusion_score}<span class="unit">/100</span></span><span>reliability</span></div>
+          <div class="si-action"></div>
         </div>`;
       }).join('') : '<div class="empty"><p>No flagged sessions found</p></div>'}
     </div>
@@ -1718,10 +1904,6 @@ async function viewInsights() {
 
   content.innerHTML = html;
   transitionView();
-
-  $$('.session-item', content).forEach(item => {
-    item.addEventListener('click', () => viewSession(item.dataset.id));
-  });
 
   $$('.signal-lollipop-expandable', content).forEach(row => {
     row.addEventListener('click', () => {
@@ -1731,8 +1913,6 @@ async function viewInsights() {
 }
 
 // --- Navigation ---
-window._searchType = '';
-window._searchRole = '';
 window._lastView = 'overview';
 
 $$('.nav-item').forEach(item => {
@@ -1742,6 +1922,8 @@ $$('.nav-item').forEach(item => {
     if (window._timelineSse) { window._timelineSse.close(); window._timelineSse = null; }
     const view = item.dataset.view;
     window._lastView = view;
+    window._restoreScroll = false;
+    window.scrollTo(0, 0); // a tab tap always starts at the top
     updateNavActive(view);
     setHash(view);
     if (view === 'overview') viewOverview();
@@ -2010,8 +2192,96 @@ document.addEventListener('keydown', e => {
     else openCmdk();
     return;
   }
-  if (e.key === 'Escape' && window._cmdk.open) { e.preventDefault(); closeCmdk(); }
+  if (e.key === 'Escape' && window._cmdk.open) { e.preventDefault(); closeCmdk(); return; }
+  handleListKeys(e);
 });
+
+// One tooltip element for every chart mark: follows hover, keyboard focus and
+// taps (columns are focusable, so a tap focuses them), clamped to the viewport.
+(function initChartTips() {
+  let tip = null;
+  const show = (el) => {
+    const text = el.dataset.tip;
+    if (!text) return;
+    if (!tip) { tip = document.createElement('div'); tip.className = 'chart-tip'; tip.setAttribute('role', 'tooltip'); document.body.appendChild(tip); }
+    tip.textContent = text;
+    tip.hidden = false;
+    const r = el.getBoundingClientRect();
+    const w = tip.offsetWidth, h = tip.offsetHeight;
+    const x = Math.min(window.innerWidth - w - 8, Math.max(8, r.left + r.width / 2 - w / 2));
+    const y = Math.max(8, r.top - h - 6);
+    tip.style.left = x + 'px';
+    tip.style.top = y + 'px';
+  };
+  const hide = () => { if (tip) tip.hidden = true; };
+  window.hideChartTip = hide;
+  document.addEventListener('pointerover', e => { const c = e.target.closest && e.target.closest('.col[data-tip]'); if (c) show(c); }, { passive: true });
+  document.addEventListener('pointerout', e => { const c = e.target.closest && e.target.closest('.col[data-tip]'); if (c && !c.contains(e.relatedTarget)) hide(); }, { passive: true });
+  document.addEventListener('focusin', e => { if (e.target.matches && e.target.matches('.col[data-tip]')) show(e.target); else hide(); });
+  window.addEventListener('scroll', hide, { passive: true });
+})();
+
+// Touch press feedback. Mobile browsers delay or skip :active on touch so
+// rows don't flash while scrolling, which leaves taps feeling dead. Show the
+// pressed state 40ms after the finger lands, drop it if the finger moves
+// (a scroll), and make a quick tap flash briefly so it always registers.
+(function initTouchPress() {
+  const PRESSABLE = '.btn, .filter-chip, .session-id-copy, .subagent-toggle, .subagent-heading, .back-btn, .session-parent-link, .tool-detail > summary, .session-item, .subagent-row, .file-item, .file-group-header, .tl-session, .nav-item, .cmdk-item';
+  let el = null, timer = null, x0 = 0, y0 = 0;
+  const release = (flash) => {
+    clearTimeout(timer);
+    if (!el) return;
+    const target = el;
+    el = null;
+    if (flash) {
+      target.classList.add('is-pressed');
+      setTimeout(() => target.classList.remove('is-pressed'), 140);
+    } else {
+      target.classList.remove('is-pressed');
+    }
+  };
+  document.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'touch') return;
+    const hit = e.target.closest && e.target.closest(PRESSABLE);
+    if (!hit || hit.disabled) return;
+    el = hit; x0 = e.clientX; y0 = e.clientY;
+    timer = setTimeout(() => { if (el === hit) hit.classList.add('is-pressed'); }, 40);
+  }, { passive: true });
+  document.addEventListener('pointermove', e => {
+    if (el && Math.hypot(e.clientX - x0, e.clientY - y0) > 8) release(false);
+  }, { passive: true });
+  document.addEventListener('pointerup', () => release(true), { passive: true });
+  document.addEventListener('pointercancel', () => release(false), { passive: true });
+})();
+
+// Keyboard-first navigation: J/K (or arrows once a row has focus) move
+// between rows, Enter opens, Esc goes back, / searches.
+const NAV_ROWS = '.session-item[data-id], .subagent-row, .file-group-header, .file-item, .tl-session';
+function handleListKeys(e) {
+  if (window._cmdk && window._cmdk.open) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+
+  if (e.key === '/') { e.preventDefault(); openCmdk(); return; }
+  if (e.key === 'Escape') {
+    const back = document.getElementById('backBtn');
+    if (back) { e.preventDefault(); back.click(); }
+    return;
+  }
+
+  const onRow = t && t.matches && t.matches(NAV_ROWS);
+  const down = e.key === 'j' || (onRow && e.key === 'ArrowDown');
+  const up = e.key === 'k' || (onRow && e.key === 'ArrowUp');
+  if (!down && !up) return;
+  const rows = $$(NAV_ROWS, content).filter(r => r.offsetParent !== null);
+  if (!rows.length) return;
+  e.preventDefault();
+  const i = rows.indexOf(document.activeElement);
+  const next = i === -1 ? rows[0] : rows[Math.max(0, Math.min(rows.length - 1, i + (down ? 1 : -1)))];
+  next.focus({ preventScroll: true });
+  next.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
 handleRoute();
 
 // Swipe right from left edge to go back
