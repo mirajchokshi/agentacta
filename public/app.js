@@ -455,8 +455,6 @@ const expandedSessionGroups = new Set();
 
 const ICON_PATHS = {
   chevron: '<path d="m9 18 6-6-6-6"/>',
-  pause: '<rect x="7" y="5" width="3.5" height="14" rx="1"/><rect x="13.5" y="5" width="3.5" height="14" rx="1"/>',
-  play: '<path d="M7 4.5v15l12-7.5z"/>',
   toStart: '<path d="M5 3h14"/><path d="m18 13-6-6-6 6"/><path d="M12 7v14"/>',
   download: '<path d="M12 15V3"/><path d="m7 10 5 5 5-5"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>',
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
@@ -1141,8 +1139,6 @@ async function viewSession(id) {
   };
 
   // Subscribe to real-time updates via SSE, with polling as a fallback.
-  // "Following" is the client side of a live session: it can be paused, and it
-  // can be paused from the page.
   let lastSeenTs = allEvents.length ? allEvents[0].timestamp : new Date(0).toISOString();
   let lastSeenId = allEvents.length ? allEvents[0].id : '';
   let sessionState = { status: s.status, ended_reason: s.ended_reason, ended_at: s.ended_at, source_status: s.source_status };
@@ -1168,13 +1164,6 @@ async function viewSession(id) {
   const startPolling = () => {
     if (pollInterval || !following) return;
     pollInterval = setInterval(pollNewEvents, 3000);
-  };
-
-  const stopFollowing = () => {
-    following = false;
-    if (eventSource) { eventSource.close(); eventSource = null; }
-    if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
-    renderStatusControls();
   };
 
   const startFollowing = () => {
@@ -1211,10 +1200,7 @@ async function viewSession(id) {
     const st = { ...s, ...sessionState };
     slot.innerHTML = `
       <span class="detail-state">${statusIcon(st)}${renderSessionStatus(st) || '<span class="st st-ended">Finished</span>'}</span>
-      <button class="btn" id="followToggleBtn" title="${following ? 'New events stream into this page as they are indexed' : 'New events are not being streamed into this page'}">${following ? `${icon('pause', 12)}Pause updates` : `${icon('play', 12)}Resume updates`}</button>
     `;
-    const followBtn = document.getElementById('followToggleBtn');
-    if (followBtn) followBtn.onclick = () => (following ? stopFollowing() : startFollowing());
   }
 
   // Sessions their source reports as finished open without a live stream;

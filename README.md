@@ -87,7 +87,7 @@ Session detail view supports project-scoped filtering, so mixed-project sessions
 
 Subagent sessions nest under the session that spawned them (Claude Code `subagents/` transcripts, Codex spawned threads, OpenClaw spawned sessions), with a collapsible count on the parent and a link back to the parent from the child.
 
-Sessions show as **Live** (activity in the last 15 minutes) or **Stale** (never recorded an end and has gone quiet). AgentActa only reads transcripts, so it can't stop a running agent; on a live session's page, **Pause updates** stops streaming new events into the page.
+Sessions show as **Live** (activity in the last 15 minutes) or **Stale** (never recorded an end and has gone quiet). A live session's page shows new events as they arrive. AgentActa only reads transcripts, so it can't stop a running agent.
 
 Session types get tagged so noisy categories are easier to spot (cron, sub-agent, heartbeat). Codex-backed work is also distinguished more clearly, including direct Codex runs and Symphony-origin Codex sessions.
 
