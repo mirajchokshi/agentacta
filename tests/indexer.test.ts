@@ -460,4 +460,23 @@ describe('indexer', () => {
     assert.strictEqual(sess.start_time, '2026-10-14T20:00:00Z');
     assert.strictEqual(sess.message_count, 2);
   });
+
+  it('indexes Claude Code tool output (tool_result blocks) linked to its call', () => {
+    const fp = writeSession('claude-tool-results.jsonl', [
+      { type: 'user', sessionId: 'cc-tools-1', uuid: 'u-1', timestamp: '2026-10-14T20:00:00Z', message: { role: 'user', content: 'List the files' } },
+      { type: 'assistant', sessionId: 'cc-tools-1', uuid: 'a-1', timestamp: '2026-10-14T20:00:05Z', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'ls' } }] } },
+      { type: 'user', sessionId: 'cc-tools-1', uuid: 'u-2', timestamp: '2026-10-14T20:00:06Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'README.md\nsrc' }] } },
+      { type: 'assistant', sessionId: 'cc-tools-1', uuid: 'a-2', timestamp: '2026-10-14T20:00:07Z', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_2', name: 'Read', input: { file_path: '/x/README.md' } }] } },
+      { type: 'user', sessionId: 'cc-tools-1', uuid: 'u-3', timestamp: '2026-10-14T20:00:08Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_2', content: [{ type: 'text', text: 'zebracrossing readme body' }, { type: 'image', source: {} }] }] } },
+    ]);
+    indexFile(db, fp, 'claude-code', stmts, false);
+    const results = db.prepare("SELECT id, tool_name, content FROM events WHERE session_id = 'cc-tools-1' AND type = 'tool_result' ORDER BY timestamp").all() as Array<{ id: string; tool_name: string; content: string }>;
+    assert.deepStrictEqual(results.map(r => [r.id, r.tool_name]), [['toolu_1:result', 'Bash'], ['toolu_2:result', 'Read']]);
+    assert.strictEqual(results[0].content, 'README.md\nsrc');
+    assert.strictEqual(results[1].content, 'zebracrossing readme body');
+    const fts = db.prepare("SELECT COUNT(*) AS c FROM events_fts WHERE events_fts MATCH 'zebracrossing'").get() as { c: number };
+    assert.strictEqual(fts.c, 1, 'tool output is searchable');
+    const sess = db.prepare("SELECT message_count, tool_count FROM sessions WHERE id = 'cc-tools-1'").get() as { message_count: number; tool_count: number };
+    assert.deepStrictEqual([sess.message_count, sess.tool_count], [1, 2], 'results are not counted as messages');
+  });
 });

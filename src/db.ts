@@ -184,7 +184,7 @@ export function init(dbPath?: string): void {
   const hasEvents = !!db.prepare('SELECT 1 FROM events LIMIT 1').get();
   if (!hasEvents) db.prepare("INSERT OR IGNORE INTO agentacta_meta (key, value) VALUES ('fts_version', ?)").run(String(FTS_VERSION));
 
-  const INDEX_VERSION = 3; // 2: Claude ai-title/custom-title labels, thread-prompt summaries; 3: skip attachment lines
+  const INDEX_VERSION = 4; // 2: Claude ai-title/custom-title labels, thread-prompt summaries; 3: skip attachment lines; 4: Claude Code tool_result blocks
   const row = db.prepare("SELECT value FROM agentacta_meta WHERE key = 'index_version'").get() as { value: string } | undefined;
   if (!row || Number(row.value) < INDEX_VERSION) {
     db.exec("DELETE FROM index_state");

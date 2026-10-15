@@ -275,6 +275,28 @@ function extractToolCalls(msg: unknown): ExtractedToolCall[] {
     }));
 }
 
+// Claude Code tool output: { role: 'user', content: [{ type: 'tool_result',
+// tool_use_id, content: string | [{ type: 'text', text }, { type: 'image' }] }] }.
+function extractToolResultBlocks(msg: unknown): ExtractedToolResult[] {
+  const m = msg as Record<string, unknown>;
+  if (!m || !Array.isArray(m.content)) return [];
+  const out: ExtractedToolResult[] = [];
+  for (const b of m.content as Array<Record<string, unknown>>) {
+    if (!b || b.type !== 'tool_result') continue;
+    const c = b.content;
+    const text = typeof c === 'string' ? c
+      : Array.isArray(c) ? (c as Array<Record<string, unknown>>).filter(x => x && x.type === 'text' && typeof x.text === 'string').map(x => x.text as string).join('\n')
+      : '';
+    out.push({ toolCallId: String(b.tool_use_id || ''), toolName: '', content: text.slice(0, 10000) });
+  }
+  return out;
+}
+
+function hasTextBlocks(msg: unknown): boolean {
+  const m = msg as Record<string, unknown>;
+  return Array.isArray(m.content) && (m.content as ContentBlock[]).some(b => b && b.type === 'text' && !!b.text);
+}
+
 function extractToolResult(msg: unknown): ExtractedToolResult | null {
   if (!msg) return null;
   const m = msg as Record<string, unknown>;
@@ -615,6 +637,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
 
   // --- Parse the entire file BEFORE any DB operations ---
   const pendingEvents: Array<[string, string, string, string, string, string | null, string | null, string | null, string | null]> = [];
+  const toolNameById = new Map<string, string>(); // tool call id -> name, for results that only carry the id
   const fileActivities: Array<[string, string, string, string]> = [];
   const projectCounts: Map<string, number> = new Map();
 
@@ -804,6 +827,13 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
         continue;
       }
 
+      // Claude Code returns tool output as a user message of tool_result blocks.
+      const blockResults = extractToolResultBlocks(msg);
+      blockResults.forEach((r, i) => {
+        pendingEvents.push([r.toolCallId ? `${r.toolCallId}:result` : `${eventId}:${i}:result`, sessionId as string, ts as string, 'tool_result', 'tool', r.content, toolNameById.get(r.toolCallId) || '', null, r.content]);
+      });
+      if (blockResults.length && !hasTextBlocks(msg)) continue;
+
       const content = extractContent(msg);
       const role = (msg.role as string) || 'unknown';
 
@@ -824,6 +854,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
 
       const tools = extractToolCalls(msg);
       for (const tool of tools) {
+        if (tool.id) toolNameById.set(tool.id, tool.name);
         pendingEvents.push([tool.id || `${eventId}-${tool.name}`, sessionId as string, ts as string, 'tool_call', role, null, tool.name, tool.args, null]);
         toolCount++;
 
