@@ -1,4 +1,4 @@
-const CACHE = 'agentacta-v2';
+const CACHE = 'agentacta-v3';
 const STATIC = ['/', '/icon.svg', '/manifest.json'];
 
 self.addEventListener('install', e => {

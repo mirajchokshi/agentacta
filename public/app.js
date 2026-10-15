@@ -297,18 +297,19 @@ function skeletonRows(count = 6, kind = 'event') {
 // --- Hash routing ---
 window._navDepth = 0;
 
-function setHash(hash, replace) {
+function setHash(hash, replace, state = null) {
   const target = '#' + hash;
   if (window.location.hash === target) return;
   if (replace) {
-    history.replaceState(null, '', target);
+    history.replaceState(state, '', target);
   } else {
-    history.pushState(null, '', target);
+    history.pushState(state, '', target);
     window._navDepth++;
   }
 }
 
-function updateNavActive(view) {
+// Lights a view's tab (the sidebar doubles as the phone tab bar).
+function setActiveNav(view) {
   $$('.nav-item').forEach(i => i.classList.remove('active'));
   const navItem = $(`.nav-item[data-view="${view}"]`);
   if (navItem) navItem.classList.add('active');
@@ -316,12 +317,6 @@ function updateNavActive(view) {
   const isSettings = view === 'stats';
   document.getElementById('settings-btn')?.classList.toggle('active', isSettings);
   document.getElementById('settings-btn-mobile')?.classList.toggle('active', isSettings);
-}
-
-function updateMobileNavActive(view) {
-  $$('.mobile-nav-btn').forEach(b => b.classList.remove('active'));
-  const btn = $(`.mobile-nav-btn[data-view="${view}"]`);
-  if (btn) btn.classList.add('active');
 }
 
 function handleRoute() {
@@ -333,14 +328,20 @@ function handleRoute() {
 
   if (raw.startsWith('session/')) {
     const id = decodeURIComponent(raw.slice('session/'.length));
-    if (id) { viewSession(id); return; }
+    if (id) {
+      // A session keeps lit the tab it was opened from, which its history
+      // entry records; one opened straight from its URL belongs under Sessions.
+      window._lastView = history.state?.from || 'sessions';
+      setActiveNav(window._lastView);
+      viewSession(id);
+      return;
+    }
   }
 
   const normalized = raw === 'search' ? 'overview' : raw; // old #search links land on Overview
   const view = normalized === 'overview' || normalized === 'sessions' || normalized === 'timeline' || normalized === 'files' || normalized === 'stats' || normalized === 'insights' ? normalized : 'overview';
   window._lastView = view;
-  updateNavActive(view);
-  updateMobileNavActive(view);
+  setActiveNav(view);
   if (view === 'overview') viewOverview();
   else if (view === 'sessions') viewSessions();
   else if (view === 'files') viewFiles();
@@ -788,7 +789,7 @@ async function viewSession(id, opts = {}) {
   if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
   window._currentSessionId = id;
   const viewToken = window._sessionView = {}; // identifies this opening of the page
-  setHash('session/' + encodeURIComponent(id));
+  setHash('session/' + encodeURIComponent(id), false, { from: window._lastView });
   window.scrollTo(0, 0);
   content.innerHTML = `
     <div class="back-btn">← Back</div>
@@ -2031,7 +2032,7 @@ $$('.nav-item').forEach(item => {
     window._lastView = view;
     window._restoreScroll = false;
     window.scrollTo(0, 0); // a tab tap always starts at the top
-    updateNavActive(view);
+    setActiveNav(view);
     setHash(view);
     if (view === 'overview') viewOverview();
     else if (view === 'sessions') viewSessions();
@@ -2338,8 +2339,8 @@ initTheme();
 document.getElementById('theme-toggle')?.addEventListener('click', toggleTheme);
 document.getElementById('theme-toggle-mobile')?.addEventListener('click', toggleTheme);
 document.getElementById('mobile-search-btn')?.addEventListener('click', () => openCmdk());
-document.getElementById('settings-btn')?.addEventListener('click', () => { window._lastView = 'stats'; updateNavActive('stats'); setHash('stats'); viewStats(); });
-document.getElementById('settings-btn-mobile')?.addEventListener('click', () => { window._lastView = 'stats'; updateNavActive('stats'); setHash('stats'); viewStats(); });
+document.getElementById('settings-btn')?.addEventListener('click', () => { window._lastView = 'stats'; setActiveNav('stats'); setHash('stats'); viewStats(); });
+document.getElementById('settings-btn-mobile')?.addEventListener('click', () => { window._lastView = 'stats'; setActiveNav('stats'); setHash('stats'); viewStats(); });
 document.getElementById('cmdkBtn')?.addEventListener('click', () => openCmdk());
 
 

@@ -1,6 +1,6 @@
 # Contributing to AgentActa
 
-Thanks for your interest! AgentActa is a zero-framework Node.js project — we keep things simple.
+Thanks for your interest! AgentActa is a zero-framework Node.js project, and we keep things simple.
 
 ## Dev Setup
 
@@ -28,7 +28,7 @@ Tests use Node's built-in test runner (`node:test` + `node:assert`) and are writ
 
 ## Code Style
 
-- No frameworks — vanilla Node.js HTTP server, better-sqlite3, TypeScript
+- No frameworks: vanilla Node.js HTTP server, better-sqlite3, TypeScript
 - No new npm dependencies without strong justification
 - Keep functions small and focused
 - Use `const` by default, `let` when needed, never `var`
@@ -41,7 +41,7 @@ Tests use Node's built-in test runner (`node:test` + `node:assert`) and are writ
 4. Run `npm test` and make sure everything passes
 5. Open a PR with a clear description of what and why
 
-## SSE (Server-Sent Events) — Realtime Updates
+## SSE (Server-Sent Events): Realtime Updates
 
 The session detail view supports live updates via SSE. When a session's JSONL file
 changes on disk, the file watcher re-indexes it and pushes new events to any
@@ -69,7 +69,7 @@ curl -N "http://127.0.0.1:4003/api/sessions/<SESSION_ID>/stream?after=2000-01-01
 #    After ~2s debounce, you should see the SSE push in curl output.
 
 # 5. In the browser, new events appear at the top of the list with a highlight.
-#    If scrolled down, a "N new events" pill appears — click to jump to top.
+#    If scrolled down, a "N new events" pill appears; click to jump to top.
 ```
 
 **Automated tests:** `npm test` includes `tests/sse.test.ts` which covers headers, 404,

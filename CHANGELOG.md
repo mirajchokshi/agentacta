@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **New app icon**: the favicon and home-screen icon use the gradient mark from the sidebar and agentacta.com.
+
+### Fixed
+- A session opened straight from its link lit Overview in the sidebar and Back went to Overview. It now lights Sessions, and a session reached from another tab keeps that tab lit, including after browser Back and Forward.
+
 ## [2026.10.15] - 2026-10-15
 
 ### Added
@@ -84,36 +92,36 @@
 ## [2026.4.10] - 2026-04-10
 
 ### Changed
-- **Full TypeScript migration** — all 7 backend modules converted from JavaScript to TypeScript in `src/` directory with strict mode enabled
-- **Type-safe tests** — all 8 test files converted to TypeScript, running via `tsx` directly from source (no build step needed to test)
-- **New `src/types.ts`** — 427 lines of interfaces covering sessions, events, file activity, config, insights, attribution, and API request/response types
-- **Build pipeline** — `tsc` compiles to `dist/`, `tsx` for dev mode, `prepublishOnly` ensures build+test before npm publish
-- **Updated docs** — CLAUDE.md, CONTRIBUTING.md, README.md updated to reflect TypeScript stack
+- **Full TypeScript migration**: all 7 backend modules converted from JavaScript to TypeScript in `src/` directory with strict mode enabled
+- **Type-safe tests**: all 8 test files converted to TypeScript, running via `tsx` directly from source (no build step needed to test)
+- **New `src/types.ts`**: 427 lines of interfaces covering sessions, events, file activity, config, insights, attribution, and API request/response types
+- **Build pipeline**: `tsc` compiles to `dist/`, `tsx` for dev mode, `prepublishOnly` ensures build+test before npm publish
+- **Updated docs**: CLAUDE.md, CONTRIBUTING.md, README.md updated to reflect TypeScript stack
 
 ## [2026.4.8] - 2026-04-08
 
 ### Added
-- **Cron run indexing** — OpenClaw cron runs (from `~/.openclaw/cron/runs/`) are now indexed as synthetic sessions, making them visible in AgentActa alongside regular sessions
-- **Custom agent session paths** — agent-specific session directories (e.g. `oakley-local`) are now auto-discovered and indexed when added to `sessionsPath` in config
+- **Cron run indexing**: OpenClaw cron runs (from `~/.openclaw/cron/runs/`) are now indexed as synthetic sessions, making them visible in AgentActa alongside regular sessions
+- **Custom agent session paths**: agent-specific session directories (e.g. `oakley-local`) are now auto-discovered and indexed when added to `sessionsPath` in config
 
 ### Fixed
-- **Mobile nav stays fixed** — floating bottom nav no longer scrolls with the page on iOS Safari; added `translateZ(0)` to force GPU compositing layer
-- **No horizontal scroll on mobile** — sessions page could be swiped left/right on narrow screens; fixed with `overflow-x: hidden` on body and `overflow: hidden` on session cards
-- **Session dir deduplication** — improved `hasDir` to account for `sourceType` so cron-run dirs and transcript dirs at the same path are tracked independently
+- **Mobile nav stays fixed**: floating bottom nav no longer scrolls with the page on iOS Safari; added `translateZ(0)` to force GPU compositing layer
+- **No horizontal scroll on mobile**: sessions page could be swiped left/right on narrow screens; fixed with `overflow-x: hidden` on body and `overflow: hidden` on session cards
+- **Session dir deduplication**: improved `hasDir` to account for `sourceType` so cron-run dirs and transcript dirs at the same path are tracked independently
 
 ## [2026.3.27] - 2026-03-27
 
 ### Fixed
-- **npm package completeness** — `project-attribution.js`, `delta-attribution-context.js`, and `insights.js` were required by `index.js` but missing from the `files` array in `package.json`. The published npm package was broken for `npx` installs; this release fixes that.
+- **npm package completeness**: `project-attribution.js`, `delta-attribution-context.js`, and `insights.js` were required by `index.js` but missing from the `files` array in `package.json`. The published npm package was broken for `npx` installs; this release fixes that.
 
 ## [2026.3.26] - 2026-03-26
 
 ### Added
-- **Insights tab overhaul** — severity-scaled reliability scoring: each signal now contributes based on actual intensity (retry count, error rate, tool call volume) rather than a fixed weight
-- **Issue rate badge** — shows what % of possible issue types were detected in a session
-- **Tap-to-reveal signal descriptions** — mobile-friendly alternative to hover tooltips on the issue type chart
-- **Floating mobile nav** — bottom nav is now a floating pill with accent-colored active state
-- **Settings gear icon** — moved from sidebar nav to header (desktop) and mobile toolbar
+- **Insights tab overhaul**: severity-scaled reliability scoring, where each signal now contributes based on actual intensity (retry count, error rate, tool call volume) rather than a fixed weight
+- **Issue rate badge**: shows what % of possible issue types were detected in a session
+- **Tap-to-reveal signal descriptions**: mobile-friendly alternative to hover tooltips on the issue type chart
+- **Floating mobile nav**: bottom nav is now a floating pill with accent-colored active state
+- **Settings gear icon**: moved from sidebar nav to header (desktop) and mobile toolbar
 
 ### Changed
 - Nav order: Overview → Sessions → Insights → Timeline → Files
@@ -149,11 +157,11 @@
 ## [2026.3.12] - 2026-03-12
 
 ### Added
-- **Context API** — three new endpoints that surface historical context from indexed sessions:
-  - `GET /api/context/file?path=<filepath>` — session count, recent changes, operations breakdown, related files, recent errors
-  - `GET /api/context/repo?path=<repo-path>` — aggregate cost/tokens, distinct agents, top files, recent sessions, common tools
-  - `GET /api/context/agent?name=<agent-name>` — session count, total cost, avg duration, top tools, recent sessions, success rate
-- **CLAUDE.md** — project context file for agents working on AgentActa
+- **Context API**: three new endpoints that surface historical context from indexed sessions:
+  - `GET /api/context/file?path=<filepath>`: session count, recent changes, operations breakdown, related files, recent errors
+  - `GET /api/context/repo?path=<repo-path>`: aggregate cost/tokens, distinct agents, top files, recent sessions, common tools
+  - `GET /api/context/agent?name=<agent-name>`: session count, total cost, avg duration, top tools, recent sessions, success rate
+- **CLAUDE.md**: project context file for agents working on AgentActa
 - Context API documentation in README with usage examples
 
 ### Fixed
@@ -164,11 +172,11 @@
 ## [2026.3.7] - 2026-03-07
 
 ### Fixed
-- **Session auto-discovery on first run** — AgentActa now detects existing agent session directories (`~/.claude/projects`, `~/.codex/sessions`, `~/.openclaw/sessions`) when generating the default config. No manual configuration needed for new installs.
-- **Claude Code sessions not appearing** — Fixed indexer to correctly scan per-project subdirectories under `~/.claude/projects` when `sessionsPath` is set in config.
-- **Array `sessionsPath` config** — `sessionsPath` now accepts a JSON array in addition to a colon-delimited string, preventing a `TypeError` on startup for users with auto-detected configs.
-- **Claude Code `queue-operation` format** — JSONL files starting with `queue-operation` events (a Claude Code variant) are now correctly identified and indexed.
-- **In-memory config on first run** — Auto-detected session directories are now applied to the running process immediately, not just written to disk.
+- **Session auto-discovery on first run**: AgentActa now detects existing agent session directories (`~/.claude/projects`, `~/.codex/sessions`, `~/.openclaw/sessions`) when generating the default config. No manual configuration needed for new installs.
+- **Claude Code sessions not appearing**: Fixed indexer to correctly scan per-project subdirectories under `~/.claude/projects` when `sessionsPath` is set in config.
+- **Array `sessionsPath` config**: `sessionsPath` now accepts a JSON array in addition to a colon-delimited string, preventing a `TypeError` on startup for users with auto-detected configs.
+- **Claude Code `queue-operation` format**: JSONL files starting with `queue-operation` events (a Claude Code variant) are now correctly identified and indexed.
+- **In-memory config on first run**: Auto-detected session directories are now applied to the running process immediately, not just written to disk.
 
 ## [2026.3.5] - 2026-03-05
 
