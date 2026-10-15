@@ -185,6 +185,43 @@ export function analyzeAll(db: Database.Database): InsightResult[] {
   return results;
 }
 
+// Bump when analyzeSession's scoring changes so stored rows are recomputed once.
+export const INSIGHTS_VERSION = 1;
+
+// Startup path: a session's insights depend only on its own rows, so only
+// sessions that were (re)indexed or have no stored insights need analyzing.
+// Scoring every session took most of a cold start on large histories.
+export function analyzeChanged(db: Database.Database, changedIds: Iterable<string>): number {
+  db.exec("CREATE TABLE IF NOT EXISTS agentacta_meta (key TEXT PRIMARY KEY, value TEXT)");
+  const row = db.prepare("SELECT value FROM agentacta_meta WHERE key = 'insights_version'").get() as { value: string } | undefined;
+  if (!row || Number(row.value) !== INSIGHTS_VERSION) {
+    const n = analyzeAll(db).length;
+    db.prepare("INSERT OR REPLACE INTO agentacta_meta (key, value) VALUES ('insights_version', ?)").run(String(INSIGHTS_VERSION));
+    return n;
+  }
+  const missing = db.prepare(
+    'SELECT s.id FROM sessions s LEFT JOIN session_insights si ON si.session_id = s.id WHERE si.session_id IS NULL'
+  ).all() as Array<{ id: string }>;
+  const ids = new Set<string>(changedIds);
+  for (const m of missing) ids.add(m.id);
+  if (!ids.size) return 0;
+  const upsert = db.prepare(`
+    INSERT OR REPLACE INTO session_insights
+    (session_id, signals, confusion_score, flagged, computed_at)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+  let n = 0;
+  db.transaction(() => {
+    for (const id of ids) {
+      const result: InsightResult | null = analyzeSession(db, id);
+      if (!result) continue;
+      upsert.run(result.session_id, JSON.stringify(result.signals), result.confusion_score, result.flagged ? 1 : 0, result.computed_at);
+      n++;
+    }
+  })();
+  return n;
+}
+
 export function getInsightsSummary(db: Database.Database): InsightsSummary {
   const rows = db.prepare(
     'SELECT si.*, s.summary, s.model, s.agent, s.start_time, s.tool_count, s.message_count FROM session_insights si JOIN sessions s ON s.id = si.session_id'

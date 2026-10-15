@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { EventEmitter } from 'node:events';
+import { Worker } from 'node:worker_threads';
 import type Database from 'better-sqlite3';
 import type {
   AgentActaConfig,
@@ -28,11 +29,12 @@ import type {
   AttributionResult,
 } from './types.js';
 import { loadConfig } from './config.js';
-import { open, init, createStmts } from './db.js';
-import { discoverSessionDirs, listSessionFiles, listClaudeSubagentFiles, indexFile, indexOpenClawDb, watchOpenClawDb, indexAll } from './indexer.js';
+import { open, init } from './db.js';
+import { discoverSessionDirs } from './indexer.js';
+import type { WorkerMessage } from './index-worker.js';
 import { attributeSessionEvents, attributeEventDelta } from './project-attribution.js';
 import { loadDeltaAttributionContext } from './delta-attribution-context.js';
-import { analyzeSession, analyzeAll, getInsightsSummary } from './insights.js';
+import { analyzeSession, getInsightsSummary } from './insights.js';
 import { isValidDateKey, resolveStaticPath } from './http-utils.js';
 import { withStatus, attachChildren } from './session-status.js';
 
@@ -253,9 +255,7 @@ function formatEventCursor(row: EventRow): string {
 // Init DB and start watcher
 init();
 const db: Database.Database = open();
-
-// Live re-indexing setup
-const stmts: PreparedStatements = createStmts(db);
+db.pragma('busy_timeout = 5000'); // the indexer worker writes on its own connection
 
 // SSE emitter: notifies connected clients when a session is re-indexed
 const sseEmitter: EventEmitter = new EventEmitter();
@@ -263,134 +263,37 @@ sseEmitter.setMaxListeners(100);
 
 const sessionDirs: SessionDir[] = discoverSessionDirs(config);
 
-// Initial indexing pass
-for (const dir of sessionDirs) {
-  if (dir.sourceType === 'openclaw-db') {
-    try {
-      const ids: string[] = indexOpenClawDb(db, dir.path, dir.agent, stmts, ARCHIVE_MODE, config);
-      if (ids.length > 0) console.log(`Indexed ${ids.length} DB sessions from ${path.basename(dir.path)} (${dir.agent})`);
-    } catch (err: unknown) {
-      console.error(`Error indexing ${path.basename(dir.path)}:`, (err as Error).message);
-    }
-    continue;
+// Indexing, watching and insight scoring run in a worker so a long re-parse
+// never holds up a request. The server answers from what is already indexed;
+// only a first run (nothing indexed yet) waits for the worker's first pass.
+let indexReady: boolean = false;
+const firstRun: boolean = !db.prepare('SELECT 1 FROM sessions LIMIT 1').get();
+const indexReadyWaiters: Array<() => void> = [];
+const reindexRequests: Map<number, (m: Extract<WorkerMessage, { type: 'reindexed' }>) => void> = new Map();
+let nextReindexId: number = 1;
+const workerFile: string = path.join(__dirname, 'index-worker' + path.extname(__filename));
+// Under tsx (npm run dev, tests) the worker needs tsx's loader registered itself.
+const indexWorker: Worker = workerFile.endsWith('.ts')
+  ? new Worker(`require('tsx/cjs/api').register(); require(${JSON.stringify(workerFile)});`, { eval: true })
+  : new Worker(workerFile);
+indexWorker.unref();
+indexWorker.on('message', (m: WorkerMessage) => {
+  if (m.type === 'ready') {
+    indexReady = true;
+    console.log(`Index up to date (${m.changed} changed, ${m.ms} ms)`);
+    for (const fn of indexReadyWaiters.splice(0)) fn();
+  } else if (m.type === 'updated') {
+    for (const id of m.ids) sseEmitter.emit('session-update', id);
+  } else if (m.type === 'reindexed') {
+    reindexRequests.get(m.requestId)?.(m);
+    reindexRequests.delete(m.requestId);
   }
-  const files: string[] = listSessionFiles(dir);
-  for (const filePath of files) {
-    try {
-      const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
-      if (!result.skipped) console.log(`Indexed: ${path.basename(filePath)} (${dir.agent})`);
-    } catch (err: unknown) {
-      console.error(`Error indexing ${path.basename(filePath)}:`, (err as Error).message);
-    }
-  }
-}
-
-// Compute insights for all indexed sessions
-try {
-  analyzeAll(db);
-  console.log('Insights computed for all sessions');
-} catch (err: unknown) {
-  console.error('Error computing insights:', (err as Error).message);
-}
-
-console.log(`Watching ${sessionDirs.length} session directories`);
-
-// Debounce map: filePath -> timeout handle
-const _reindexTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
-const REINDEX_DEBOUNCE_MS: number = 2000;
-const RECURSIVE_RESCAN_MS: number = 15000;
-
-// Recompute insights for re-indexed sessions and push SSE updates to clients
-function refreshInsightsAndNotify(sessionIds: string[]): void {
-  if (sessionIds.length === 0) return;
-  const upsert: Database.Statement = db.prepare('INSERT OR REPLACE INTO session_insights (session_id, signals, confusion_score, flagged, computed_at) VALUES (?, ?, ?, ?, ?)');
-  for (const sessionId of sessionIds) {
-    try {
-      const insight: InsightResult | null = analyzeSession(db, sessionId);
-      if (insight) upsert.run(insight.session_id, JSON.stringify(insight.signals), insight.confusion_score, insight.flagged ? 1 : 0, insight.computed_at);
-    } catch { /* ignore */ }
-    sseEmitter.emit('session-update', sessionId);
-  }
-}
-
-function reindexRecursiveDir(dir: SessionDir): void {
-  try {
-    // Claude project dirs: top-level transcripts are covered by fs.watch, so
-    // the interval only needs to poll the nested subagents/ folders.
-    const files: string[] = dir.subagents && !dir.recursive ? listClaudeSubagentFiles(dir.path) : listSessionFiles(dir);
-    let changed: number = 0;
-    for (const filePath of files) {
-      const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
-      if (!result.skipped) {
-        changed++;
-        if (result.sessionId) refreshInsightsAndNotify([result.sessionId]);
-      }
-    }
-    if (changed > 0) console.log(`Live re-indexed ${changed} files (${dir.agent})`);
-  } catch (err: unknown) {
-    console.error(`Error rescanning ${dir.path}:`, (err as Error).message);
-  }
-}
-
-function reindexOpenClawDb(dir: SessionDir): void {
-  try {
-    const ids: string[] = indexOpenClawDb(db, dir.path, dir.agent, stmts, ARCHIVE_MODE, config);
-    if (ids.length > 0) {
-      console.log(`Live re-indexed ${ids.length} DB sessions (${dir.agent})`);
-      refreshInsightsAndNotify(ids);
-    }
-  } catch (err: unknown) {
-    console.error(`Error re-indexing ${dir.path}:`, (err as Error).message);
-  }
-}
-
-for (const dir of sessionDirs) {
-  try {
-    if (dir.sourceType === 'openclaw-db') {
-      watchOpenClawDb(dir.path, { debounceMs: REINDEX_DEBOUNCE_MS, persistent: false }, () => reindexOpenClawDb(dir));
-      console.log(`  Watching: ${dir.path}`);
-      continue;
-    }
-    fs.watch(dir.path, { persistent: false }, (_eventType: string, filename: string | null) => {
-      if (dir.recursive) {
-        if (_reindexTimers.has(dir.path)) clearTimeout(_reindexTimers.get(dir.path));
-        _reindexTimers.set(dir.path, setTimeout(() => {
-          _reindexTimers.delete(dir.path);
-          reindexRecursiveDir(dir);
-        }, REINDEX_DEBOUNCE_MS));
-        return;
-      }
-
-      if (!filename || !filename.endsWith('.jsonl')) return;
-      const filePath: string = path.join(dir.path, filename);
-      if (!fs.existsSync(filePath)) return;
-
-      // Debounce: cancel pending re-index for this file, schedule a new one
-      if (_reindexTimers.has(filePath)) clearTimeout(_reindexTimers.get(filePath));
-      _reindexTimers.set(filePath, setTimeout(() => {
-        _reindexTimers.delete(filePath);
-        try {
-          const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
-          if (!result.skipped) {
-            console.log(`Live re-indexed: ${filename} (${dir.agent})`);
-            if (result.sessionId) refreshInsightsAndNotify([result.sessionId]);
-          }
-        } catch (err: unknown) {
-          console.error(`Error re-indexing ${filename}:`, (err as Error).message);
-        }
-      }, REINDEX_DEBOUNCE_MS));
-    });
-    console.log(`  Watching: ${dir.path}`);
-    // Nested files (Codex date dirs, Claude <session>/subagents/) aren't seen by a
-    // non-recursive fs.watch, so rescan them on an interval.
-    if (dir.recursive || dir.subagents) {
-      const timer: NodeJS.Timeout = setInterval(() => reindexRecursiveDir(dir), RECURSIVE_RESCAN_MS);
-      timer.unref?.();
-    }
-  } catch (err: unknown) {
-    console.error(`  Failed to watch ${dir.path}:`, (err as Error).message);
-  }
-}
+});
+indexWorker.on('error', (err: Error) => {
+  console.error('Indexer error:', err.message);
+  indexReady = true;
+  for (const fn of indexReadyWaiters.splice(0)) fn();
+});
 
 const SESSION_SELECT: string = 'SELECT s.* FROM sessions s';
 const sessionSortKey = (r: { end_time: string | null; start_time: string }): string => r.end_time || r.start_time || '';
@@ -410,6 +313,15 @@ function loadDescendants(rootIds: string[], nowMs: number) {
 }
 
 const server: http.Server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse): void => {
+  // First run: hold data requests until the first pass has filled the index.
+  if (firstRun && !indexReady && (req.url || '').startsWith('/api/') && !(req.url || '').startsWith('/api/health')) {
+    indexReadyWaiters.push(() => handleRequest(req, res));
+    return;
+  }
+  handleRequest(req, res);
+});
+
+function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
   const { pathname, query }: ParsedQuery = parseQuery(req.url || '/');
 
   try {
@@ -417,9 +329,13 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
 
     if (pathname === '/api/reindex') {
       if (!requireMethod(req, res, 'POST')) return;
-      const result: IndexAllResult = indexAll(db, config);
-      try { analyzeAll(db); } catch (e: unknown) { console.error('Insights recompute error:', (e as Error).message); }
-      return json(res, { ok: true, sessions: result.sessions, events: result.events });
+      const requestId: number = nextReindexId++;
+      reindexRequests.set(requestId, (m) => {
+        if (m.error || !m.result) return json(res, { error: m.error || 'Reindex failed' }, 500);
+        json(res, { ok: true, sessions: m.result.sessions, events: m.result.events });
+      });
+      indexWorker.postMessage({ type: 'reindex', requestId });
+      return;
     }
 
     else if (pathname === '/api/health') {
@@ -430,6 +346,7 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
         status: 'ok',
         version: pkg.version,
         uptime: Math.round(process.uptime()),
+        indexing: !indexReady,
         sessions,
         dbSizeBytes: dbSize.bytes,
         node: process.version
@@ -1062,7 +979,7 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
     console.error(err);
     json(res, { error: (err as Error).message }, 500);
   }
-});
+}
 
 if (!isLoopbackHost(HOST) && !AUTH_TOKEN && process.env.AGENTACTA_ALLOW_UNAUTHENTICATED_NETWORK !== '1') {
   console.error('Refusing to bind AgentActa on a non-loopback host without auth. Set AGENTACTA_AUTH_TOKEN, or set AGENTACTA_ALLOW_UNAUTHENTICATED_NETWORK=1 if this is an intentional trusted-network exposure.');
