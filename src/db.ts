@@ -148,7 +148,7 @@ export function init(dbPath?: string): void {
   // Bump INDEX_VERSION when the parser starts deriving new fields from the
   // same source lines; clearing index_state makes the next pass re-parse all.
   db.exec("CREATE TABLE IF NOT EXISTS agentacta_meta (key TEXT PRIMARY KEY, value TEXT)");
-  const INDEX_VERSION = 2; // 2: Claude ai-title/custom-title labels, thread-prompt summaries
+  const INDEX_VERSION = 3; // 2: Claude ai-title/custom-title labels, thread-prompt summaries; 3: skip attachment lines
   const row = db.prepare("SELECT value FROM agentacta_meta WHERE key = 'index_version'").get() as { value: string } | undefined;
   if (!row || Number(row.value) < INDEX_VERSION) {
     db.exec("DELETE FROM index_state");

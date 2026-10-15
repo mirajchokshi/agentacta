@@ -222,10 +222,11 @@ function isSummaryCandidate(text: string | null): boolean {
 function summarySource(text: string): string {
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   if (lines.length > 1 && /(oldest first|recent messages[^:]*):\s*\)?$/i.test(lines[0])) {
-    // Newest message first; skip ones that are only an attachment or file path.
+    // Newest message first; skip attachment markers, bare file paths and the
+    // "Attached file(s), read them with the Read tool:" line that precedes them.
     for (let i = lines.length - 1; i >= 1; i--) {
       const msg = lines[i].replace(/^[A-Z][\w .'-]{0,30}:\s+/, '');
-      if (msg.length > 3 && !/^(\[[^\]]*attachment[^\]]*\]|[~/][^\s]*)$/i.test(msg)) return msg;
+      if (msg.length > 3 && !/^(\[[^\]]*attachment[^\]]*\]|[~/][^\s]*|attached files?(\(s\))?[^:]*:)$/i.test(msg)) return msg;
     }
   }
   return text;

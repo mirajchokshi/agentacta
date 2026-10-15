@@ -201,7 +201,7 @@ describe('subagent indexing', () => {
 
     const fp2 = path.join(TMP, 'claude-thread', 'thread2.jsonl');
     writeJsonl(fp2, [
-      { type: 'user', sessionId: 'cc-thread2', uuid: 'th-2', timestamp: '2026-10-01T00:00:00Z', message: { role: 'user', content: '(Fresh session. Recent messages in this thread, oldest first:\nMiraj: Update the stack list please\nMiraj: /home/me/.local/state/inbox/IMG_1.png' } },
+      { type: 'user', sessionId: 'cc-thread2', uuid: 'th-2', timestamp: '2026-10-01T00:00:00Z', message: { role: 'user', content: '(Fresh session. Recent messages in this thread, oldest first:\nMiraj: Update the stack list please\n[iMessage attachment: IMG_1.png]\nAttached file(s), read them with the Read tool:\n/home/me/.local/state/inbox/IMG_1.png' } },
     ]);
     indexFile(db, fp2, 'claude-code', stmts, false, {} as never);
     assert.strictEqual((db.prepare('SELECT summary FROM sessions WHERE id = ?').get('cc-thread2') as SessionRow).summary, 'Update the stack list please');
