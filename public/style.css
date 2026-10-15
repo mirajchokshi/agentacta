@@ -604,11 +604,16 @@ code, pre, .mono { font-family: var(--font-mono); }
    transform by re-running layout, which re-laid out the whole session list
    every frame while anything was live. This one stays on the compositor. */
 .sicon-live { position: relative; }
+/* Drawn at its largest size (the old r=3.5, 1.5px-stroke circle scaled 2.3x)
+   and scaled down, so the compositor never enlarges a small bitmap; centered
+   with transforms so it isn't snapped off the dot. */
 .sicon-live::after {
-  content: ''; position: absolute; inset: 3.75px; border: 1.5px solid currentColor; border-radius: 50%;
-  animation: live-ring 1.8s ease-out infinite; will-change: transform, opacity; pointer-events: none;
+  content: ''; position: absolute; left: 50%; top: 50%; width: 19.55px; height: 19.55px; box-sizing: border-box;
+  border: 3.45px solid currentColor; border-radius: 50%; pointer-events: none;
+  transform: translate(-50%, -50%) scale(0.4348); opacity: 0;
+  animation: live-ring 1.8s ease-out infinite; will-change: transform, opacity;
 }
-@keyframes live-ring { 0% { transform: scale(1); opacity: 0.7; } 100% { transform: scale(2.3); opacity: 0; } }
+@keyframes live-ring { 0% { transform: translate(-50%, -50%) scale(0.4348); opacity: 0.7; } 100% { transform: translate(-50%, -50%) scale(1); opacity: 0; } }
 .sicon-stale { color: var(--amber); }
 .sicon-done { color: var(--text-tertiary); opacity: 0.75; }
 .sicon-failed { color: var(--red); }
