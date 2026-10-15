@@ -148,23 +148,41 @@ function requireMethod(req: http.IncomingMessage, res: http.ServerResponse, meth
   return false;
 }
 
+// Static files are small and change only on deploy: keep each one (and its
+// gzip) in memory keyed by mtime, and answer revalidations with 304 via ETag.
+// no-cache keeps every load checking in, so a deploy is picked up at once.
+const staticCache: Map<string, { mtimeMs: number; size: number; etag: string; body: Buffer; gz: Buffer | null }> = new Map();
+
+function sendFile(req: http.IncomingMessage, res: http.ServerResponse, fp: string, stat: fs.Stats): void {
+  const type: string = MIME[path.extname(fp)] || 'application/octet-stream';
+  let entry = staticCache.get(fp);
+  if (!entry || entry.mtimeMs !== stat.mtimeMs || entry.size !== stat.size) {
+    const body: Buffer = fs.readFileSync(fp);
+    const compressible: boolean = /^(text\/|application\/(javascript|json|manifest\+json)|image\/svg)/.test(type);
+    entry = { mtimeMs: stat.mtimeMs, size: stat.size, etag: `"${stat.size.toString(36)}-${Math.floor(stat.mtimeMs).toString(36)}"`, body, gz: compressible ? zlib.gzipSync(body, { level: 9 }) : null };
+    staticCache.set(fp, entry);
+  }
+  const headers: Record<string, string> = { 'Content-Type': type, 'ETag': entry.etag, 'Cache-Control': 'no-cache' };
+  if (entry.gz) headers['Vary'] = 'Accept-Encoding';
+  if (req.headers['if-none-match'] === entry.etag) { res.writeHead(304, headers); res.end(); return; }
+  if (entry.gz && acceptsGzip(req)) {
+    res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip' });
+    res.end(entry.gz);
+    return;
+  }
+  res.writeHead(200, headers);
+  res.end(entry.body);
+}
+
 function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const reqUrl: string = req.url || '/';
   const fp: string | null = resolveStaticPath(PUBLIC, reqUrl.split('?')[0]);
   if (!fp) { res.writeHead(403); res.end(); return true; }
-  if (fs.existsSync(fp) && fs.statSync(fp).isFile()) {
-    const ext: string = path.extname(fp);
-    const type: string = MIME[ext] || 'application/octet-stream';
-    if (/^(text\/|application\/(javascript|json|manifest\+json)|image\/svg)/.test(type) && acceptsGzip(req)) {
-      res.writeHead(200, { 'Content-Type': type, 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
-      fs.createReadStream(fp).pipe(zlib.createGzip({ level: 6 })).pipe(res);
-      return true;
-    }
-    res.writeHead(200, { 'Content-Type': type });
-    fs.createReadStream(fp).pipe(res);
-    return true;
-  }
-  return false;
+  let stat: fs.Stats;
+  try { stat = fs.statSync(fp); } catch { return false; }
+  if (!stat.isFile()) return false;
+  sendFile(req, res, fp, stat);
+  return true;
 }
 
 function parseQuery(url: string): ParsedQuery {
@@ -971,8 +989,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
     else if (!serveStatic(req, res)) {
       const index: string = path.join(PUBLIC, 'index.html');
       if (fs.existsSync(index)) {
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        fs.createReadStream(index).pipe(res);
+        sendFile(req, res, index, fs.statSync(index));
       } else {
         json(res, { error: 'Not found' }, 404);
       }
