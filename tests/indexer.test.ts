@@ -136,7 +136,7 @@ describe('indexer', () => {
         payload: {
           id: 'codex-symphony-1',
           timestamp: '2026-03-12T04:55:54.828Z',
-          cwd: '/home/mirajrc/symphony-workspaces/HON-6',
+          cwd: '/home/user/symphony-workspaces/TASK-1',
           originator: 'symphony-orchestrator',
           source: 'vscode',
           model_provider: 'openai'
@@ -154,7 +154,7 @@ describe('indexer', () => {
     assert.match(sess.summary!, /source=vscode/);
 
     const projects = JSON.parse(sess.projects!) as string[];
-    assert.ok(projects.includes('HON-6'));
+    assert.ok(projects.includes('TASK-1'));
   });
 
   it('indexes direct codex sessions with direct type and cwd project attribution', () => {
@@ -165,7 +165,7 @@ describe('indexer', () => {
         payload: {
           id: 'codex-direct-1',
           timestamp: '2026-03-12T04:55:54.828Z',
-          cwd: '/home/mirajrc/Developer/mosaic',
+          cwd: '/home/user/Developer/sample-app',
           originator: 'codex_cli_rs',
           source: 'cli',
           model_provider: 'openai'
@@ -181,7 +181,7 @@ describe('indexer', () => {
     assert.strictEqual(sess.session_type, 'codex-direct');
 
     const projects = JSON.parse(sess.projects!) as string[];
-    assert.ok(projects.includes('mosaic'));
+    assert.ok(projects.includes('sample-app'));
   });
 
   it('lists nested jsonl files only when recursive is enabled', () => {
