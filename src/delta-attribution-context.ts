@@ -36,7 +36,8 @@ export function loadDeltaAttributionContext(
       .filter((row: EventRow): boolean => row != null && row.type === 'tool_result')
       .map((row: EventRow): string => extractCallBaseId(row.id))
       .filter(Boolean)
-      .map((base: string): string => `${base}:call`)
+      // Codex calls are stored as <id>:call, Claude Code calls under the bare id.
+      .flatMap((base: string): string[] => [`${base}:call`, base])
   )];
 
   if (!callIds.length) return neighborhoodRows;

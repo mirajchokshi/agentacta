@@ -216,6 +216,10 @@ code, pre, .mono { font-family: var(--font-mono); }
 }
 .brand-mark svg { width: 16px; height: 16px; fill: #fff; }
 .sidebar h1 span { color: var(--text-secondary); font-weight: 500; }
+.brand-link { display: flex; align-items: center; color: inherit; text-decoration: none; border-radius: 6px; margin: -3px -6px; padding: 3px 6px; transition: background var(--duration-fast); }
+.brand-link:hover { background: var(--bg-hover); }
+.brand-link:active { background: var(--bg-active); }
+.brand-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .theme-toggle,
 .mobile-search-btn,
@@ -600,8 +604,20 @@ code, pre, .mono { font-family: var(--font-mono); }
 .sicon { display: inline-flex; flex-shrink: 0; width: 16px; height: 16px; }
 .sicon svg { overflow: visible; }
 .sicon-live { color: var(--green); }
-.sicon-live .ring { transform-box: fill-box; transform-origin: center; animation: live-ring 1.8s ease-out infinite; }
-@keyframes live-ring { 0% { transform: scale(1); opacity: 0.7; } 100% { transform: scale(2.3); opacity: 0; } }
+/* The pulse is an HTML ring, not an SVG circle: Chrome animates an SVG child's
+   transform by re-running layout, which re-laid out the whole session list
+   every frame while anything was live. This one stays on the compositor. */
+.sicon-live { position: relative; }
+/* Drawn at its largest size (the old r=3.5, 1.5px-stroke circle scaled 2.3x)
+   and scaled down, so the compositor never enlarges a small bitmap; centered
+   with transforms so it isn't snapped off the dot. */
+.sicon-live::after {
+  content: ''; position: absolute; left: 50%; top: 50%; width: 19.55px; height: 19.55px; box-sizing: border-box;
+  border: 3.45px solid currentColor; border-radius: 50%; pointer-events: none;
+  transform: translate(-50%, -50%) scale(0.4348); opacity: 0;
+  animation: live-ring 1.8s ease-out infinite; will-change: transform, opacity;
+}
+@keyframes live-ring { 0% { transform: translate(-50%, -50%) scale(0.4348); opacity: 0.7; } 100% { transform: translate(-50%, -50%) scale(1); opacity: 0; } }
 .sicon-stale { color: var(--amber); }
 .sicon-done { color: var(--text-tertiary); opacity: 0.75; }
 .sicon-failed { color: var(--red); }
@@ -1189,12 +1205,14 @@ code, pre, .mono { font-family: var(--font-mono); }
 .cmdk-item-title { font-size: 13.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cmdk-item-sub { font-size: 12px; color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cmdk-item-meta { flex-shrink: 0; font-size: 12px; color: var(--text-tertiary); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.cmdk-list.is-busy { opacity: 0.6; transition: opacity 0.15s 0.1s; }
+.cmdk-item mark { background: var(--accent-medium); color: inherit; border-radius: 2px; padding: 0 1px; }
 .cmdk-empty, .cmdk-loading { padding: 28px 14px; text-align: center; color: var(--text-tertiary); font-size: 13px; }
 .cmdk-empty h4 { color: var(--text-secondary); font-size: 14px; margin-bottom: 4px; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
-  .sicon-live .ring { animation: none; opacity: 0; }
+  .sicon-live::after { animation: none; opacity: 0; }
 }
 
 /* Touch: no hover to discover rows, so show the affordance at rest and
@@ -1279,6 +1297,8 @@ a, button, select, summary, [role="link"], .nav-item, .session-item, .file-item 
 
   .session-list, .file-list { margin-inline: calc(-1 * var(--space-sm)); }
   .session-list { display: block; }
+  /* Block layout here (no shared columns), so off-screen rows can be skipped. */
+  .session-item, .subagent-row { content-visibility: auto; contain-intrinsic-size: auto 64px; }
   .session-item {
     grid-template-columns: auto minmax(0, 1fr) auto auto;
     grid-template-areas: "icon main action go" ". facts facts go";
@@ -1346,7 +1366,9 @@ a, button, select, summary, [role="link"], .nav-item, .session-item, .file-item 
 
   .cmdk-overlay { align-items: center; padding: calc(env(safe-area-inset-top, 0px) + 12px) 12px calc(env(safe-area-inset-bottom, 0px) + 12px); }
   .cmdk-dialog { width: calc(100vw - 32px); max-height: min(72vh, calc(100vh - 52px)); }
-  .cmdk-input-wrap kbd, .cmdk-item-sub { display: none; }
+  .cmdk-input-wrap kbd { display: none; }
+  /* Narrow screens: let a result wrap to two lines so the match isn't cut off. */
+  .cmdk-item-title { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 }
 
 

@@ -22,6 +22,7 @@ import type {
 } from './types.js';
 import { open, init, createStmts } from './db.js';
 import { loadConfig } from './config.js';
+import { storeSessionAttribution } from './attribution-store.js';
 
 const REINDEX: boolean = process.argv.includes('--reindex');
 const WATCH: boolean = process.argv.includes('--watch');
@@ -274,6 +275,30 @@ function extractToolCalls(msg: unknown): ExtractedToolCall[] {
     }));
 }
 
+// Claude Code tool output: { role: 'user', content: [{ type: 'tool_result',
+// tool_use_id, content: string | [{ type: 'text', text }, { type: 'image' }] }] }.
+function extractToolResultBlocks(msg: unknown): ExtractedToolResult[] {
+  const m = msg as Record<string, unknown>;
+  if (!m || !Array.isArray(m.content)) return [];
+  const out: ExtractedToolResult[] = [];
+  for (const b of m.content as Array<Record<string, unknown>>) {
+    if (!b || b.type !== 'tool_result') continue;
+    const c = b.content;
+    const text = typeof c === 'string' ? c
+      : Array.isArray(c) ? (c as Array<Record<string, unknown>>).filter(x => x && x.type === 'text' && typeof x.text === 'string').map(x => x.text as string).join('\n')
+      : '';
+    const isError = b.is_error === true ? 1 : 0;
+    if (!text && !isError) continue; // image-only output: nothing to show or search
+    out.push({ toolCallId: String(b.tool_use_id || ''), toolName: '', content: text.slice(0, 10000), isError });
+  }
+  return out;
+}
+
+function hasTextBlocks(msg: unknown): boolean {
+  const m = msg as Record<string, unknown>;
+  return Array.isArray(m.content) && (m.content as ContentBlock[]).some(b => b && b.type === 'text' && !!b.text);
+}
+
 function extractToolResult(msg: unknown): ExtractedToolResult | null {
   if (!msg) return null;
   const m = msg as Record<string, unknown>;
@@ -281,7 +306,8 @@ function extractToolResult(msg: unknown): ExtractedToolResult | null {
     const content = Array.isArray(m.content)
       ? (m.content as ContentBlock[]).map(b => b.text || '').join('\n')
       : (typeof m.content === 'string' ? m.content : '');
-    return { toolCallId: (m.toolCallId as string) || '', toolName: (m.toolName as string) || '', content: content.slice(0, 10000) };
+    const isError = typeof m.isError === 'boolean' ? (m.isError ? 1 : 0) : null;
+    return { toolCallId: (m.toolCallId as string) || '', toolName: (m.toolName as string) || '', content: content.slice(0, 10000), isError };
   }
   return null;
 }
@@ -466,6 +492,7 @@ function indexCronRunFile(db: Database.Database, filePath: string, agentName: st
     );
 
     stmts.upsertState.run(filePath, 1, mtime);
+    storeSessionAttribution(db, sessionId);
   });
 
   commitIndex();
@@ -612,7 +639,8 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
   }
 
   // --- Parse the entire file BEFORE any DB operations ---
-  const pendingEvents: Array<[string, string, string, string, string, string | null, string | null, string | null, string | null]> = [];
+  const pendingEvents: Array<[string, string, string, string, string, string | null, string | null, string | null, string | null, number | null]> = [];
+  const toolNameById = new Map<string, string>(); // tool call id -> name, for results that only carry the id
   const fileActivities: Array<[string, string, string, string]> = [];
   const projectCounts: Map<string, number> = new Map();
 
@@ -670,7 +698,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
           const toolName = p.name || p.tool_name || '';
           const toolArgs = typeof p.arguments === 'string' ? p.arguments : JSON.stringify(p.arguments || {});
           const callBaseId = p.call_id || p.id || eventId;
-          pendingEvents.push([`${callBaseId}:call`, sessionId as string, ts, 'tool_call', 'assistant', null, toolName, toolArgs, null]);
+          pendingEvents.push([`${callBaseId}:call`, sessionId as string, ts, 'tool_call', 'assistant', null, toolName, toolArgs, null, null]);
           toolCount++;
 
           const fps = extractFilePaths(toolName, toolArgs);
@@ -686,7 +714,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
         if (p.type === 'function_call_output') {
           const output = (typeof p.output === 'string' ? p.output : JSON.stringify(p.output || '')).slice(0, 10000);
           const resultBaseId = p.call_id || p.id || eventId;
-          pendingEvents.push([`${resultBaseId}:result`, sessionId as string, ts, 'tool_result', 'tool', output, p.name || p.tool_name || '', null, output]);
+          pendingEvents.push([`${resultBaseId}:result`, sessionId as string, ts, 'tool_result', 'tool', output, p.name || p.tool_name || '', null, output, null]);
           sessionEnd = ts;
           continue;
         }
@@ -696,7 +724,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
           const role = rawRole === 'assistant' ? 'assistant' : 'user';
           const content = extractCodexMessageText(p.content);
           if (content) {
-            pendingEvents.push([p.id || eventId, sessionId as string, ts, 'message', role, content, null, null, null]);
+            pendingEvents.push([p.id || eventId, sessionId as string, ts, 'message', role, content, null, null, null, null]);
             msgCount++;
             if (!summary && role === 'user' && isSummaryCandidate(content)) summary = summarySource(content).slice(0, 200);
             if (!initialPrompt && role === 'user' && isSummaryCandidate(content)) {
@@ -716,14 +744,14 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
         const eventId = `evt-${p.type || 'event'}-${Date.parse(ts) || Math.random()}`;
 
         if (p.type === 'agent_message' && p.message) {
-          pendingEvents.push([eventId, sessionId as string, ts, 'message', 'assistant', p.message, null, null, null]);
+          pendingEvents.push([eventId, sessionId as string, ts, 'message', 'assistant', p.message, null, null, null, null]);
           msgCount++;
           sessionEnd = ts;
           continue;
         }
 
         if (p.type === 'user_message' && p.message) {
-          pendingEvents.push([eventId, sessionId as string, ts, 'message', 'user', p.message, null, null, null]);
+          pendingEvents.push([eventId, sessionId as string, ts, 'message', 'user', p.message, null, null, null, null]);
           msgCount++;
           if (!summary && isSummaryCandidate(p.message)) summary = summarySource(p.message).slice(0, 200);
           if (!initialPrompt && isSummaryCandidate(p.message)) {
@@ -798,15 +826,23 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
 
       const tr = extractToolResult(msg);
       if (tr) {
-        pendingEvents.push([eventId, sessionId as string, ts as string, 'tool_result', 'tool', tr.content, tr.toolName, null, tr.content]);
+        pendingEvents.push([eventId, sessionId as string, ts as string, 'tool_result', 'tool', tr.content, tr.toolName, null, tr.content, tr.isError]);
         continue;
       }
+
+      // Claude Code returns tool output as a user message of tool_result blocks.
+      const blockResults = extractToolResultBlocks(msg);
+      // The text is stored once (content); Claude Code says whether it failed.
+      blockResults.forEach((r, i) => {
+        pendingEvents.push([r.toolCallId ? `${r.toolCallId}:result` : `${eventId}:${i}:result`, sessionId as string, ts as string, 'tool_result', 'tool', r.content, toolNameById.get(r.toolCallId) || '', null, null, r.isError]);
+      });
+      if (blockResults.length && !hasTextBlocks(msg)) continue;
 
       const content = extractContent(msg);
       const role = (msg.role as string) || 'unknown';
 
       if (content) {
-        pendingEvents.push([eventId, sessionId as string, ts as string, 'message', role, content, null, null, null]);
+        pendingEvents.push([eventId, sessionId as string, ts as string, 'message', role, content, null, null, null, null]);
         msgCount++;
         // Better summary: skip heartbeat/boilerplate messages
         if (!summary && role === 'user' && isSummaryCandidate(content)) {
@@ -822,7 +858,8 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
 
       const tools = extractToolCalls(msg);
       for (const tool of tools) {
-        pendingEvents.push([tool.id || `${eventId}-${tool.name}`, sessionId as string, ts as string, 'tool_call', role, null, tool.name, tool.args, null]);
+        if (tool.id) toolNameById.set(tool.id, tool.name);
+        pendingEvents.push([tool.id || `${eventId}-${tool.name}`, sessionId as string, ts as string, 'tool_call', role, null, tool.name, tool.args, null, null]);
         toolCount++;
 
         // File activity tracking
@@ -907,6 +944,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
     }
 
     stmts.upsertState.run(sourceKey, lines.length, stateToken);
+    storeSessionAttribution(db, sessionId as string);
   });
 
   commitIndex();

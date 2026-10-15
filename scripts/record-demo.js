@@ -154,10 +154,17 @@ async function walkthrough(cdp) {
   console.log('  scene: search');
   await run('openCmdk()');
   await sleep(700);
-  for (const ch of 'forecast') { await cdp.send('Input.insertText', { text: ch }); await sleep(90); }
-  await sleep(2200);
+  // Words from a test run's output: the match is inside a tool result.
+  for (const ch of 'forecast returns') { await cdp.send('Input.insertText', { text: ch }); await sleep(90); }
+  await sleep(1800);
+  const firstMatch = `[...document.querySelectorAll('.cmdk-group-label')].find(l => l.textContent === 'Matches')?.nextElementSibling`;
+  await run(`(()=>{const el=${firstMatch}; if(el) el.dataset.demoTarget='1'})()`);
+  await hover('[data-demo-target]');
+  await sleep(1000);
+  await run(`document.querySelector('[data-demo-target]')?.click()`);
+  await sleep(3200);
   await key('Escape');
-  await sleep(500);
+  await sleep(1200);
 
   console.log('  scene: light theme');
   await run(`document.querySelector('[data-view="overview"]').click()`);

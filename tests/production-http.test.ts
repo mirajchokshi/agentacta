@@ -164,6 +164,44 @@ describe('production HTTP routes', () => {
     assert.ok(data.sessions.length >= 1);
   });
 
+  it('pages a session\'s events with ?limit while the shape covers all of them', async () => {
+    const full = JSON.parse((await request('/api/sessions/production-http-session')).body) as { events: Array<Record<string, unknown>>; eventTotal: number; shape: { tools: unknown[]; activity: unknown } };
+    assert.strictEqual(full.events.length, full.eventTotal);
+    assert.ok(full.shape && Array.isArray(full.shape.tools), 'shape is included');
+    const page = JSON.parse((await request('/api/sessions/production-http-session?limit=1')).body) as typeof full;
+    assert.strictEqual(page.events.length, Math.min(1, full.eventTotal));
+    assert.strictEqual(page.eventTotal, full.eventTotal);
+    assert.deepStrictEqual(page.shape, full.shape);
+    for (const key of ['session_id', 'tool_result', 'project_confidence']) assert.ok(!(key in page.events[0]), `${key} is not sent in a limited page`);
+    assert.ok('session_id' in full.events[0], 'the unlimited response keeps every field');
+  });
+
+  it('serves older session events after a cursor', async () => {
+    const full = JSON.parse((await request('/api/sessions/production-http-session')).body) as { events: Array<{ id: string; timestamp: string }> };
+    const first = full.events[0];
+    const older = JSON.parse((await request(`/api/sessions/production-http-session?before=${encodeURIComponent(`${first.timestamp}|${first.id}`)}&limit=500`)).body) as { events: Array<{ id: string }>; hasMore: boolean };
+    assert.deepStrictEqual(older.events.map(e => e.id), full.events.slice(1).map(e => e.id));
+    assert.strictEqual(older.hasMore, false);
+  });
+
+  it('pages the session list with offset', async () => {
+    const first = JSON.parse((await request('/api/sessions?roots=1&limit=1&offset=0')).body) as { sessions: Array<{ id: string }>; total: number };
+    const second = JSON.parse((await request('/api/sessions?roots=1&limit=1&offset=1')).body) as typeof first;
+    assert.ok(first.total >= 2);
+    assert.notStrictEqual(first.sessions[0].id, second.sessions[0].id);
+  });
+
+  it('revalidates static files with an ETag', async () => {
+    const etag = await new Promise<string>((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port: PORT, path: '/app.js' }, r => { r.resume(); r.on('end', () => resolve(String(r.headers.etag))); }).on('error', reject);
+    });
+    assert.ok(etag && etag !== 'undefined');
+    const status = await new Promise<number | undefined>((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port: PORT, path: '/app.js', headers: { 'If-None-Match': etag } }, r => { r.resume(); resolve(r.statusCode); }).on('error', reject);
+    });
+    assert.strictEqual(status, 304);
+  });
+
   it('reports per-day and per-agent activity for the viewer\'s timezone', async () => {
     const data = JSON.parse((await request('/api/activity?days=14&tz=0')).body) as { today: string; days: Array<{ day: string; events: number }>; agents: unknown[] };
     assert.strictEqual(data.days.length, 14);

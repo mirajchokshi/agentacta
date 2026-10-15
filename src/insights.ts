@@ -73,10 +73,11 @@ export function analyzeSession(db: Database.Database, sessionId: string): Insigh
   // 3. high_error_rate: >30% of tool calls returned errors
   const toolResults = events.filter((e: EventRow) => e.type === 'tool_result');
   if (toolResults.length > 0) {
+    // Trust the log's own error flag; guess from the text only when it has none.
     const errorResults = toolResults.filter((e: EventRow) => {
+      if (e.is_error != null) return e.is_error === 1;
       const c = (e.content || e.tool_result || '').toLowerCase();
-      return c.includes('error') || c.includes('Error') || c.includes('ERROR') ||
-             c.includes('failed') || c.includes('exception');
+      return c.includes('error') || c.includes('failed') || c.includes('exception');
     });
     const errorRate: number = errorResults.length / toolResults.length;
     if (errorRate > 0.3) {
@@ -183,6 +184,43 @@ export function analyzeAll(db: Database.Database): InsightResult[] {
 
   runAll();
   return results;
+}
+
+// Bump when analyzeSession's scoring changes so stored rows are recomputed once.
+export const INSIGHTS_VERSION = 2; // 2: error rate uses is_error
+
+// Startup path: a session's insights depend only on its own rows, so only
+// sessions that were (re)indexed or have no stored insights need analyzing.
+// Scoring every session took most of a cold start on large histories.
+export function analyzeChanged(db: Database.Database, changedIds: Iterable<string>): number {
+  db.exec("CREATE TABLE IF NOT EXISTS agentacta_meta (key TEXT PRIMARY KEY, value TEXT)");
+  const row = db.prepare("SELECT value FROM agentacta_meta WHERE key = 'insights_version'").get() as { value: string } | undefined;
+  if (!row || Number(row.value) !== INSIGHTS_VERSION) {
+    const n = analyzeAll(db).length;
+    db.prepare("INSERT OR REPLACE INTO agentacta_meta (key, value) VALUES ('insights_version', ?)").run(String(INSIGHTS_VERSION));
+    return n;
+  }
+  const missing = db.prepare(
+    'SELECT s.id FROM sessions s LEFT JOIN session_insights si ON si.session_id = s.id WHERE si.session_id IS NULL'
+  ).all() as Array<{ id: string }>;
+  const ids = new Set<string>(changedIds);
+  for (const m of missing) ids.add(m.id);
+  if (!ids.size) return 0;
+  const upsert = db.prepare(`
+    INSERT OR REPLACE INTO session_insights
+    (session_id, signals, confusion_score, flagged, computed_at)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+  let n = 0;
+  db.transaction(() => {
+    for (const id of ids) {
+      const result: InsightResult | null = analyzeSession(db, id);
+      if (!result) continue;
+      upsert.run(result.session_id, JSON.stringify(result.signals), result.confusion_score, result.flagged ? 1 : 0, result.computed_at);
+      n++;
+    }
+  })();
+  return n;
 }
 
 export function getInsightsSummary(db: Database.Database): InsightsSummary {

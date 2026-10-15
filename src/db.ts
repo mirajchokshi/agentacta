@@ -14,8 +14,15 @@ export function open(dbPath?: string): Database.Database {
   const db = new Database(p);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  // Events are written with INSERT OR REPLACE; without this the implicit delete
+  // of a replaced row skips the events_ad trigger and leaves a stale full-text
+  // entry behind (wrong matches, and snippet() fails on them).
+  db.pragma('recursive_triggers = ON');
   return db;
 }
+
+// Bump to rebuild the full-text index once on existing databases.
+export const FTS_VERSION = 2;
 
 export function init(dbPath?: string): void {
   const db = open(dbPath);
@@ -56,8 +63,14 @@ export function init(dbPath?: string): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_sessions_start_time ON sessions(start_time DESC);
-    CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
-    CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
+    -- A session's events in order, with what its summary needs (shape, tool
+    -- counts), so opening a session reads bodies only for the page it shows.
+    CREATE INDEX IF NOT EXISTS idx_events_session_order ON events(session_id, timestamp, id, type, tool_name);
+    DROP INDEX IF EXISTS idx_events_session;
+    -- Covers the day/agent activity rollups (timestamp range, type, session)
+    -- so they never read event bodies; also serves plain timestamp ranges.
+    CREATE INDEX IF NOT EXISTS idx_events_ts_cover ON events(timestamp, type, session_id);
+    DROP INDEX IF EXISTS idx_events_timestamp;
     CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
     CREATE INDEX IF NOT EXISTS idx_events_tool_name ON events(tool_name);
 
@@ -114,6 +127,24 @@ export function init(dbPath?: string): void {
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 
+    -- Stored project attribution (see attribution-store.ts): only attributed
+    -- events have a row; session_attr marks sessions computed at a version.
+    -- Clustered by session, so writing, counting and joining one session's
+    -- rows touches one contiguous range and needs no second index.
+    CREATE TABLE IF NOT EXISTS event_attr (
+      session_id TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      project TEXT NOT NULL,
+      confidence INTEGER NOT NULL,
+      PRIMARY KEY (session_id, event_id),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    ) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS session_attr (
+      session_id TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_insights_flagged ON session_insights(flagged);
     CREATE INDEX IF NOT EXISTS idx_insights_score ON session_insights(confusion_score DESC);
 
@@ -132,6 +163,10 @@ export function init(dbPath?: string): void {
   if (!colNames.includes('cache_write_tokens')) db.exec("ALTER TABLE sessions ADD COLUMN cache_write_tokens INTEGER DEFAULT 0");
   if (!colNames.includes('initial_prompt')) db.exec("ALTER TABLE sessions ADD COLUMN initial_prompt TEXT");
   if (!colNames.includes('first_message_id')) db.exec("ALTER TABLE sessions ADD COLUMN first_message_id TEXT");
+  // Whether a tool result was an error, when the log says so (1/0); NULL
+  // when the format doesn't record it and readers fall back to the text.
+  const eventCols: string[] = (db.prepare("PRAGMA table_info(events)").all() as PragmaColumnRow[]).map((c: PragmaColumnRow) => c.name);
+  if (!eventCols.includes('is_error')) db.exec("ALTER TABLE events ADD COLUMN is_error INTEGER");
   if (!colNames.includes('first_message_timestamp')) db.exec("ALTER TABLE sessions ADD COLUMN first_message_timestamp TEXT");
   if (!colNames.includes('models')) db.exec("ALTER TABLE sessions ADD COLUMN models TEXT");
   if (!colNames.includes('projects')) db.exec("ALTER TABLE sessions ADD COLUMN projects TEXT");
@@ -148,7 +183,12 @@ export function init(dbPath?: string): void {
   // Bump INDEX_VERSION when the parser starts deriving new fields from the
   // same source lines; clearing index_state makes the next pass re-parse all.
   db.exec("CREATE TABLE IF NOT EXISTS agentacta_meta (key TEXT PRIMARY KEY, value TEXT)");
-  const INDEX_VERSION = 3; // 2: Claude ai-title/custom-title labels, thread-prompt summaries; 3: skip attachment lines
+  // A new database's full-text index is already consistent: mark it current
+  // so the worker's one-time rebuild (see index-worker.ts) skips it.
+  const hasEvents = !!db.prepare('SELECT 1 FROM events LIMIT 1').get();
+  if (!hasEvents) db.prepare("INSERT OR IGNORE INTO agentacta_meta (key, value) VALUES ('fts_version', ?)").run(String(FTS_VERSION));
+
+  const INDEX_VERSION = 5; // 2: Claude ai-title/custom-title labels, thread-prompt summaries; 3: skip attachment lines; 4: Claude Code tool_result blocks; 5: is_error
   const row = db.prepare("SELECT value FROM agentacta_meta WHERE key = 'index_version'").get() as { value: string } | undefined;
   if (!row || Number(row.value) < INDEX_VERSION) {
     db.exec("DELETE FROM index_state");
@@ -165,7 +205,7 @@ export function createStmts(db: Database.Database): PreparedStatements {
     deleteEvents: db.prepare('DELETE FROM events WHERE session_id = ?'),
     deleteSession: db.prepare('DELETE FROM sessions WHERE id = ?'),
     deleteFileActivity: db.prepare('DELETE FROM file_activity WHERE session_id = ?'),
-    insertEvent: db.prepare(`INSERT OR REPLACE INTO events (id, session_id, timestamp, type, role, content, tool_name, tool_args, tool_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+    insertEvent: db.prepare(`INSERT OR REPLACE INTO events (id, session_id, timestamp, type, role, content, tool_name, tool_args, tool_result, is_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     upsertSession: db.prepare(`INSERT OR REPLACE INTO sessions (id, start_time, end_time, message_count, tool_count, model, summary, agent, session_type, total_cost, total_tokens, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, initial_prompt, first_message_id, first_message_timestamp, models, projects) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     setSessionLineage: db.prepare('UPDATE sessions SET parent_id = ?, label = ?, source_status = ? WHERE id = ?'),
     upsertState: db.prepare(`INSERT OR REPLACE INTO index_state (file_path, last_offset, last_modified) VALUES (?, ?, ?)`),

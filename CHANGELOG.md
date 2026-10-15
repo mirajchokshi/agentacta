@@ -1,5 +1,25 @@
 # Changelog
 
+## [2026.10.15] - 2026-10-15
+
+### Added
+- **Search everything as you type**: ⌘K (or Ctrl+K, or `/`) finds sessions by title, prompt or id, files by path, and the text of messages, tool calls and tool output. Every word has to match, in any order, and the last word matches as a prefix from 3 letters. Matches show a highlighted snippet, and picking one opens the session at that event. `GET /api/find?q=` returns the same results.
+- **Claude Code tool output is indexed**: what each tool returned (command output, file contents, search results) is now searchable and shown under its call. Before, only the calls were stored.
+- **Benchmark** (`bench/`): a reproducible comparison with agentsview and Langfuse on the same synthetic history, in Docker, removed by `bench/teardown.sh`. Results are in the README.
+- The wordmark goes to the Overview.
+
+### Changed
+- **Starts serving right away**: indexing, file watching and insight scoring run in a worker thread, so the dashboard answers from the existing index at once (about 0.1 s instead of 1.8 s on a large history) and stays responsive while big logs are written. Insights re-scores only the sessions that changed.
+- **Large sessions open fast**: a session page loads its newest 150 events and pages in older ones as you scroll. Project attribution is stored at index time, so a 100,000-event session's first page takes about 60 ms on the server instead of over 500 ms. `GET /api/sessions/:id?limit=N` and `?before=<timestamp>|<id>` page events.
+- **Lists page as you scroll**: the sessions list loads 50 at a time, and the Files view builds a folder's rows when it opens.
+- **Faster charts and first paint**: the activity rollups read a covering index, fonts no longer block the first paint, and static files are cached with ETags.
+- **Errors come from the log**: Insights' error rate and the context API's recent errors use the error flag Claude Code and OpenClaw record for each tool result. Formats without one still fall back to matching words like "error" in the output.
+- Index format version 5: existing installs re-read every source once on first start.
+
+### Fixed
+- Search missed events whose text was replaced after indexing (the full-text index is rebuilt once on upgrade).
+- Live updates for a project-filtered session could lose a tool result's project when its call was far back in the session.
+
 ## [2026.10.14] - 2026-10-14
 
 ### Added

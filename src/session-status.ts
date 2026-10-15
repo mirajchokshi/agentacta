@@ -88,3 +88,29 @@ export function attachChildren<T extends SessionTreeNode>(roots: T[], pool: T[],
   for (const r of roots) visit(r, new Set());
   return roots;
 }
+
+// The session page's "shape": events over the session in 12-40 time buckets,
+// and tool-call counts by raw tool name. Computed here from every event so the
+// page can open with only its first page of events.
+export interface SessionShape {
+  activity: { startMs: number; endMs: number; counts: number[] } | null;
+  tools: Array<[string, number]>;
+}
+
+export function sessionShape(session: Pick<SessionRow, 'start_time' | 'end_time'>, eventsNewestFirst: Array<{ timestamp: string; type: string; tool_name: string | null }>): SessionShape {
+  const startMs = Date.parse(session.start_time);
+  const endMs = Date.parse(session.end_time || '') || (eventsNewestFirst.length ? Date.parse(eventsNewestFirst[0].timestamp) : startMs);
+  const durMs = Math.max(0, endMs - startMs);
+  const stamped = eventsNewestFirst.map(e => Date.parse(e.timestamp)).filter(t => Number.isFinite(t) && t >= startMs);
+  let activity: SessionShape['activity'] = null;
+  if (stamped.length >= 6 && durMs >= 60000) {
+    const n = Math.min(40, Math.max(12, Math.round(durMs / 60000)));
+    const step = durMs / n;
+    const counts = new Array<number>(n).fill(0);
+    for (const t of stamped) counts[Math.min(n - 1, Math.floor((t - startMs) / step))]++;
+    activity = { startMs, endMs, counts };
+  }
+  const tools = new Map<string, number>();
+  for (const e of eventsNewestFirst) if (e.type === 'tool_call' && e.tool_name) tools.set(e.tool_name, (tools.get(e.tool_name) || 0) + 1);
+  return { activity, tools: [...tools.entries()] };
+}

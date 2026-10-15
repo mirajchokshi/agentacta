@@ -54,7 +54,7 @@ describe('delta attribution context', () => {
       null,
       'Read',
       JSON.stringify({ file_path: '/home/dev/Developer/proj-a/src/a.js' }),
-      null
+      null, null
     );
     stmts.insertEvent.run(
       'ctx-msg-1',
@@ -65,7 +65,7 @@ describe('delta attribution context', () => {
       'continuing update',
       null,
       null,
-      null
+      null, null
     );
   });
 
@@ -111,5 +111,16 @@ describe('delta attribution context', () => {
 
     const context = loadDeltaAttributionContext(db, 'delta-ctx-sess-1', deltaRows);
     assert.ok(context.some((row: EventRow) => row.id === 'ctx-call-1:call'));
+  });
+
+  it('finds Claude Code calls stored under the bare tool_use id', () => {
+    stmts.insertEvent.run('toolu_far', 'delta-ctx-sess-1', '2026-03-12T09:00:00.000Z', 'tool_call', 'assistant', null, 'Read',
+      JSON.stringify({ file_path: '/home/dev/Developer/proj-a/src/far.js' }), null, null);
+    const deltaRows: EventRow[] = [{
+      id: 'toolu_far:result', session_id: 'delta-ctx-sess-1', timestamp: '2026-03-12T10:02:00.000Z',
+      type: 'tool_result', role: 'tool', content: 'ok', tool_name: 'Read', tool_args: null, tool_result: null
+    }];
+    const context = loadDeltaAttributionContext(db, 'delta-ctx-sess-1', deltaRows);
+    assert.ok(context.some((row: EventRow) => row.id === 'toolu_far'), 'linked call outside the neighborhood');
   });
 });

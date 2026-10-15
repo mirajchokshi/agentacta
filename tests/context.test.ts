@@ -72,12 +72,12 @@ describe('context api', () => {
       0.01, 200, 100, 100, 0, 0, 'test prompt', 'msg-3', '2025-06-03T09:00:00Z', null, null);
 
     // Events
-    stmts.insertEvent.run('ctx-evt-1', 'ctx-sess-1', '2025-06-01T10:05:00Z', 'tool_call', null, null, 'Read', '{"path":"/home/user/myrepo/auth.js"}', null);
-    stmts.insertEvent.run('ctx-evt-2', 'ctx-sess-1', '2025-06-01T10:10:00Z', 'tool_result', null, null, 'Edit', null, 'Error: file not found /home/user/myrepo/missing.js');
-    stmts.insertEvent.run('ctx-evt-3', 'ctx-sess-1', '2025-06-01T10:15:00Z', 'tool_call', null, null, 'Edit', '{"path":"/home/user/myrepo/auth.js"}', null);
-    stmts.insertEvent.run('ctx-evt-4', 'ctx-sess-2', '2025-06-02T14:10:00Z', 'tool_call', null, null, 'Read', '{"path":"/home/user/myrepo/auth.js"}', null);
-    stmts.insertEvent.run('ctx-evt-5', 'ctx-sess-2', '2025-06-02T14:20:00Z', 'tool_call', null, null, 'Write', '{"path":"/home/user/myrepo/login.js"}', null);
-    stmts.insertEvent.run('ctx-evt-6', 'ctx-sess-2', '2025-06-02T14:30:00Z', 'tool_result', null, null, 'Bash', null, 'ERROR: test failed');
+    stmts.insertEvent.run('ctx-evt-1', 'ctx-sess-1', '2025-06-01T10:05:00Z', 'tool_call', null, null, 'Read', '{"path":"/home/user/myrepo/auth.js"}', null, null);
+    stmts.insertEvent.run('ctx-evt-2', 'ctx-sess-1', '2025-06-01T10:10:00Z', 'tool_result', null, null, 'Edit', null, 'Error: file not found /home/user/myrepo/missing.js', null);
+    stmts.insertEvent.run('ctx-evt-3', 'ctx-sess-1', '2025-06-01T10:15:00Z', 'tool_call', null, null, 'Edit', '{"path":"/home/user/myrepo/auth.js"}', null, null);
+    stmts.insertEvent.run('ctx-evt-4', 'ctx-sess-2', '2025-06-02T14:10:00Z', 'tool_call', null, null, 'Read', '{"path":"/home/user/myrepo/auth.js"}', null, null);
+    stmts.insertEvent.run('ctx-evt-5', 'ctx-sess-2', '2025-06-02T14:20:00Z', 'tool_call', null, null, 'Write', '{"path":"/home/user/myrepo/login.js"}', null, null);
+    stmts.insertEvent.run('ctx-evt-6', 'ctx-sess-2', '2025-06-02T14:30:00Z', 'tool_result', null, null, 'Bash', null, 'ERROR: test failed', null);
 
     // File activity
     stmts.insertFileActivity.run('ctx-sess-1', '/home/user/myrepo/auth.js', 'read', '2025-06-01T10:05:00Z');

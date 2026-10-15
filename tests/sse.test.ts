@@ -43,7 +43,7 @@ describe('SSE endpoint', () => {
 
     stmts.upsertSession.run('sse-sess-1', '2025-01-01T00:00:00Z', '2025-01-01T00:02:00Z',
       1, 0, 'test-model', 'test sse', 'main', null, 0, 0, 0, 0, 0, 0, null, null, null, null, null);
-    stmts.insertEvent.run('sse-evt-1', 'sse-sess-1', '2025-01-01T00:01:00Z', 'message', 'user', 'hello', null, null, null);
+    stmts.insertEvent.run('sse-evt-1', 'sse-sess-1', '2025-01-01T00:01:00Z', 'message', 'user', 'hello', null, null, null, null);
 
     const jsonRes = (res: http.ServerResponse, d: unknown, s = 200): void => { res.writeHead(s, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(d)); };
 
@@ -155,7 +155,7 @@ describe('SSE endpoint', () => {
       // Insert a new event and emit after short delay
       setTimeout(() => {
         stmts.insertEvent.run('sse-evt-2', 'sse-sess-1', '2025-01-01T00:03:00Z',
-          'message', 'assistant', 'world', null, null, null);
+          'message', 'assistant', 'world', null, null, null, null);
         sseEmitter.emit('session-update', 'sse-sess-1');
       }, 100);
     });
@@ -193,7 +193,7 @@ describe('SSE endpoint', () => {
 
       setTimeout(() => {
         stmts.insertEvent.run('sse-evt-3', 'sse-sess-1', '2025-01-01T00:05:00Z',
-          'message', 'user', 'reconnect test', null, null, null);
+          'message', 'user', 'reconnect test', null, null, null, null);
         sseEmitter.emit('session-update', 'sse-sess-1');
       }, 100);
     });
@@ -228,9 +228,9 @@ describe('SSE endpoint', () => {
 
       setTimeout(() => {
         stmts.insertEvent.run('sse-evt-4', 'sse-sess-1', '2025-01-01T00:06:00Z',
-          'message', 'assistant', 'already seen', null, null, null);
+          'message', 'assistant', 'already seen', null, null, null, null);
         stmts.insertEvent.run('sse-evt-5', 'sse-sess-1', '2025-01-01T00:06:00Z',
-          'message', 'assistant', 'same timestamp new event', null, null, null);
+          'message', 'assistant', 'same timestamp new event', null, null, null, null);
         sseEmitter.emit('session-update', 'sse-sess-1');
       }, 100);
     });

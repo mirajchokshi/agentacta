@@ -329,6 +329,7 @@ function handleRoute() {
   const raw = (window.location.hash || '').slice(1) || 'overview';
   if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
   if (window._timelineScrollHandler) { window.removeEventListener('scroll', window._timelineScrollHandler); window._timelineScrollHandler = null; }
+  if (window._sessionsObserver) { window._sessionsObserver.disconnect(); window._sessionsObserver = null; }
 
   if (raw.startsWith('session/')) {
     const id = decodeURIComponent(raw.slice('session/'.length));
@@ -523,7 +524,7 @@ function statusIcon(s) {
   else if (s.status === 'stale') { kind = 'stale'; label = 'Stale: never recorded an end'; }
   else if (s.ended_reason === 'source' && s.source_status && !/^(done|completed?)$/i.test(s.source_status)) { kind = 'failed'; label = s.source_status; }
   const g = {
-    live: '<circle class="ring" cx="8" cy="8" r="3.5"/><circle cx="8" cy="8" r="3.5" fill="currentColor" stroke="none"/>',
+    live: '<circle cx="8" cy="8" r="3.5" fill="currentColor" stroke="none"/>', // pulse ring: .sicon-live::after
     stale: '<circle cx="8" cy="8" r="5.5" stroke-dasharray="2.4 2.2"/>',
     done: '<circle cx="8" cy="8" r="5.5"/><path d="M5.7 8.2l1.6 1.6 3.1-3.3"/>',
     failed: '<circle cx="8" cy="8" r="6" fill="currentColor" stroke="none"/><path d="M6 6l4 4M10 6l-4 4" stroke="var(--bg-surface)"/>',
@@ -679,7 +680,12 @@ async function viewSessions() {
     content.innerHTML = `<div class="page-title">Sessions</div>${skeletonRows(4, 'session')}`;
     transitionView();
   }
-  const data = await api('/sessions?limit=200&roots=1');
+  // The first page is small so the list paints fast; older sessions load in
+  // pages as the reader nears the end. A restored list refreshes as many rows
+  // as it had, so Back keeps its place.
+  const PAGE = 50;
+  const shown = restored ? content.querySelectorAll('.session-list > .session-item, .session-list > .session-group').length : 0;
+  const data = await api(`/sessions?limit=${Math.max(PAGE, shown)}&roots=1`);
   if (!stillOn('sessions')) return;
   if (data._error) {
     if (restored) return;
@@ -689,16 +695,53 @@ async function viewSessions() {
 
   let html = `<header class="page-head"><h1 class="page-title">Sessions</h1><span class="page-count">${data.total.toLocaleString()} top-level</span></header>`;
   html += renderSessionList(data.sessions, { tree: true });
+  html += `<div id="sessionsMore" class="loading-more"${data.sessions.length >= data.total ? ' hidden' : ''}>Loading older sessions…</div>`;
   if (restored) renderInPlace(html);
   else { content.innerHTML = html; transitionView(); }
+
+  const state = { loaded: data.sessions.length, total: data.total, loading: false };
+  const loadOlder = async () => {
+    if (state.loading || state.loaded >= state.total) return;
+    state.loading = true;
+    const page = await api(`/sessions?limit=${PAGE}&offset=${state.loaded}&roots=1`);
+    state.loading = false;
+    if (!stillOn('sessions')) return;
+    if (page._error) {
+      // The observer only fires on enter/leave; re-arm it so a failed page retries.
+      setTimeout(() => { const m = $('#sessionsMore'); if (m && window._sessionsObserver) { window._sessionsObserver.unobserve(m); window._sessionsObserver.observe(m); } }, 3000);
+      return;
+    }
+    state.loaded += page.sessions.length;
+    state.total = page.total;
+    const list = content.querySelector('.session-list');
+    // New sessions shift offsets while paging; skip any already on screen.
+    const fresh = page.sessions.filter(s => !content.querySelector(`.session-item[data-id="${CSS.escape(s.id)}"]`));
+    if (list && fresh.length) list.insertAdjacentHTML('beforeend', fresh.map(renderSessionTree).join(''));
+    const more = $('#sessionsMore');
+    if (!page.sessions.length || state.loaded >= state.total) {
+      more?.setAttribute('hidden', '');
+      window._sessionsObserver?.disconnect();
+    } else if (more) {
+      // Still in range after this page? Observe again to get a fresh callback.
+      window._sessionsObserver?.unobserve(more);
+      window._sessionsObserver?.observe(more);
+    }
+  };
+  // Watching the "loading" line (well before it's on screen) avoids reading
+  // layout on every scroll event, which forced a full relayout per page.
+  window._sessionsObserver?.disconnect();
+  const more = $('#sessionsMore');
+  if (!more || more.hidden) return;
+  window._sessionsObserver = new IntersectionObserver(entries => {
+    if (entries.some(e => e.isIntersecting) && stillOn('sessions')) loadOlder();
+  }, { rootMargin: '0px 0px 1500px 0px' });
+  window._sessionsObserver.observe(more);
 }
 
 // At-a-glance picture of one session: the numbers, when it was busy, and
-// what it spent its tool calls on. Built from the events already loaded.
-function renderSessionShape(s, events) {
-  const startMs = Date.parse(s.start_time);
-  const endMs = Date.parse(s.end_time || '') || (events.length ? Date.parse(events[0].timestamp) : startMs);
-  const durMs = Math.max(0, endMs - startMs);
+// what it spent its tool calls on. The server summarizes every event (shape),
+// so this doesn't wait for the full event list.
+function renderSessionShape(s, shape) {
   const tokens = s.output_tokens ? (s.output_tokens + (s.input_tokens || 0) + (s.cache_read_tokens || 0)) : (s.total_tokens || 0);
   let html = renderStatTiles([
     { label: 'Duration', value: s.end_time || s.status === 'live' ? fmtDuration(s.start_time, s.end_time || null) : '\u2013' },
@@ -707,12 +750,11 @@ function renderSessionShape(s, events) {
     { label: 'Tokens', value: fmtCompact(tokens), title: `${tokens.toLocaleString()} tokens${s.output_tokens ? ` (${s.output_tokens.toLocaleString()} output)` : ''}`, note: s.output_tokens ? `${fmtCompact(s.output_tokens)} output` : '' },
   ]);
 
-  const stamped = events.map(e => Date.parse(e.timestamp)).filter(t => Number.isFinite(t) && t >= startMs);
-  if (stamped.length >= 6 && durMs >= 60000) {
-    const n = Math.min(40, Math.max(12, Math.round(durMs / 60000)));
-    const step = durMs / n;
-    const counts = new Array(n).fill(0);
-    for (const t of stamped) counts[Math.min(n - 1, Math.floor((t - startMs) / step))]++;
+  const activity = shape?.activity;
+  if (activity) {
+    const { startMs, endMs, counts } = activity;
+    const durMs = endMs - startMs;
+    const step = durMs / counts.length;
     const fmt = ms => new Date(ms).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
     const points = counts.map((c, i) => ({
       label: `${fmt(startMs + i * step)}\u2013${fmt(startMs + (i + 1) * step)}`,
@@ -724,9 +766,9 @@ function renderSessionShape(s, events) {
   }
 
   const toolCounts = new Map();
-  for (const e of events) if (e.type === 'tool_call' && e.tool_name) {
-    const name = fmtToolName(e.tool_name);
-    toolCounts.set(name, (toolCounts.get(name) || 0) + 1);
+  for (const [raw, count] of shape?.tools || []) {
+    const name = fmtToolName(raw);
+    toolCounts.set(name, (toolCounts.get(name) || 0) + count);
   }
   const ranked = [...toolCounts.entries()].sort((a, b) => b[1] - a[1]);
   if (ranked.length >= 2) {
@@ -738,13 +780,14 @@ function renderSessionShape(s, events) {
   return `<div class="session-shape">${html}</div>`;
 }
 
-async function viewSession(id) {
+async function viewSession(id, opts = {}) {
   rememberCurrentView();
   window.hideChartTip?.();
   clearJumpUi();
   window._recentSessionIds = [id, ...(window._recentSessionIds || []).filter(x => x !== id)].slice(0, 5);
   if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
   window._currentSessionId = id;
+  const viewToken = window._sessionView = {}; // identifies this opening of the page
   setHash('session/' + encodeURIComponent(id));
   window.scrollTo(0, 0);
   content.innerHTML = `
@@ -753,7 +796,10 @@ async function viewSession(id) {
     ${skeletonRows(8, 'event')}
   `;
   transitionView();
-  const data = await api(`/sessions/${id}`);
+  // The first page of events is enough to paint; the rest loads only when the
+  // reader scrolls near it, filters by project, or jumps to the first prompt.
+  const FIRST_PAGE = 150;
+  const data = await api(`/sessions/${id}?limit=${FIRST_PAGE}`);
 
   if (data._error || data.error) { content.innerHTML = `<div class="empty"><h2>${escHtml(data.error || 'Unable to load')}</h2></div>`; return; }
 
@@ -789,7 +835,7 @@ async function viewSession(id) {
         </span>
       </div>
     </header>
-    ${renderSessionShape(s, data.events || [])}
+    ${renderSessionShape(s, data.shape)}
     ${projectFilters.length ? `
       <div class="seg" id="sessionProjectFilters" role="group" aria-label="Filter events by project">
         <button class="filter-chip active" data-project-filter="all">All projects</button>
@@ -810,6 +856,54 @@ async function viewSession(id) {
 
   const PAGE_SIZE = 50;
   const allEvents = Array.isArray(data.events) ? [...data.events] : [];
+  const knownIds = new Set(allEvents.map(e => e.id));
+  let liveCount = 0; // events that arrived live (not in the server's eventTotal)
+  let complete = allEvents.length >= (data.eventTotal ?? allEvents.length);
+  let fullLoad = null;
+  let olderLoad = null;
+  let olderRetryAt = 0;
+  // Appends everything older than the loaded page. Newer events keep arriving
+  // through the live channel, so only the older tail is taken from here.
+  const ensureAllEvents = () => {
+    if (complete) return Promise.resolve();
+    // Let an older-page request land first so the two don't fetch the same events.
+    if (olderLoad) return olderLoad.then(ensureAllEvents);
+    if (!fullLoad) {
+      fullLoad = api(`/sessions/${id}`).then(full => {
+        // On failure, wait before allowing another try instead of refetching
+        // in a loop from the scroll handler.
+        if (full._error || !Array.isArray(full.events)) { setTimeout(() => { fullLoad = null; }, 5000); return; }
+        const oldest = allEvents[allEvents.length - 1];
+        const at = oldest ? full.events.findIndex(e => e.id === oldest.id) : -1;
+        const older = (at >= 0 ? full.events.slice(at + 1) : full.events).filter(e => !knownIds.has(e.id));
+        for (const e of older) { knownIds.add(e.id); allEvents.push(e); }
+        complete = true;
+        updateEventsLabel();
+        syncScrollHandler();
+      });
+    }
+    return fullLoad;
+  };
+  // Scrolling pulls older events a page at a time from the oldest one loaded,
+  // so even a very long session never downloads all of it just to scroll.
+  const loadOlderPage = () => {
+    if (complete) return Promise.resolve();
+    if (fullLoad) return fullLoad;
+    if (olderLoad) return olderLoad;
+    if (Date.now() < olderRetryAt) return Promise.resolve(); // backing off after a failure
+    const oldest = allEvents[allEvents.length - 1];
+    if (!oldest) return ensureAllEvents();
+    olderLoad = api(`/sessions/${id}?before=${encodeURIComponent(`${oldest.timestamp}|${oldest.id}`)}&limit=500`).then(page => {
+      olderLoad = null;
+      if (page._error || !Array.isArray(page.events)) { olderRetryAt = Date.now() + 5000; return; }
+      if (complete) return;
+      for (const e of page.events) if (!knownIds.has(e.id)) { knownIds.add(e.id); allEvents.push(e); }
+      if (!page.hasMore) complete = true;
+      updateEventsLabel();
+      syncScrollHandler();
+    });
+    return olderLoad;
+  };
   let activeProjectFilter = 'all';
   let rendered = 0;
   let onScroll = null;
@@ -823,7 +917,8 @@ async function viewSession(id) {
   const updateEventsLabel = () => {
     const el = $('#sessionEventsLabel');
     if (!el) return;
-    const count = getFilteredEvents().length;
+    // Before the rest loads: the server's total plus anything that arrived live.
+    const count = complete ? getFilteredEvents().length : (data.eventTotal || 0) + liveCount;
     if (activeProjectFilter === 'all') {
       el.textContent = `Events (${count})`;
       return;
@@ -837,8 +932,12 @@ async function viewSession(id) {
     empty.style.display = getFilteredEvents().length ? 'none' : 'block';
   };
 
-  const setProjectFilter = (nextFilter) => {
-    if (nextFilter === activeProjectFilter) return;
+  let requestedFilter = 'all';
+  const setProjectFilter = async (nextFilter) => {
+    requestedFilter = nextFilter;
+    if (nextFilter !== 'all') await ensureAllEvents();
+    // A later click wins if it came in while the events were loading.
+    if (requestedFilter !== nextFilter || nextFilter === activeProjectFilter) return;
     activeProjectFilter = nextFilter;
     const chips = $$('#sessionProjectFilters .filter-chip');
     chips.forEach(node => node.classList.toggle('active', node.dataset.projectFilter === activeProjectFilter));
@@ -866,7 +965,7 @@ async function viewSession(id) {
 
   const syncScrollHandler = () => {
     const total = getFilteredEvents().length;
-    if (total <= rendered) {
+    if (total <= rendered && complete) {
       if (onScroll) {
         window.removeEventListener('scroll', onScroll);
         onScroll = null;
@@ -878,14 +977,23 @@ async function viewSession(id) {
 
     let loading = false;
     onScroll = () => {
-      if (loading || rendered >= getFilteredEvents().length) return;
+      if (loading) return;
+      // Fetch the rest a page ahead of need so scrolling never waits on it.
+      if (!complete && rendered >= allEvents.length - PAGE_SIZE) loadOlderPage();
       const scrollBottom = window.innerHeight + window.scrollY;
       const threshold = document.body.offsetHeight - 300;
       if (scrollBottom >= threshold) {
+        if (rendered >= getFilteredEvents().length) {
+          if (complete) return;
+          loading = true;
+          const before = allEvents.length;
+          loadOlderPage().then(() => { loading = false; if (allEvents.length > before && onScroll) onScroll(); });
+          return;
+        }
         loading = true;
         renderBatch();
         loading = false;
-        if (rendered >= getFilteredEvents().length) {
+        if (rendered >= getFilteredEvents().length && complete) {
           window.removeEventListener('scroll', onScroll);
           onScroll = null;
         }
@@ -969,85 +1077,84 @@ async function viewSession(id) {
     }
   });
 
+  // Scroll to one event (loading and rendering as far as needed), highlight it,
+  // and offer a way back. Used by "Initial prompt" and by search matches.
+  const revealEvent = async (eventId, { offerReturn = true, openDetails = false } = {}) => {
+    const fromY = window.scrollY || window.pageYOffset || 0;
+    const here = () => window._sessionView === viewToken; // stop if the reader moved on
+    const has = () => allEvents.some(ev => ev.id === eventId);
+    // Page toward the target by cursor; fall back to the full list if paging stalls.
+    while (!has() && !complete && here()) {
+      const before = allEvents.length;
+      await loadOlderPage();
+      if (allEvents.length === before) break;
+    }
+    if (!has() && here()) await ensureAllEvents();
+    if (!here()) return false;
+    // Resolve from full session context, not just project-filtered events.
+    if (!getFilteredEvents().some(ev => ev.id === eventId) && activeProjectFilter !== 'all') {
+      setProjectFilter('all');
+    }
+    // Let button state paint before heavy DOM work.
+    await new Promise(requestAnimationFrame);
+    // Render only as far as the target, in chunks so the UI stays responsive.
+    const sel = `[data-event-id="${CSS.escape(eventId)}"]`;
+    let loops = 0;
+    while (here() && !document.querySelector(sel) && rendered < getFilteredEvents().length) {
+      renderBatch();
+      loops += 1;
+      if (loops % 2 === 0) await new Promise(requestAnimationFrame);
+    }
+    if (!here()) return false;
+    syncScrollHandler();
+    const target = document.querySelector(sel);
+    if (!target) return false;
+    // A match inside tool arguments or output sits in a collapsed block.
+    if (openDetails) target.querySelectorAll('details').forEach(d => { d.open = true; });
+
+    const targetY = Math.max(0, target.getBoundingClientRect().top + window.scrollY - (window.innerHeight * 0.35));
+    const useSmooth = Math.abs(targetY - window.scrollY) < 1800;
+    window.scrollTo({ top: targetY, behavior: useSmooth ? 'smooth' : 'auto' });
+    await new Promise(r => setTimeout(r, useSmooth ? 500 : 120));
+    target.classList.add('event-highlight');
+    setTimeout(() => target.classList.remove('event-highlight'), 2000);
+    if (!offerReturn) return true;
+
+    let returnBtn = document.getElementById('returnJumpBtn');
+    if (!returnBtn) {
+      returnBtn = document.createElement('button');
+      returnBtn.id = 'returnJumpBtn';
+      returnBtn.className = 'return-jump-btn';
+      returnBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"></path><polyline points="5 12 12 5 19 12"></polyline></svg>`;
+      returnBtn.setAttribute('aria-label', 'Back to previous spot');
+      returnBtn.title = 'Back to previous spot';
+      document.body.appendChild(returnBtn);
+    }
+    returnBtn.classList.add('show');
+    returnBtn.onclick = () => {
+      window.scrollTo({ top: fromY, behavior: 'smooth' });
+      returnBtn.classList.remove('show');
+    };
+    setTimeout(() => { if (returnBtn) returnBtn.classList.remove('show'); }, 9000);
+    return true;
+  };
+
   const jumpBtn = $('#jumpToStartBtn');
   if (jumpBtn) {
     jumpBtn.addEventListener('click', async () => {
-      const fromY = window.scrollY || window.pageYOffset || 0;
-      const firstMessageId = s.first_message_id;
-
+      if (!s.first_message_id) return;
       jumpBtn.classList.add('jumping');
       jumpBtn.disabled = true;
-
-      if (!firstMessageId) {
-        jumpBtn.classList.remove('jumping');
-        jumpBtn.disabled = false;
-        return;
-      }
-
-      // Resolve from full session context, not just project-filtered events.
-      const inCurrentFilter = getFilteredEvents().some(ev => ev.id === firstMessageId);
-      if (!inCurrentFilter && activeProjectFilter !== 'all') {
-        setProjectFilter('all');
-      }
-
-      // Let button state paint before heavy DOM work.
-      await new Promise(requestAnimationFrame);
-
-      // Load remaining events in chunks so UI stays responsive.
-      let loops = 0;
-      while (rendered < getFilteredEvents().length) {
-        renderBatch();
-        loops += 1;
-        if (loops % 2 === 0) await new Promise(requestAnimationFrame);
-      }
-
-      const firstMessage = document.querySelector(`[data-event-id="${firstMessageId}"]`);
-      if (!firstMessage) {
-        jumpBtn.classList.remove('jumping');
-        jumpBtn.disabled = false;
-        return;
-      }
-
-      const targetY = Math.max(0, firstMessage.getBoundingClientRect().top + fromY - (window.innerHeight * 0.35));
-      const distance = Math.abs(targetY - fromY);
-      const useSmooth = distance < 1800;
-
-      window.scrollTo({ top: targetY, behavior: useSmooth ? 'smooth' : 'auto' });
-
-      const doneDelay = useSmooth ? 500 : 120;
-      setTimeout(() => {
-        firstMessage.classList.add('event-highlight');
-        setTimeout(() => firstMessage.classList.remove('event-highlight'), 2000);
-
-        jumpBtn.classList.remove('jumping');
-        jumpBtn.disabled = false;
-
-        let returnBtn = document.getElementById('returnJumpBtn');
-        if (!returnBtn) {
-          returnBtn = document.createElement('button');
-          returnBtn.id = 'returnJumpBtn';
-          returnBtn.className = 'return-jump-btn';
-          returnBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"></path><polyline points="5 12 12 5 19 12"></polyline></svg>`;
-          returnBtn.setAttribute('aria-label', 'Back to previous spot');
-          returnBtn.title = 'Back to previous spot';
-          document.body.appendChild(returnBtn);
-        }
-        returnBtn.classList.add('show');
-
-        returnBtn.onclick = () => {
-          window.scrollTo({ top: fromY, behavior: 'smooth' });
-          returnBtn.classList.remove('show');
-        };
-
-        setTimeout(() => {
-          if (returnBtn) returnBtn.classList.remove('show');
-        }, 9000);
-      }, doneDelay);
+      await revealEvent(s.first_message_id);
+      jumpBtn.classList.remove('jumping');
+      jumpBtn.disabled = false;
     });
   }
 
+  // Opened from a search match: go straight to it.
+  if (opts.eventId) revealEvent(opts.eventId, { offerReturn: false, openDetails: true });
+
   // --- Lightweight realtime updates (polling fallback first) ---
-  const knownIds = new Set(allEvents.map(e => e.id));
 
   const applyIncomingEvents = (incoming) => {
     const container = document.getElementById('eventsContainer');
@@ -1059,6 +1166,7 @@ async function viewSession(id) {
 
     // Delta endpoint returns oldest -> newest, and view is newest-first.
     for (const ev of fresh) allEvents.unshift(ev);
+    liveCount += fresh.length;
 
     const visibleFresh = activeProjectFilter === 'all'
       ? fresh
@@ -1686,16 +1794,17 @@ function renderFiles() {
             <span class="file-group-stat">${dirFiles.length} files</span>
             <span class="file-group-stat">${groupStat}</span>
           </button>
-          <div class="file-group-items" hidden>
-            ${dirFiles.map(f => renderFileItem(f)).join('')}
-          </div>
+          <div class="file-group-items" hidden></div>
         </div>`;
     }).join('');
 
+    // A folder's rows are built the first time it opens; most stay closed.
+    const filesByDir = new Map(sortedGroups);
     $$('.file-group-header').forEach(h => {
       h.addEventListener('click', () => {
         const items = h.nextElementSibling;
         const open = items.hasAttribute('hidden');
+        if (open && !items.childElementCount) items.innerHTML = filesByDir.get(h.dataset.dir).map(f => renderFileItem(f)).join('');
         items.toggleAttribute('hidden', !open);
         h.setAttribute('aria-expanded', String(open));
       });
@@ -1724,10 +1833,8 @@ function renderFiles() {
 
   $('#groupToggle').addEventListener('click', () => { window._fileGrouped = !window._fileGrouped; renderFiles(); });
 
-  $$('.file-item').forEach(item => {
-    item.addEventListener('click', () => viewFileDetail(item.dataset.path));
-    item.addEventListener('keydown', e => { if (e.key === 'Enter') viewFileDetail(item.dataset.path); });
-  });
+  listEl.addEventListener('click', e => { const item = e.target.closest('.file-item'); if (item) viewFileDetail(item.dataset.path); });
+  listEl.addEventListener('keydown', e => { const item = e.target.closest('.file-item'); if (item && e.key === 'Enter') viewFileDetail(item.dataset.path); });
 
   searchInput.addEventListener('keyup', () => { window._fileCursorPos = searchInput.selectionStart; });
 }
@@ -1935,10 +2042,20 @@ $$('.nav-item').forEach(item => {
   });
 });
 
+// The wordmark goes to the Overview, the same way its tab does. Modified
+// clicks fall through to the link so it can open in a new tab.
+$('.brand-link').addEventListener('click', (e) => {
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+  e.preventDefault();
+  $('.nav-item[data-view="overview"]').click();
+});
+
 // --- Command Palette (Cmd+K) ---
 window._cmdk = { open: false, index: 0, items: [], scrollY: 0 };
 
 function closeCmdk() {
+  cmdkSeq++; // drop any search still in flight
+  cmdkQueued = null;
   const el = $('#cmdkOverlay');
   if (el) el.remove();
 
@@ -1973,8 +2090,8 @@ function renderCmdkList() {
     }
     html += `<button type="button" class="cmdk-item ${i === index ? 'active' : ''}" data-i="${i}">
       <div class="cmdk-item-body">
-        <div class="cmdk-item-title">${escHtml(item.title)}</div>
-        ${item.sub ? `<div class="cmdk-item-sub">${escHtml(item.sub)}</div>` : ''}
+        <div class="cmdk-item-title">${item.titleHtml || escHtml(item.title)}</div>
+        ${item.subHtml || item.sub ? `<div class="cmdk-item-sub">${item.subHtml || escHtml(item.sub)}</div>` : ''}
       </div>
       ${item.meta ? `<span class="cmdk-item-meta">${escHtml(item.meta)}</span>` : ''}
     </button>`;
@@ -1996,8 +2113,10 @@ function renderCmdkList() {
       if (!btn) return;
       const idx = Number(btn.dataset.i || -1);
       if (idx >= 0 && idx !== window._cmdk.index) {
+        // Move the highlight only; rebuilding the list on every hover was wasteful.
+        list.querySelector('.cmdk-item.active')?.classList.remove('active');
+        btn.classList.add('active');
         window._cmdk.index = idx;
-        renderCmdkList();
       }
     });
 
@@ -2009,50 +2128,86 @@ function renderCmdkList() {
   if (active) active.scrollIntoView({ block: 'nearest' });
 }
 
+// Highlight each query word in plain text: split the raw text on the
+// matches and escape each piece, so a word can't land inside an entity.
+function markText(text, q) {
+  const words = (q || '').trim().split(/\s+/).map(w => w.replace(/^"|"$/g, '')).filter(w => w.length >= 2).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (!words.length) return escHtml(text || '');
+  return (text || '').split(new RegExp(`(${words.join('|')})`, 'gi'))
+    .map((part, i) => (i % 2 ? `<mark>${escHtml(part)}</mark>` : escHtml(part))).join('');
+}
+// Server snippets wrap matches in \u0002 \u0003. Escape the text, then mark,
+// keeping marks balanced even if indexed text itself holds those characters.
+// Tool arguments are stored as JSON text, so only for them unescape \n \t \".
+function markSnippet(snippet, { json = false } = {}) {
+  let text = snippet || '';
+  if (json) text = text.replace(/\\[nrt]/g, ' ').replace(/\\"/g, '"');
+  let open = false;
+  let html = '';
+  for (const piece of text.split(/([\u0002\u0003])/)) {
+    if (piece === '\u0002') { if (!open) { html += '<mark>'; open = true; } }
+    else if (piece === '\u0003') { if (open) { html += '</mark>'; open = false; } }
+    else html += escHtml(piece);
+  }
+  return (open ? html + '</mark>' : html).replace(/\s+/g, ' ');
+}
+
+// Search as you type. A response for an older query is dropped, and the
+// previous results stay up (dimmed) until the new ones arrive.
+let cmdkSeq = 0;
+let cmdkInFlight = false;
+let cmdkQueued = null;
 async function loadCmdkResults(query) {
   const list = $('#cmdkList');
   if (!list) return;
   const q = (query || '').trim();
-  if (!q) { loadCmdkHome(); return; }
+  const seq = ++cmdkSeq;
+  if (!q) { cmdkQueued = null; loadCmdkHome(); return; }
 
-  list.innerHTML = '<div class="cmdk-loading">Searching\u2026</div>';
+  if (window._cmdk.items.length && !list.querySelector('.cmdk-loading')) list.classList.add('is-busy');
+  else list.innerHTML = '<div class="cmdk-loading">Searching…</div>';
 
-  const [searchRes, sessionsRes, filesRes] = await Promise.all([
-    api(`/search?q=${encodeURIComponent(q)}&limit=6`),
-    api('/sessions?limit=20'),
-    api('/files?limit=20')
-  ]);
-
+  // One request in flight at a time: typing during it queues only the latest
+  // query, so the server never works through a backlog of stale keystrokes.
+  if (cmdkInFlight) { cmdkQueued = query; return; }
+  cmdkInFlight = true;
+  const res = await api(`/find?q=${encodeURIComponent(query)}`);
+  cmdkInFlight = false;
+  $('#cmdkList')?.classList.remove('is-busy');
+  if (cmdkQueued !== null) {
+    const next = cmdkQueued;
+    cmdkQueued = null;
+    loadCmdkResults(next);
+    return;
+  }
+  if (seq !== cmdkSeq || !$('#cmdkList')) return;
   const items = [];
 
-  (sessionsRes.sessions || [])
-    .filter(s => cleanSessionSummary(s.summary, s.initial_prompt).toLowerCase().includes(q.toLowerCase()))
-    .slice(0, 3)
-    .forEach(s => items.push({
+  (res.sessions || []).forEach(s => {
+    const title = s.label || cleanSessionSummary(s.summary, s.initial_prompt);
+    items.push({
       group: 'Sessions',
-      title: truncate(cleanSessionSummary(s.summary, s.initial_prompt), 64),
-      sub: shortSessionId(s.id),
+      titleHtml: markText(truncate(title, 80), q),
+      sub: `${normalizeAgentLabel(s.agent || '') || 'session'} · ${shortSessionId(s.id)}`,
       meta: fmtTime(s.start_time),
       action: () => viewSession(s.id)
-    }));
+    });
+  });
 
-  (filesRes.files || [])
-    .filter(f => f.file_path.toLowerCase().includes(q.toLowerCase()))
-    .slice(0, 2)
-    .forEach(f => items.push({
-      group: 'Files',
-      title: f.file_path.split('/').pop(),
-      sub: f.file_path,
-      meta: `${f.touch_count} touches`,
-      action: () => viewFileDetail(f.file_path)
-    }));
+  (res.files || []).forEach(f => items.push({
+    group: 'Files',
+    titleHtml: markText(f.file_path.split('/').pop(), q),
+    subHtml: markText(f.file_path.replace(/^\/home\/[^/]+/, '~').replace(/^\/Users\/[^/]+/, '~'), q),
+    meta: `${f.touches} touch${f.touches === 1 ? '' : 'es'}`,
+    action: () => viewFileDetail(f.file_path)
+  }));
 
-  (searchRes.results || []).slice(0, 4).forEach(r => items.push({
-    group: 'Search Results',
-    title: truncate(r.content || r.tool_args || r.tool_result || '', 66),
-    sub: shortSessionId(r.session_id),
-    meta: fmtTime(r.timestamp),
-    action: () => viewSession(r.session_id)
+  (res.events || []).forEach(e => items.push({
+    group: 'Matches',
+    titleHtml: markSnippet(e.snippet, { json: e.type === 'tool_call' }),
+    sub: `${e.tool_name ? fmtToolName(e.tool_name) : (EVENT_ROLE_LABELS[e.role] || e.role || e.type)} · ${truncate(e.session_label || cleanSessionSummary(e.session_summary || '', ''), 60)}`,
+    meta: fmtTime(e.timestamp),
+    action: () => viewSession(e.session_id, { eventId: e.id })
   }));
 
   window._cmdk.items = items;
@@ -2063,6 +2218,7 @@ async function loadCmdkResults(query) {
 async function loadCmdkHome() {
   const list = $('#cmdkList');
   if (!list) return;
+  const seq = cmdkSeq;
   list.innerHTML = '<div class="cmdk-loading">Loading\u2026</div>';
 
   const items = [
@@ -2081,7 +2237,8 @@ async function loadCmdkHome() {
   const recentIds = window._recentSessionIds || [];
   const missingIds = recentIds.filter(id => !sessionMap.has(id));
   if (missingIds.length) {
-    const fetched = await Promise.all(missingIds.map(id => api(`/sessions/${id}`)));
+    // limit=1: only the session row is needed here, not its events.
+    const fetched = await Promise.all(missingIds.map(id => api(`/sessions/${id}?limit=1`)));
     fetched.forEach(r => {
       if (r && !r._error && r.session) sessionMap.set(r.session.id, r.session);
     });
@@ -2099,6 +2256,7 @@ async function loadCmdkHome() {
     });
   });
 
+  if (seq !== cmdkSeq) return; // a search started meanwhile
   sessionList.forEach(s => items.push({
     group: 'Recent Sessions',
     title: truncate(cleanSessionSummary(s.summary, s.initial_prompt), 64),
@@ -2114,6 +2272,8 @@ async function loadCmdkHome() {
 
 function openCmdk() {
   if ($('#cmdkOverlay')) { $('#cmdkInput')?.focus(); return; }
+  cmdkSeq++;
+  cmdkQueued = null;
 
   const overlay = document.createElement('div');
   overlay.className = 'cmdk-overlay';
@@ -2150,7 +2310,7 @@ function openCmdk() {
   let debounce;
   input.addEventListener('input', () => {
     clearTimeout(debounce);
-    debounce = setTimeout(() => loadCmdkResults(input.value), 150);
+    debounce = setTimeout(() => loadCmdkResults(input.value), 90);
   });
 
   overlay.addEventListener('click', e => { if (e.target === overlay) closeCmdk(); });

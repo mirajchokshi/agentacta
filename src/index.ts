@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { EventEmitter } from 'node:events';
+import { Worker } from 'node:worker_threads';
 import type Database from 'better-sqlite3';
 import type {
   AgentActaConfig,
@@ -14,10 +15,7 @@ import type {
   SearchEventRow,
   TimelineEventRow,
   CountRow,
-  IndexResult,
-  PreparedStatements,
   SessionDir,
-  IndexAllResult,
   InsightResult,
   InsightsSummary,
   SessionInsightRow,
@@ -25,16 +23,18 @@ import type {
   FileActivityRow,
   FileActivityAggRow,
   FileSessionRow,
-  AttributionResult,
 } from './types.js';
 import { loadConfig } from './config.js';
-import { open, init, createStmts } from './db.js';
-import { discoverSessionDirs, listSessionFiles, listClaudeSubagentFiles, indexFile, indexOpenClawDb, watchOpenClawDb, indexAll } from './indexer.js';
-import { attributeSessionEvents, attributeEventDelta } from './project-attribution.js';
+import { open, init } from './db.js';
+import { discoverSessionDirs } from './indexer.js';
+import type { WorkerMessage } from './index-worker.js';
+import { attributeEventDelta } from './project-attribution.js';
 import { loadDeltaAttributionContext } from './delta-attribution-context.js';
-import { analyzeSession, analyzeAll, getInsightsSummary } from './insights.js';
+import { analyzeSession, getInsightsSummary } from './insights.js';
 import { isValidDateKey, resolveStaticPath } from './http-utils.js';
 import { withStatus, attachChildren } from './session-status.js';
+import { loadSessionEvents, loadOlderSessionEvents } from './session-detail.js';
+import { quickSearch, toFtsQuery } from './search.js';
 
 // --version / -v flag: print version and exit
 if (process.argv.includes('--version') || process.argv.includes('-v')) {
@@ -146,23 +146,41 @@ function requireMethod(req: http.IncomingMessage, res: http.ServerResponse, meth
   return false;
 }
 
+// Static files are small and change only on deploy: keep each one (and its
+// gzip) in memory keyed by mtime, and answer revalidations with 304 via ETag.
+// no-cache keeps every load checking in, so a deploy is picked up at once.
+const staticCache: Map<string, { mtimeMs: number; size: number; etag: string; body: Buffer; gz: Buffer | null }> = new Map();
+
+function sendFile(req: http.IncomingMessage, res: http.ServerResponse, fp: string, stat: fs.Stats): void {
+  const type: string = MIME[path.extname(fp)] || 'application/octet-stream';
+  let entry = staticCache.get(fp);
+  if (!entry || entry.mtimeMs !== stat.mtimeMs || entry.size !== stat.size) {
+    const body: Buffer = fs.readFileSync(fp);
+    const compressible: boolean = /^(text\/|application\/(javascript|json|manifest\+json)|image\/svg)/.test(type);
+    entry = { mtimeMs: stat.mtimeMs, size: stat.size, etag: `"${stat.size.toString(36)}-${Math.floor(stat.mtimeMs).toString(36)}"`, body, gz: compressible ? zlib.gzipSync(body, { level: 9 }) : null };
+    staticCache.set(fp, entry);
+  }
+  const headers: Record<string, string> = { 'Content-Type': type, 'ETag': entry.etag, 'Cache-Control': 'no-cache' };
+  if (entry.gz) headers['Vary'] = 'Accept-Encoding';
+  if (req.headers['if-none-match'] === entry.etag) { res.writeHead(304, headers); res.end(); return; }
+  if (entry.gz && acceptsGzip(req)) {
+    res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip' });
+    res.end(entry.gz);
+    return;
+  }
+  res.writeHead(200, headers);
+  res.end(entry.body);
+}
+
 function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const reqUrl: string = req.url || '/';
   const fp: string | null = resolveStaticPath(PUBLIC, reqUrl.split('?')[0]);
   if (!fp) { res.writeHead(403); res.end(); return true; }
-  if (fs.existsSync(fp) && fs.statSync(fp).isFile()) {
-    const ext: string = path.extname(fp);
-    const type: string = MIME[ext] || 'application/octet-stream';
-    if (/^(text\/|application\/(javascript|json|manifest\+json)|image\/svg)/.test(type) && acceptsGzip(req)) {
-      res.writeHead(200, { 'Content-Type': type, 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
-      fs.createReadStream(fp).pipe(zlib.createGzip({ level: 6 })).pipe(res);
-      return true;
-    }
-    res.writeHead(200, { 'Content-Type': type });
-    fs.createReadStream(fp).pipe(res);
-    return true;
-  }
-  return false;
+  let stat: fs.Stats;
+  try { stat = fs.statSync(fp); } catch { return false; }
+  if (!stat.isFile()) return false;
+  sendFile(req, res, fp, stat);
+  return true;
 }
 
 function parseQuery(url: string): ParsedQuery {
@@ -225,19 +243,6 @@ function looksLikeSessionId(q: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
 }
 
-function toFtsQuery(q: string): string {
-  const s: string = (q || '').trim();
-  if (!s) return '';
-  // Quote each token so dashes and punctuation don't break FTS parsing.
-  // Example: abc-def -> "abc-def"
-  const tokens: string[] = s.match(/"[^"]+"|\S+/g) || [];
-  return tokens
-    .map((t: string) => t.replace(/^"|"$/g, '').replace(/"/g, '""'))
-    .filter(Boolean)
-    .map((t: string) => `"${t}"`)
-    .join(' AND ');
-}
-
 function parseEventCursor(cursor: string | undefined, fallbackAfter: string, fallbackAfterId?: string): { after: string; afterId: string | null } {
   const raw: string = (cursor || '').trim();
   if (!raw) return { after: fallbackAfter, afterId: fallbackAfterId || null };
@@ -252,10 +257,12 @@ function formatEventCursor(row: EventRow): string {
 
 // Init DB and start watcher
 init();
-const db: Database.Database = open();
+// A failed tool call: the log's own flag when it has one, else a guess from
+// the result text (LIKE is case-insensitive for ASCII).
+const TOOL_ERROR_SQL = "(is_error = 1 OR (is_error IS NULL AND tool_result LIKE '%error%'))";
 
-// Live re-indexing setup
-const stmts: PreparedStatements = createStmts(db);
+const db: Database.Database = open();
+db.pragma('busy_timeout = 5000'); // the indexer worker writes on its own connection
 
 // SSE emitter: notifies connected clients when a session is re-indexed
 const sseEmitter: EventEmitter = new EventEmitter();
@@ -263,134 +270,50 @@ sseEmitter.setMaxListeners(100);
 
 const sessionDirs: SessionDir[] = discoverSessionDirs(config);
 
-// Initial indexing pass
-for (const dir of sessionDirs) {
-  if (dir.sourceType === 'openclaw-db') {
-    try {
-      const ids: string[] = indexOpenClawDb(db, dir.path, dir.agent, stmts, ARCHIVE_MODE, config);
-      if (ids.length > 0) console.log(`Indexed ${ids.length} DB sessions from ${path.basename(dir.path)} (${dir.agent})`);
-    } catch (err: unknown) {
-      console.error(`Error indexing ${path.basename(dir.path)}:`, (err as Error).message);
+// Indexing, watching and insight scoring run in a worker so a long re-parse
+// never holds up a request. The server answers from what is already indexed;
+// only a first run (nothing indexed yet) waits for the worker's first pass.
+let indexReady: boolean = false;
+const firstRun: boolean = !db.prepare('SELECT 1 FROM sessions LIMIT 1').get();
+const indexReadyWaiters: Array<() => void> = [];
+const reindexRequests: Map<number, (m: Extract<WorkerMessage, { type: 'reindexed' }>) => void> = new Map();
+let nextReindexId: number = 1;
+const workerFile: string = path.join(__dirname, 'index-worker' + path.extname(__filename));
+let indexWorker: Worker;
+let shuttingDown: boolean = false;
+function startIndexWorker(): void {
+  // Under tsx (npm run dev, tests) the worker needs tsx's loader registered itself.
+  const worker: Worker = workerFile.endsWith('.ts')
+    ? new Worker(`require('tsx/cjs/api').register(); require(${JSON.stringify(workerFile)});`, { eval: true })
+    : new Worker(workerFile);
+  indexWorker = worker;
+  worker.unref();
+  worker.on('message', (m: WorkerMessage) => {
+    if (m.type === 'ready') {
+      indexReady = true;
+      console.log(`Index up to date (${m.changed} changed, ${m.ms} ms)`);
+      for (const fn of indexReadyWaiters.splice(0)) fn();
+    } else if (m.type === 'updated') {
+      for (const id of m.ids) sseEmitter.emit('session-update', id);
+    } else if (m.type === 'reindexed') {
+      reindexRequests.get(m.requestId)?.(m);
+      reindexRequests.delete(m.requestId);
     }
-    continue;
-  }
-  const files: string[] = listSessionFiles(dir);
-  for (const filePath of files) {
-    try {
-      const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
-      if (!result.skipped) console.log(`Indexed: ${path.basename(filePath)} (${dir.agent})`);
-    } catch (err: unknown) {
-      console.error(`Error indexing ${path.basename(filePath)}:`, (err as Error).message);
-    }
-  }
+  });
+  worker.on('error', (err: Error) => console.error('Indexer error:', err.message));
+  // A dead worker would leave reindex calls hanging and live updates silent:
+  // fail what was waiting on it and start a new one (which re-runs the pass).
+  worker.on('exit', (code: number) => {
+    if (shuttingDown) return;
+    console.error(`Indexer stopped (exit ${code}); restarting in 2s`);
+    indexReady = true;
+    for (const fn of indexReadyWaiters.splice(0)) fn();
+    for (const [requestId, done] of reindexRequests) done({ type: 'reindexed', requestId, error: 'Indexer restarted' });
+    reindexRequests.clear();
+    setTimeout(startIndexWorker, 2000).unref();
+  });
 }
-
-// Compute insights for all indexed sessions
-try {
-  analyzeAll(db);
-  console.log('Insights computed for all sessions');
-} catch (err: unknown) {
-  console.error('Error computing insights:', (err as Error).message);
-}
-
-console.log(`Watching ${sessionDirs.length} session directories`);
-
-// Debounce map: filePath -> timeout handle
-const _reindexTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
-const REINDEX_DEBOUNCE_MS: number = 2000;
-const RECURSIVE_RESCAN_MS: number = 15000;
-
-// Recompute insights for re-indexed sessions and push SSE updates to clients
-function refreshInsightsAndNotify(sessionIds: string[]): void {
-  if (sessionIds.length === 0) return;
-  const upsert: Database.Statement = db.prepare('INSERT OR REPLACE INTO session_insights (session_id, signals, confusion_score, flagged, computed_at) VALUES (?, ?, ?, ?, ?)');
-  for (const sessionId of sessionIds) {
-    try {
-      const insight: InsightResult | null = analyzeSession(db, sessionId);
-      if (insight) upsert.run(insight.session_id, JSON.stringify(insight.signals), insight.confusion_score, insight.flagged ? 1 : 0, insight.computed_at);
-    } catch { /* ignore */ }
-    sseEmitter.emit('session-update', sessionId);
-  }
-}
-
-function reindexRecursiveDir(dir: SessionDir): void {
-  try {
-    // Claude project dirs: top-level transcripts are covered by fs.watch, so
-    // the interval only needs to poll the nested subagents/ folders.
-    const files: string[] = dir.subagents && !dir.recursive ? listClaudeSubagentFiles(dir.path) : listSessionFiles(dir);
-    let changed: number = 0;
-    for (const filePath of files) {
-      const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
-      if (!result.skipped) {
-        changed++;
-        if (result.sessionId) refreshInsightsAndNotify([result.sessionId]);
-      }
-    }
-    if (changed > 0) console.log(`Live re-indexed ${changed} files (${dir.agent})`);
-  } catch (err: unknown) {
-    console.error(`Error rescanning ${dir.path}:`, (err as Error).message);
-  }
-}
-
-function reindexOpenClawDb(dir: SessionDir): void {
-  try {
-    const ids: string[] = indexOpenClawDb(db, dir.path, dir.agent, stmts, ARCHIVE_MODE, config);
-    if (ids.length > 0) {
-      console.log(`Live re-indexed ${ids.length} DB sessions (${dir.agent})`);
-      refreshInsightsAndNotify(ids);
-    }
-  } catch (err: unknown) {
-    console.error(`Error re-indexing ${dir.path}:`, (err as Error).message);
-  }
-}
-
-for (const dir of sessionDirs) {
-  try {
-    if (dir.sourceType === 'openclaw-db') {
-      watchOpenClawDb(dir.path, { debounceMs: REINDEX_DEBOUNCE_MS, persistent: false }, () => reindexOpenClawDb(dir));
-      console.log(`  Watching: ${dir.path}`);
-      continue;
-    }
-    fs.watch(dir.path, { persistent: false }, (_eventType: string, filename: string | null) => {
-      if (dir.recursive) {
-        if (_reindexTimers.has(dir.path)) clearTimeout(_reindexTimers.get(dir.path));
-        _reindexTimers.set(dir.path, setTimeout(() => {
-          _reindexTimers.delete(dir.path);
-          reindexRecursiveDir(dir);
-        }, REINDEX_DEBOUNCE_MS));
-        return;
-      }
-
-      if (!filename || !filename.endsWith('.jsonl')) return;
-      const filePath: string = path.join(dir.path, filename);
-      if (!fs.existsSync(filePath)) return;
-
-      // Debounce: cancel pending re-index for this file, schedule a new one
-      if (_reindexTimers.has(filePath)) clearTimeout(_reindexTimers.get(filePath));
-      _reindexTimers.set(filePath, setTimeout(() => {
-        _reindexTimers.delete(filePath);
-        try {
-          const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
-          if (!result.skipped) {
-            console.log(`Live re-indexed: ${filename} (${dir.agent})`);
-            if (result.sessionId) refreshInsightsAndNotify([result.sessionId]);
-          }
-        } catch (err: unknown) {
-          console.error(`Error re-indexing ${filename}:`, (err as Error).message);
-        }
-      }, REINDEX_DEBOUNCE_MS));
-    });
-    console.log(`  Watching: ${dir.path}`);
-    // Nested files (Codex date dirs, Claude <session>/subagents/) aren't seen by a
-    // non-recursive fs.watch, so rescan them on an interval.
-    if (dir.recursive || dir.subagents) {
-      const timer: NodeJS.Timeout = setInterval(() => reindexRecursiveDir(dir), RECURSIVE_RESCAN_MS);
-      timer.unref?.();
-    }
-  } catch (err: unknown) {
-    console.error(`  Failed to watch ${dir.path}:`, (err as Error).message);
-  }
-}
+startIndexWorker();
 
 const SESSION_SELECT: string = 'SELECT s.* FROM sessions s';
 const sessionSortKey = (r: { end_time: string | null; start_time: string }): string => r.end_time || r.start_time || '';
@@ -410,6 +333,15 @@ function loadDescendants(rootIds: string[], nowMs: number) {
 }
 
 const server: http.Server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse): void => {
+  // First run: hold data requests until the first pass has filled the index.
+  if (firstRun && !indexReady && (req.url || '').startsWith('/api/') && !(req.url || '').startsWith('/api/health')) {
+    indexReadyWaiters.push(() => handleRequest(req, res));
+    return;
+  }
+  handleRequest(req, res);
+});
+
+function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
   const { pathname, query }: ParsedQuery = parseQuery(req.url || '/');
 
   try {
@@ -417,9 +349,13 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
 
     if (pathname === '/api/reindex') {
       if (!requireMethod(req, res, 'POST')) return;
-      const result: IndexAllResult = indexAll(db, config);
-      try { analyzeAll(db); } catch (e: unknown) { console.error('Insights recompute error:', (e as Error).message); }
-      return json(res, { ok: true, sessions: result.sessions, events: result.events });
+      const requestId: number = nextReindexId++;
+      reindexRequests.set(requestId, (m) => {
+        if (m.error || !m.result) return json(res, { error: m.error || 'Reindex failed' }, 500);
+        json(res, { ok: true, sessions: m.result.sessions, events: m.result.events });
+      });
+      indexWorker.postMessage({ type: 'reindex', requestId });
+      return;
     }
 
     else if (pathname === '/api/health') {
@@ -430,6 +366,7 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
         status: 'ok',
         version: pkg.version,
         uptime: Math.round(process.uptime()),
+        indexing: !indexReady,
         sessions,
         dbSizeBytes: dbSize.bytes,
         node: process.version
@@ -481,46 +418,42 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       const tz: number = Math.max(-840, Math.min(840, parseInt(query.tz) || 0));
       const shift: string = `${-tz} minutes`;
       const since: string = new Date(Date.now() - (days + 1) * 86400000).toISOString();
-      const perDay = db.prepare(
-        `SELECT date(timestamp, ?) AS day, COUNT(*) AS events, SUM(type = 'tool_call') AS tool_calls,
-                SUM(type = 'message') AS messages, COUNT(DISTINCT session_id) AS sessions
-         FROM events WHERE timestamp >= ? GROUP BY day ORDER BY day`
-      ).all(shift, since) as Array<{ day: string; events: number; tool_calls: number; messages: number; sessions: number }>;
-      const perAgentDay = db.prepare(
-        `SELECT date(e.timestamp, ?) AS day, s.agent AS agent, COUNT(*) AS events, SUM(e.type = 'tool_call') AS tool_calls,
-                COUNT(DISTINCT e.session_id) AS sessions
-         FROM events e JOIN sessions s ON s.id = e.session_id
-         WHERE e.timestamp >= ? GROUP BY day, s.agent`
-      ).all(shift, since) as Array<{ day: string; agent: string | null; events: number; tool_calls: number; sessions: number }>;
+      // One pass over the covering index, per (local day, session); days, agents
+      // and distinct-session counts are all folded from it here.
+      const rows = db.prepare(
+        `SELECT date(timestamp, ?) AS day, session_id, COUNT(*) AS events, SUM(type = 'tool_call') AS tool_calls,
+                SUM(type = 'message') AS messages
+         FROM events WHERE timestamp >= ? GROUP BY day, session_id`
+      ).all(shift, since) as Array<{ day: string; session_id: string; events: number; tool_calls: number; messages: number }>;
+      const agentOf = new Map<string, string>();
+      for (const r of db.prepare('SELECT id, agent FROM sessions').all() as Array<{ id: string; agent: string | null }>) {
+        agentOf.set(r.id, normalizeAgentLabel(r.agent) || 'unknown');
+      }
       const local = (d: Date): string => new Date(d.getTime() - tz * 60000).toISOString().slice(0, 10);
       const today: string = local(new Date());
       const dayKeys: string[] = [];
       for (let i = days - 1; i >= 0; i--) dayKeys.push(local(new Date(Date.now() - i * 86400000)));
-      const byDay = new Map(perDay.map(r => [r.day, r]));
-      const series = dayKeys.map(day => {
-        const r = byDay.get(day);
-        return { day, events: r?.events || 0, toolCalls: r?.tool_calls || 0, messages: r?.messages || 0, sessions: r?.sessions || 0 };
-      });
+      const inWindow: Set<string> = new Set(dayKeys);
+      const byDay = new Map<string, { events: number; toolCalls: number; messages: number; sessions: number }>();
       const agents = new Map<string, { agent: string; events: number; toolCalls: number; sessions: number; todayEvents: number; todaySessions: number }>();
-      for (const r of perAgentDay) {
-        if (!dayKeys.includes(r.day)) continue;
-        const name: string = normalizeAgentLabel(r.agent) || 'unknown';
+      const agentSessions = new Map<string, Set<string>>();
+      for (const r of rows) {
+        if (!inWindow.has(r.day)) continue;
+        const d = byDay.get(r.day) || { events: 0, toolCalls: 0, messages: 0, sessions: 0 };
+        d.events += r.events; d.toolCalls += r.tool_calls; d.messages += r.messages; d.sessions++;
+        byDay.set(r.day, d);
+        const name: string = agentOf.get(r.session_id) || 'unknown';
         const a = agents.get(name) || { agent: name, events: 0, toolCalls: 0, sessions: 0, todayEvents: 0, todaySessions: 0 };
         a.events += r.events; a.toolCalls += r.tool_calls;
-        if (r.day === today) { a.todayEvents += r.events; a.todaySessions += r.sessions; }
+        if (r.day === today) { a.todayEvents += r.events; a.todaySessions++; }
         agents.set(name, a);
+        // Distinct sessions per agent over the window (a session spanning two days counts once).
+        const seen = agentSessions.get(name) || new Set<string>();
+        seen.add(r.session_id);
+        agentSessions.set(name, seen);
       }
-      // Distinct sessions per agent over the window (a session spanning two days counts once).
-      const firstDayUtc: string = new Date(Date.parse(dayKeys[0] + 'T00:00:00Z') + tz * 60000).toISOString();
-      const distinct = db.prepare(
-        `SELECT s.agent AS agent, COUNT(DISTINCT e.session_id) AS sessions
-         FROM events e JOIN sessions s ON s.id = e.session_id
-         WHERE e.timestamp >= ? GROUP BY s.agent`
-      ).all(firstDayUtc) as Array<{ agent: string | null; sessions: number }>;
-      for (const r of distinct) {
-        const a = agents.get(normalizeAgentLabel(r.agent) || 'unknown');
-        if (a) a.sessions += r.sessions;
-      }
+      for (const [name, seen] of agentSessions) agents.get(name)!.sessions = seen.size;
+      const series = dayKeys.map(day => ({ day, events: 0, toolCalls: 0, messages: 0, sessions: 0, ...byDay.get(day) }));
       json(res, { today, days: series, agents: [...agents.values()].sort((x, y) => y.events - x.events) });
     }
     else if (pathname === '/api/stats') {
@@ -557,7 +490,8 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       const orderBy: string = rootsOnly
         ? `MAX(COALESCE(s.end_time, s.start_time), COALESCE((SELECT MAX(COALESCE(c.end_time, c.start_time)) FROM sessions c WHERE c.parent_id = s.id), ''))`
         : 'COALESCE(s.end_time, s.start_time)';
-      const rows = (db.prepare(`${SESSION_SELECT}${whereSql} ORDER BY ${orderBy} DESC LIMIT ? OFFSET ?`)
+      // id breaks ties so offset pages never overlap or skip rows.
+      const rows = (db.prepare(`${SESSION_SELECT}${whereSql} ORDER BY ${orderBy} DESC, s.id DESC LIMIT ? OFFSET ?`)
         .all(...params, limit, offset) as SessionRow[]).map(r => withStatus(r, nowMs));
       const total: number = (db.prepare(`SELECT COUNT(*) as c FROM sessions s${whereSql}`).get(...params) as CountRow).c;
       const sessions = rootsOnly
@@ -643,18 +577,32 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       const id: string = pathname.split('/')[3];
       const row = db.prepare(`${SESSION_SELECT} WHERE s.id = ?`).get(id) as SessionRow | undefined;
       if (!row) { json(res, { error: 'Not found' }, 404); }
+      else if (query.before) {
+        // ?before=<timestamp>|<id>&limit=N: the next N older events while scrolling.
+        const cursor = parseEventCursor(query.before, '');
+        const limit: number = Math.min(Math.max(parseInt(query.limit) || 500, 1), 2000);
+        const older = loadOlderSessionEvents(db, withStatus(row, Date.now()), { timestamp: cursor.after, id: cursor.afterId || '' }, limit)
+          .map(({ session_id: _sid, tool_result: _tr, project_confidence: _pc, ...e }) => e);
+        json(res, { events: older, hasMore: older.length === limit });
+      }
       else {
         const nowMs: number = Date.now();
         const session = withStatus(row, nowMs);
-        const events: EventRow[] = db.prepare('SELECT * FROM events WHERE session_id = ? ORDER BY timestamp DESC').all(id) as EventRow[];
-        const attributed: AttributionResult = attributeSessionEvents(session, events);
         const hasArchive: boolean = ARCHIVE_MODE && (db.prepare('SELECT COUNT(*) as c FROM archive WHERE session_id = ?').get(id) as CountRow).c > 0;
         const parentRow = session.parent_id
           ? db.prepare(`${SESSION_SELECT} WHERE s.id = ?`).get(session.parent_id) as SessionRow | undefined
           : undefined;
         const parent = parentRow ? withStatus(parentRow, nowMs) : null;
         const [tree] = attachChildren([{ ...session }], loadDescendants([id], nowMs), sessionSortKey);
-        json(res, { session, parent, children: tree.children || [], events: attributed.events, projectFilters: attributed.projectFilters, hasArchive });
+        // ?limit=N sends only the newest N events, without fields the page never
+        // reads (the page fetches the rest when needed); the shape and project
+        // filters still cover every event. Without limit, events are unchanged.
+        const limit: number = parseInt(query.limit) || 0;
+        const detail = loadSessionEvents(db, session, limit);
+        const page = limit > 0
+          ? detail.events.map(({ session_id: _sid, tool_result: _tr, project_confidence: _pc, ...e }) => e)
+          : detail.events;
+        json(res, { session, parent, children: tree.children || [], events: page, eventTotal: detail.eventTotal, shape: detail.shape, projectFilters: detail.projectFilters, hasArchive });
       }
     }
     else if (pathname.match(/^\/api\/archive\/session\/[^/]+$/)) {
@@ -706,6 +654,10 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       } else {
         download(res, { query: q, results }, `search-${q.slice(0,20)}.json`, 'application/json');
       }
+    }
+    else if (pathname === '/api/find') {
+      // Command palette: sessions, files and text matches in one request.
+      json(res, quickSearch(db, query.q || ''));
     }
     else if (pathname === '/api/search') {
       const q: string = query.q || '';
@@ -868,10 +820,9 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       if (sessionIds.length) {
         const placeholders: string = sessionIds.map(() => '?').join(',');
         recentErrors = (db.prepare(
-          `SELECT tool_result FROM events
+          `SELECT COALESCE(tool_result, content) AS tool_result FROM events
            WHERE session_id IN (${placeholders})
-             AND tool_result IS NOT NULL
-             AND (tool_result LIKE '%error%' OR tool_result LIKE '%Error%' OR tool_result LIKE '%ERROR%')
+             AND type = 'tool_result' AND ${TOOL_ERROR_SQL}
            ORDER BY timestamp DESC LIMIT 3`
         ).all(...sessionIds) as Array<{ tool_result: string }>).map((r) => r.tool_result.slice(0, 200));
       }
@@ -935,10 +886,9 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       ).all(...allIds) as Array<{ tool_name: string; c: number }>).map((r) => ({ tool: r.tool_name, count: r.c }));
 
       const commonErrors: string[] = (db.prepare(
-        `SELECT DISTINCT SUBSTR(tool_result, 1, 200) as err FROM events
+        `SELECT DISTINCT SUBSTR(COALESCE(tool_result, content), 1, 200) as err FROM events
          WHERE session_id IN (${ph})
-           AND tool_result IS NOT NULL
-           AND (tool_result LIKE '%error%' OR tool_result LIKE '%Error%' OR tool_result LIKE '%ERROR%')
+           AND type = 'tool_result' AND ${TOOL_ERROR_SQL}
          ORDER BY timestamp DESC LIMIT 5`
       ).all(...allIds) as Array<{ err: string }>).map((r) => r.err);
 
@@ -1052,8 +1002,7 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
     else if (!serveStatic(req, res)) {
       const index: string = path.join(PUBLIC, 'index.html');
       if (fs.existsSync(index)) {
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        fs.createReadStream(index).pipe(res);
+        sendFile(req, res, index, fs.statSync(index));
       } else {
         json(res, { error: 'Not found' }, 404);
       }
@@ -1062,7 +1011,7 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
     console.error(err);
     json(res, { error: (err as Error).message }, 500);
   }
-});
+}
 
 if (!isLoopbackHost(HOST) && !AUTH_TOKEN && process.env.AGENTACTA_ALLOW_UNAUTHENTICATED_NETWORK !== '1') {
   console.error('Refusing to bind AgentActa on a non-loopback host without auth. Set AGENTACTA_AUTH_TOKEN, or set AGENTACTA_ALLOW_UNAUTHENTICATED_NETWORK=1 if this is an intentional trusted-network exposure.');
@@ -1084,6 +1033,7 @@ server.listen(PORT, HOST, () => console.log(`AgentActa running on http://${HOST}
 
 // Graceful shutdown
 function shutdown(signal: string): void {
+  shuttingDown = true;
   console.log(`\n${signal} received, shutting down...`);
   server.close(() => {
     try { db.close(); } catch { /* ignore */ }
