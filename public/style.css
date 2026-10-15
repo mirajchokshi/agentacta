@@ -1304,7 +1304,9 @@ a, button, select, summary, [role="link"], .nav-item, .session-item, .file-item 
     border-radius: 0;
     min-height: 100vh;
     max-width: 100%;
-    padding: calc(var(--space-xl) + env(safe-area-inset-top, 0px)) var(--space-lg) calc(100px + max(env(safe-area-inset-bottom, 0px), 16px));
+    /* Just enough to scroll the last row clear of the floating tab bar
+       (bar ~62px + its 16px offset + a small gap). */
+    padding: calc(var(--space-xl) + env(safe-area-inset-top, 0px)) var(--space-lg) calc(88px + env(safe-area-inset-bottom, 0px));
   }
   /* Keep clear of the fixed search/theme/settings buttons at top right. */
   .page-title { font-size: 20px; padding-right: 100px; }

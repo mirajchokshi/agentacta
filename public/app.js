@@ -538,7 +538,7 @@ function statusIcon(s) {
 // Status is plain colored text; only exceptions get ink (a quietly finished
 // session renders nothing). Live alone gets a dot because it changes as you watch.
 function renderSessionStatus(s) {
-  if (s.status === 'live') return '<span class="st st-live" title="Activity in the last 15 minutes">Live</span>';
+  if (s.status === 'live') return ''; // the pulsing status orb says it
   if (s.status === 'stale') return '<span class="st st-stale" title="No end was recorded and it has been quiet for over 15 minutes">Stale</span>';
   if (s.ended_reason === 'source' && s.source_status && !/^(done|completed?)$/i.test(s.source_status)) {
     return `<span class="st st-failed">${escHtml(s.source_status)}</span>`;
@@ -1294,7 +1294,7 @@ async function viewSession(id) {
     if (!slot) return;
     const st = { ...s, ...sessionState };
     slot.innerHTML = `
-      <span class="detail-state">${statusIcon(st)}${renderSessionStatus(st) || '<span class="st st-ended">Finished</span>'}</span>
+      <span class="detail-state">${statusIcon(st)}${st.status === 'live' ? '' : (renderSessionStatus(st) || '<span class="st st-ended">Finished</span>')}</span>
     `;
   }
 
@@ -1486,7 +1486,7 @@ function renderTodaySection(act) {
 // session: the one thing an all-time view says that "today" can't (is usage growing?).
 function renderAllTimeSection(stats, act) {
   const earliest = stats.dateRange?.earliest ? new Date(stats.dateRange.earliest) : null;
-  const since = earliest ? earliest.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: earliest.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' }) : '';
+  const since = earliest ? earliest.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
   let chart = '';
   if (act && !act._error && Array.isArray(act.days) && act.days.length > 14) {
     // Weeks start Monday; the current week is partial and highlighted.
@@ -1505,8 +1505,10 @@ function renderAllTimeSection(stats, act) {
       const label = w.start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
       return { label: `Week of ${label}`, value: w.toolCalls, highlight: last, tip: `${last ? 'This week (so far)' : `Week of ${label}`}: ${w.toolCalls.toLocaleString()} tool calls` };
     });
+    // Months with years on the axis: this chart spans months, so day numbers add noise.
     const mid = Math.floor((weeks.length - 1) / 2);
-    const axis = [weeks[0].start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), weeks[mid].start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), 'This week'];
+    const monthYear = d => d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    const axis = [monthYear(weeks[0].start), monthYear(weeks[mid].start), 'This week'];
     const thisWeek = weeks[weeks.length - 1].toolCalls;
     chart = `<section class="panel-block"><h3 class="sub-label">Tool calls per week <span class="count">${thisWeek.toLocaleString()} this week so far</span></h3>
       ${renderColumnChart({ points, height: 64, caption: 'Tool calls per week since the first session', unit: ' tool calls', axis })}</section>`;
