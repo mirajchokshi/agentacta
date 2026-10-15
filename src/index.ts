@@ -287,28 +287,41 @@ const indexReadyWaiters: Array<() => void> = [];
 const reindexRequests: Map<number, (m: Extract<WorkerMessage, { type: 'reindexed' }>) => void> = new Map();
 let nextReindexId: number = 1;
 const workerFile: string = path.join(__dirname, 'index-worker' + path.extname(__filename));
-// Under tsx (npm run dev, tests) the worker needs tsx's loader registered itself.
-const indexWorker: Worker = workerFile.endsWith('.ts')
-  ? new Worker(`require('tsx/cjs/api').register(); require(${JSON.stringify(workerFile)});`, { eval: true })
-  : new Worker(workerFile);
-indexWorker.unref();
-indexWorker.on('message', (m: WorkerMessage) => {
-  if (m.type === 'ready') {
+let indexWorker: Worker;
+let shuttingDown: boolean = false;
+function startIndexWorker(): void {
+  // Under tsx (npm run dev, tests) the worker needs tsx's loader registered itself.
+  const worker: Worker = workerFile.endsWith('.ts')
+    ? new Worker(`require('tsx/cjs/api').register(); require(${JSON.stringify(workerFile)});`, { eval: true })
+    : new Worker(workerFile);
+  indexWorker = worker;
+  worker.unref();
+  worker.on('message', (m: WorkerMessage) => {
+    if (m.type === 'ready') {
+      indexReady = true;
+      console.log(`Index up to date (${m.changed} changed, ${m.ms} ms)`);
+      for (const fn of indexReadyWaiters.splice(0)) fn();
+    } else if (m.type === 'updated') {
+      for (const id of m.ids) sseEmitter.emit('session-update', id);
+    } else if (m.type === 'reindexed') {
+      reindexRequests.get(m.requestId)?.(m);
+      reindexRequests.delete(m.requestId);
+    }
+  });
+  worker.on('error', (err: Error) => console.error('Indexer error:', err.message));
+  // A dead worker would leave reindex calls hanging and live updates silent:
+  // fail what was waiting on it and start a new one (which re-runs the pass).
+  worker.on('exit', (code: number) => {
+    if (shuttingDown) return;
+    console.error(`Indexer stopped (exit ${code}); restarting in 2s`);
     indexReady = true;
-    console.log(`Index up to date (${m.changed} changed, ${m.ms} ms)`);
     for (const fn of indexReadyWaiters.splice(0)) fn();
-  } else if (m.type === 'updated') {
-    for (const id of m.ids) sseEmitter.emit('session-update', id);
-  } else if (m.type === 'reindexed') {
-    reindexRequests.get(m.requestId)?.(m);
-    reindexRequests.delete(m.requestId);
-  }
-});
-indexWorker.on('error', (err: Error) => {
-  console.error('Indexer error:', err.message);
-  indexReady = true;
-  for (const fn of indexReadyWaiters.splice(0)) fn();
-});
+    for (const [requestId, done] of reindexRequests) done({ type: 'reindexed', requestId, error: 'Indexer restarted' });
+    reindexRequests.clear();
+    setTimeout(startIndexWorker, 2000).unref();
+  });
+}
+startIndexWorker();
 
 const SESSION_SELECT: string = 'SELECT s.* FROM sessions s';
 const sessionSortKey = (r: { end_time: string | null; start_time: string }): string => r.end_time || r.start_time || '';
@@ -485,7 +498,8 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
       const orderBy: string = rootsOnly
         ? `MAX(COALESCE(s.end_time, s.start_time), COALESCE((SELECT MAX(COALESCE(c.end_time, c.start_time)) FROM sessions c WHERE c.parent_id = s.id), ''))`
         : 'COALESCE(s.end_time, s.start_time)';
-      const rows = (db.prepare(`${SESSION_SELECT}${whereSql} ORDER BY ${orderBy} DESC LIMIT ? OFFSET ?`)
+      // id breaks ties so offset pages never overlap or skip rows.
+      const rows = (db.prepare(`${SESSION_SELECT}${whereSql} ORDER BY ${orderBy} DESC, s.id DESC LIMIT ? OFFSET ?`)
         .all(...params, limit, offset) as SessionRow[]).map(r => withStatus(r, nowMs));
       const total: number = (db.prepare(`SELECT COUNT(*) as c FROM sessions s${whereSql}`).get(...params) as CountRow).c;
       const sessions = rootsOnly
@@ -582,13 +596,14 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
           : undefined;
         const parent = parentRow ? withStatus(parentRow, nowMs) : null;
         const [tree] = attachChildren([{ ...session }], loadDescendants([id], nowMs), sessionSortKey);
-        // ?limit=N sends only the newest N events (the page fetches the rest when
-        // needed); the shape and project filters still cover every event. Fields
-        // the page never reads are left out of each event.
+        // ?limit=N sends only the newest N events, without fields the page never
+        // reads (the page fetches the rest when needed); the shape and project
+        // filters still cover every event. Without limit, events are unchanged.
         const limit: number = parseInt(query.limit) || 0;
-        const page = limit > 0 ? attributed.events.slice(0, limit) : attributed.events;
-        const slim = page.map(({ session_id: _sid, tool_result: _tr, project_confidence: _pc, ...e }) => e);
-        json(res, { session, parent, children: tree.children || [], events: slim, eventTotal: attributed.events.length, shape: sessionShape(session, events), projectFilters: attributed.projectFilters, hasArchive });
+        const page = limit > 0
+          ? attributed.events.slice(0, limit).map(({ session_id: _sid, tool_result: _tr, project_confidence: _pc, ...e }) => e)
+          : attributed.events;
+        json(res, { session, parent, children: tree.children || [], events: page, eventTotal: attributed.events.length, shape: sessionShape(session, events), projectFilters: attributed.projectFilters, hasArchive });
       }
     }
     else if (pathname.match(/^\/api\/archive\/session\/[^/]+$/)) {
@@ -1017,6 +1032,7 @@ server.listen(PORT, HOST, () => console.log(`AgentActa running on http://${HOST}
 
 // Graceful shutdown
 function shutdown(signal: string): void {
+  shuttingDown = true;
   console.log(`\n${signal} received, shutting down...`);
   server.close(() => {
     try { db.close(); } catch { /* ignore */ }

@@ -69,6 +69,8 @@ try {
   console.error('Error computing insights:', (err as Error).message);
 }
 post({ type: 'ready', changed: startupChanged.size, ms: Math.round(performance.now() - t0) });
+// Pages opened while the pass ran were served the older index; let them catch up.
+if (startupChanged.size) post({ type: 'updated', ids: [...startupChanged] });
 
 // Debounce map: filePath -> timeout handle
 const _reindexTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();

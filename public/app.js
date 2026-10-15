@@ -705,7 +705,12 @@ async function viewSessions() {
     state.loading = true;
     const page = await api(`/sessions?limit=${PAGE}&offset=${state.loaded}&roots=1`);
     state.loading = false;
-    if (page._error || !stillOn('sessions')) return;
+    if (!stillOn('sessions')) return;
+    if (page._error) {
+      // The observer only fires on enter/leave; re-arm it so a failed page retries.
+      setTimeout(() => { const m = $('#sessionsMore'); if (m && window._sessionsObserver) { window._sessionsObserver.unobserve(m); window._sessionsObserver.observe(m); } }, 3000);
+      return;
+    }
     state.loaded += page.sessions.length;
     state.total = page.total;
     const list = content.querySelector('.session-list');
@@ -851,6 +856,7 @@ async function viewSession(id) {
   const PAGE_SIZE = 50;
   const allEvents = Array.isArray(data.events) ? [...data.events] : [];
   const knownIds = new Set(allEvents.map(e => e.id));
+  const firstPageCount = allEvents.length;
   let complete = allEvents.length >= (data.eventTotal ?? allEvents.length);
   let fullLoad = null;
   // Appends everything older than the loaded page. Newer events keep arriving
@@ -859,7 +865,9 @@ async function viewSession(id) {
     if (complete) return Promise.resolve();
     if (!fullLoad) {
       fullLoad = api(`/sessions/${id}`).then(full => {
-        if (full._error || !Array.isArray(full.events)) { fullLoad = null; return; }
+        // On failure, wait before allowing another try instead of refetching
+        // in a loop from the scroll handler.
+        if (full._error || !Array.isArray(full.events)) { setTimeout(() => { fullLoad = null; }, 5000); return; }
         const oldest = allEvents[allEvents.length - 1];
         const at = oldest ? full.events.findIndex(e => e.id === oldest.id) : -1;
         const older = (at >= 0 ? full.events.slice(at + 1) : full.events).filter(e => !knownIds.has(e.id));
@@ -884,7 +892,8 @@ async function viewSession(id) {
   const updateEventsLabel = () => {
     const el = $('#sessionEventsLabel');
     if (!el) return;
-    const count = complete ? getFilteredEvents().length : (data.eventTotal || allEvents.length);
+    // Before the rest loads: the server's total plus anything that arrived live.
+    const count = complete ? getFilteredEvents().length : (data.eventTotal || 0) + allEvents.length - firstPageCount;
     if (activeProjectFilter === 'all') {
       el.textContent = `Events (${count})`;
       return;
@@ -898,9 +907,12 @@ async function viewSession(id) {
     empty.style.display = getFilteredEvents().length ? 'none' : 'block';
   };
 
+  let requestedFilter = 'all';
   const setProjectFilter = async (nextFilter) => {
-    if (nextFilter === activeProjectFilter) return;
+    requestedFilter = nextFilter;
     if (nextFilter !== 'all') await ensureAllEvents();
+    // A later click wins if it came in while the events were loading.
+    if (requestedFilter !== nextFilter || nextFilter === activeProjectFilter) return;
     activeProjectFilter = nextFilter;
     const chips = $$('#sessionProjectFilters .filter-chip');
     chips.forEach(node => node.classList.toggle('active', node.dataset.projectFilter === activeProjectFilter));
@@ -949,7 +961,7 @@ async function viewSession(id) {
         if (rendered >= getFilteredEvents().length) {
           if (complete) return;
           loading = true;
-          ensureAllEvents().then(() => { loading = false; onScroll && onScroll(); });
+          ensureAllEvents().then(() => { loading = false; if (complete && onScroll) onScroll(); });
           return;
         }
         loading = true;

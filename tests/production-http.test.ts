@@ -172,7 +172,8 @@ describe('production HTTP routes', () => {
     assert.strictEqual(page.events.length, Math.min(1, full.eventTotal));
     assert.strictEqual(page.eventTotal, full.eventTotal);
     assert.deepStrictEqual(page.shape, full.shape);
-    for (const key of ['session_id', 'tool_result', 'project_confidence']) assert.ok(!(key in page.events[0]), `${key} is not sent`);
+    for (const key of ['session_id', 'tool_result', 'project_confidence']) assert.ok(!(key in page.events[0]), `${key} is not sent in a limited page`);
+    assert.ok('session_id' in full.events[0], 'the unlimited response keeps every field');
   });
 
   it('pages the session list with offset', async () => {
