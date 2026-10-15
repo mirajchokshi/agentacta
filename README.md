@@ -17,8 +17,10 @@ npx agentacta
 ```
 
 <p align="center">
-  <img src="screenshots/demo.gif" alt="AgentActa demo" width="800">
+  <img src="screenshots/demo.gif" alt="AgentActa demo: overview, nested subagent sessions, a live session, timeline, insights and search" width="800">
 </p>
+
+<p align="center"><a href="screenshots/demo.mp4">Watch the full-quality video</a> · recorded from the bundled demo data (<code>npm run record-demo</code>)</p>
 
 ## Why this exists
 
@@ -31,7 +33,10 @@ AgentActa gives you one place to inspect the full trail.
 ## What you get
 
 - 🔍 Full-text search across messages, tool calls, and results
-- 📋 Session browser with summaries, token breakdowns, and model info
+- 📋 Session browser with real titles, token breakdowns, and model info
+- 🟢 Live / stale status for every session, and subagents nested under the session that spawned them
+- 📈 Overview of today against your 14-day average, activity per day and per agent, and usage per week
+- 🧩 Session pages that show when a session was busy and which tools it leaned on
 - 🧭 Project-scoped session filtering with per-event attribution
 - 🤖 Clear Codex run visibility for direct and Symphony-origin sessions
 - 📅 Timeline view with live updates for today
@@ -42,7 +47,7 @@ AgentActa gives you one place to inspect the full trail.
 - 📱 Mobile-optimized UI with floating navigation
 - 🏥 Session health scoring - reliability scores, issue detection, and per-signal breakdowns
 - 💡 Search suggestions based on real data
-- ⌨️ Command palette (⌘K / Ctrl+K) for quick navigation
+- ⌨️ Command palette (⌘K / Ctrl+K) and keyboard navigation (J/K, Enter, Esc)
 - 🎨 Theme settings (system, light, dark, OLED)
 - 🏥 Health endpoint for monitoring (`/api/health`)
 
@@ -174,6 +179,7 @@ It accepts a string, a colon-delimited string, or a JSON array.
 | `GET /api/sessions` | Session list with metadata and `status` (`live` / `stale` / `ended`); `?roots=1` returns top-level sessions with their subagent tree |
 | `GET /api/sessions/:id` | Full session events, plus `parent` and nested `children` |
 | `GET /api/sessions/:id/stream?after=<ts>` | SSE stream for live session-detail updates |
+| `GET /api/activity?days=14&tz=<offset>` | Per-day and per-agent activity (events, tool calls, sessions) in the viewer's timezone |
 | `GET /api/search?q=<query>` | Full-text search + filters |
 | `GET /api/suggestions` | Search suggestions |
 | `GET /api/timeline?date=YYYY-MM-DD` | Events for one day |
