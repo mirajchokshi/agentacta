@@ -1749,16 +1749,17 @@ function renderFiles() {
             <span class="file-group-stat">${dirFiles.length} files</span>
             <span class="file-group-stat">${groupStat}</span>
           </button>
-          <div class="file-group-items" hidden>
-            ${dirFiles.map(f => renderFileItem(f)).join('')}
-          </div>
+          <div class="file-group-items" hidden></div>
         </div>`;
     }).join('');
 
+    // A folder's rows are built the first time it opens; most stay closed.
+    const filesByDir = new Map(sortedGroups);
     $$('.file-group-header').forEach(h => {
       h.addEventListener('click', () => {
         const items = h.nextElementSibling;
         const open = items.hasAttribute('hidden');
+        if (open && !items.childElementCount) items.innerHTML = filesByDir.get(h.dataset.dir).map(f => renderFileItem(f)).join('');
         items.toggleAttribute('hidden', !open);
         h.setAttribute('aria-expanded', String(open));
       });
@@ -1787,10 +1788,8 @@ function renderFiles() {
 
   $('#groupToggle').addEventListener('click', () => { window._fileGrouped = !window._fileGrouped; renderFiles(); });
 
-  $$('.file-item').forEach(item => {
-    item.addEventListener('click', () => viewFileDetail(item.dataset.path));
-    item.addEventListener('keydown', e => { if (e.key === 'Enter') viewFileDetail(item.dataset.path); });
-  });
+  listEl.addEventListener('click', e => { const item = e.target.closest('.file-item'); if (item) viewFileDetail(item.dataset.path); });
+  listEl.addEventListener('keydown', e => { const item = e.target.closest('.file-item'); if (item && e.key === 'Enter') viewFileDetail(item.dataset.path); });
 
   searchInput.addEventListener('keyup', () => { window._fileCursorPos = searchInput.selectionStart; });
 }
