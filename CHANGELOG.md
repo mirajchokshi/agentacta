@@ -19,6 +19,7 @@
 ### Fixed
 - Search missed events whose text was replaced after indexing (the full-text index is rebuilt once on upgrade).
 - Live updates for a project-filtered session could lose a tool result's project when its call was far back in the session.
+- On the Insights page, the date could spill over long session titles on desktop. Insights rows now end in a chevron like other session rows and line up on phones.
 
 ## [2026.10.14] - 2026-10-14
 
