@@ -18,6 +18,7 @@ AgentActa is a local audit trail and search engine for AI agent sessions. It ind
 - `src/index.ts` — HTTP server, all API routes
 - `src/db.ts` — SQLite schema, init, prepared statements
 - `src/indexer.ts` — JSONL session log parser and indexer
+- `src/index-worker.ts` — Worker thread that runs indexing, file watching and insight scoring off the HTTP thread
 - `src/config.ts` — Config loading (CWD → XDG), env var overrides
 - `src/types.ts` — All TypeScript interfaces and type definitions
 - `src/insights.ts` — Session health scoring
@@ -30,10 +31,9 @@ AgentActa is a local audit trail and search engine for AI agent sessions. It ind
 
 ## Architecture
 
-1. On startup, discovers session directories (Claude Code, Codex, OpenClaw)
-2. Indexes all `.jsonl` files into SQLite (sessions, events, file_activity tables)
-3. Watches directories for changes and live-reindexes
-4. Serves dashboard UI + JSON API on port 4003
+1. On startup, serves the dashboard UI + JSON API on port 4003 right away from the existing index
+2. A worker thread (`src/index-worker.ts`) discovers session directories (Claude Code, Codex, OpenClaw) and indexes changed `.jsonl` files / stores into SQLite (sessions, events, file_activity tables); a first run with an empty index holds data requests until this pass finishes
+3. The worker watches directories, live-reindexes, and tells the server which sessions changed (for SSE)
 
 ## Context API
 
@@ -53,7 +53,7 @@ curl http://localhost:4003/api/context/agent?name=claude-code
 npm test
 ```
 
-Uses `node:test` and `node:assert`. Tests are in `tests/` as TypeScript, run via `tsx`. Currently 58 tests across 8 suites.
+Uses `node:test` and `node:assert`. Tests are in `tests/` as TypeScript, run via `tsx`. Currently 113 tests.
 
 ## Building
 

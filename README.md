@@ -180,8 +180,8 @@ Config written on first run (`sessionsPath` lists whichever known session folder
 | Endpoint | Description |
 |---|---|
 | `GET /api/stats` | Session/message/tool/token totals |
-| `GET /api/sessions` | Session list with metadata and `status` (`live` / `stale` / `ended`); `?roots=1` returns top-level sessions with their subagent tree |
-| `GET /api/sessions/:id` | Full session events, plus `parent` and nested `children` |
+| `GET /api/sessions?limit=&offset=` | Session list with metadata and `status` (`live` / `stale` / `ended`); `?roots=1` returns top-level sessions with their subagent tree |
+| `GET /api/sessions/:id` | Session events (newest first), plus `parent`, nested `children`, `projectFilters` and a `shape` summary; `?limit=N` returns only the newest N events (`eventTotal` gives the full count) |
 | `GET /api/sessions/:id/events?after=<ts>&afterId=<id>` | Events after a cursor (paged) |
 | `GET /api/sessions/:id/stream?after=<ts>` | SSE stream for live session-detail updates |
 | `GET /api/activity?days=14&tz=<offset>` | Per-day and per-agent activity (events, tool calls, sessions) in the viewer's timezone |
@@ -195,7 +195,7 @@ Config written on first run (`sessionsPath` lists whichever known session folder
 | `POST /api/maintenance` | VACUUM + WAL checkpoint (returns size before/after) |
 | `POST /api/reindex` | Re-scan all session sources |
 | `GET /api/config` | Effective storage mode, DB path and size, session sources |
-| `GET /api/health` | Server status, version, uptime, session count |
+| `GET /api/health` | Server status, version, uptime, session count, and whether the startup index pass is still running (`indexing`) |
 | `GET /api/insights` | Session health summary - reliability scores, issue counts, top flagged sessions |
 | `GET /api/insights/session/:id` | Health signals for one session |
 | `GET /api/archive/session/:id`, `GET /api/archive/export/:id` | Raw JSONL lines (archive mode) |
