@@ -531,6 +531,9 @@ code, pre, .mono { font-family: var(--font-mono); }
   margin-inline: calc(-1 * var(--space-md));
 }
 .session-group { display: contents; }
+/* Insights rows have no status icon: title, time, score, chevron. */
+.insight-list { grid-template-columns: minmax(0, 1fr) auto auto auto; }
+.insight-list > .empty { grid-column: 1 / -1; }
 
 .session-item {
   grid-column: 1 / -1;
@@ -586,7 +589,6 @@ code, pre, .mono { font-family: var(--font-mono); }
 }
 .si-dur, .si-counts span + span { color: var(--text-tertiary); }
 .si-counts .unit { color: var(--text-tertiary); }
-.si-action { text-align: right; }
 
 /* The chevron: faint at rest, brightens and nudges right on hover. */
 .si-go {
@@ -1300,20 +1302,20 @@ a, button, select, summary, [role="link"], .nav-item, .session-item, .file-item 
   /* Block layout here (no shared columns), so off-screen rows can be skipped. */
   .session-item, .subagent-row { content-visibility: auto; contain-intrinsic-size: auto 64px; }
   .session-item {
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
-    grid-template-areas: "icon main action go" ". facts facts go";
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: "icon main go" ". facts go";
     column-gap: var(--space-md);
     row-gap: 4px;
     padding: 12px var(--space-sm);
   }
   .session-item > .sicon { grid-area: icon; align-self: start; margin-top: 2px; }
   .si-main { grid-area: main; }
-  .si-action { grid-area: action; align-self: start; }
   .si-go { grid-area: go; }
   .si-when { grid-area: facts; }
   .si-counts { grid-area: facts; justify-self: end; }
   .si-when, .si-counts { flex-direction: row; gap: var(--space-sm); font-size: 12px; }
   .si-headline { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .insight-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "main go" "facts go"; }
 
   .session-list > .subagent-toggle, .session-group > .subagent-toggle { margin-left: calc(var(--space-sm) + 16px + var(--space-md) - 8px); }
   .subagent-list { display: block; margin-left: calc(var(--space-sm) + 7px); padding-left: 6px; }
