@@ -1295,6 +1295,9 @@ a, button, select, summary, [role="link"], .nav-item, .session-item, .file-item 
   .nav-item svg { width: 19px; height: 19px; }
   .nav-item.active { color: var(--text-primary); background: var(--bg-active); }
 
+  /* One surface edge to edge on phones (no panel frame), so no band of a
+     different color shows below short pages or behind the tab bar. */
+  body, body::before { background: var(--bg-surface); }
   .main {
     margin: 0;
     border: none;
@@ -1448,6 +1451,9 @@ a, button, select, summary, [role="link"], .nav-item, .session-item, .file-item 
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+/* Labels on the first/last column anchor inward so they never leave the chart. */
+.col.edge-l .col-val { left: 0; transform: none; }
+.col.edge-r .col-val { left: auto; right: 0; transform: none; }
 .colchart-axis {
   display: flex;
   justify-content: space-between;
@@ -1488,7 +1494,14 @@ a, button, select, summary, [role="link"], .nav-item, .session-item, .file-item 
   font-variant-numeric: tabular-nums;
 }
 
-.alltime { margin-top: var(--space-2xl); font-size: 12.5px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.alltime { margin-top: var(--space-2xl); padding-top: var(--space-sm); border-top: 1px solid var(--border-subtle); }
+.alltime > .section-label { margin-top: var(--space-lg); }
+/* Lifetime totals are context, not the headline: same grid, quieter. */
+.tiles-quiet { background: none; border: none; border-radius: 0; gap: 0; margin-bottom: var(--space-md); }
+.tiles-quiet .tile { padding: 4px 0; background: none; }
+.tiles-quiet .tile dd { font-size: 18px; color: var(--text-secondary); }
+.sub-label { display: flex; gap: var(--space-sm); align-items: baseline; font-size: 12.5px; font-weight: 500; color: var(--text-secondary); margin: var(--space-sm) 0 var(--space-xs); }
+.sub-label .count { color: var(--text-tertiary); font-weight: 400; font-variant-numeric: tabular-nums; }
 
 .sr-only {
   position: absolute;

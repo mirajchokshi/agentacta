@@ -138,10 +138,15 @@ function renderColumnChart({ points, height = 96, caption, unit = '', axis = [] 
   if (!points.length) return '';
   const max = Math.max(1, ...points.map(p => p.value));
   const peakIdx = points.reduce((best, p, i) => (p.value > points[best].value ? i : best), 0);
+  const heights = points.map(p => (p.value ? Math.max(2, Math.round((p.value / max) * height)) : 0));
+  // A label sits above its bar only if neither neighbor is taller (it would
+  // collide); callers put the highlighted value in the heading instead.
+  const clear = i => (heights[i - 1] ?? 0) <= heights[i] && (heights[i + 1] ?? 0) <= heights[i];
   const cols = points.map((p, i) => {
-    const h = p.value ? Math.max(2, Math.round((p.value / max) * height)) : 0;
-    const label = (p.highlight || (i === peakIdx && p.value > 0)) ? `<span class="col-val">${fmtCompact(p.value)}</span>` : '';
-    return `<div class="col${p.highlight ? ' is-hl' : ''}" tabindex="0" role="img" aria-label="${escHtml(p.tip)}" data-tip="${escHtml(p.tip)}">
+    const h = heights[i];
+    const label = ((p.highlight || (i === peakIdx && p.value > 0)) && clear(i)) ? `<span class="col-val">${fmtCompact(p.value)}</span>` : '';
+    const edge = i === 0 ? ' edge-l' : (i === points.length - 1 ? ' edge-r' : '');
+    return `<div class="col${p.highlight ? ' is-hl' : ''}${edge}" tabindex="0" role="img" aria-label="${escHtml(p.tip)}" data-tip="${escHtml(p.tip)}">
       <div class="col-bar" style="height:${h}px">${label}</div>
     </div>`;
   }).join('');
@@ -231,8 +236,9 @@ function transitionView() {
   content.classList.add('view-enter');
 }
 
-// Lists the user returns to (Back from a session) are restored instantly
-// from the last render, at the same scroll position, then refreshed in place.
+// Lists the user returns to are restored instantly from the last render, then
+// refreshed in place. Going Back also restores the scroll position; arriving
+// by tapping the tab starts at the top, as a tab bar should.
 const viewCache = {};
 const VIEW_CACHE_MS = 5 * 60 * 1000;
 function rememberCurrentView() {
@@ -241,10 +247,12 @@ function rememberCurrentView() {
 }
 function restoreView(name) {
   const c = viewCache[name];
+  const keepScroll = window._restoreScroll;
+  window._restoreScroll = false;
   if (!c || Date.now() - c.at > VIEW_CACHE_MS) return false;
   window.hideChartTip?.();
   content.innerHTML = c.html;
-  window.scrollTo(0, c.y);
+  window.scrollTo(0, keepScroll ? c.y : 0);
   return true;
 }
 function stillOn(name) {
@@ -341,6 +349,7 @@ function handleRoute() {
 
 window.addEventListener('popstate', () => {
   if (window._navDepth > 0) window._navDepth--;
+  window._restoreScroll = true; // browser back/forward and swipe-back
   handleRoute();
 });
 
@@ -1038,6 +1047,7 @@ async function viewSession(id) {
 
   $('#backBtn').addEventListener('click', () => {
     clearJumpUi();
+    window._restoreScroll = true;
     if (window._navDepth > 0) {
       history.back();
     } else {
@@ -1472,6 +1482,47 @@ function renderTodaySection(act) {
   `;
 }
 
+// Lifetime totals with a time frame, plus tool calls per week since the first
+// session: the one thing an all-time view says that "today" can't (is usage growing?).
+function renderAllTimeSection(stats, act) {
+  const earliest = stats.dateRange?.earliest ? new Date(stats.dateRange.earliest) : null;
+  const since = earliest ? earliest.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: earliest.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' }) : '';
+  let chart = '';
+  if (act && !act._error && Array.isArray(act.days) && act.days.length > 14) {
+    // Weeks start Monday; the current week is partial and highlighted.
+    const weeks = [];
+    for (const d of act.days) {
+      const date = new Date(d.day + 'T12:00:00');
+      const monday = new Date(date);
+      monday.setDate(date.getDate() - ((date.getDay() + 6) % 7));
+      const key = monday.toISOString().slice(0, 10);
+      const w = weeks[weeks.length - 1];
+      if (!w || w.key !== key) weeks.push({ key, start: monday, toolCalls: d.toolCalls });
+      else w.toolCalls += d.toolCalls;
+    }
+    const points = weeks.map((w, i) => {
+      const last = i === weeks.length - 1;
+      const label = w.start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      return { label: `Week of ${label}`, value: w.toolCalls, highlight: last, tip: `${last ? 'This week (so far)' : `Week of ${label}`}: ${w.toolCalls.toLocaleString()} tool calls` };
+    });
+    const mid = Math.floor((weeks.length - 1) / 2);
+    const axis = [weeks[0].start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), weeks[mid].start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), 'This week'];
+    const thisWeek = weeks[weeks.length - 1].toolCalls;
+    chart = `<section class="panel-block"><h3 class="sub-label">Tool calls per week <span class="count">${thisWeek.toLocaleString()} this week so far</span></h3>
+      ${renderColumnChart({ points, height: 64, caption: 'Tool calls per week since the first session', unit: ' tool calls', axis })}</section>`;
+  }
+  return `<section class="alltime">
+    <h2 class="section-label">All time${since ? ` <span class="count">since ${escHtml(since)}</span>` : ''}</h2>
+    <dl class="tiles tiles-quiet">
+      <div class="tile"><dt>Sessions</dt><dd title="${stats.sessions.toLocaleString()}">${fmtCompact(stats.sessions)}</dd></div>
+      <div class="tile"><dt>Messages</dt><dd title="${stats.messages.toLocaleString()}">${fmtCompact(stats.messages)}</dd></div>
+      <div class="tile"><dt>Tool calls</dt><dd title="${stats.toolCalls.toLocaleString()}">${fmtCompact(stats.toolCalls)}</dd></div>
+      <div class="tile"><dt>Tokens</dt><dd title="${(stats.totalTokens || 0).toLocaleString()}">${fmtCompact(stats.totalTokens || 0)}</dd></div>
+    </dl>
+    ${chart}
+  </section>`;
+}
+
 async function viewOverview() {
   clearJumpUi();
   const restored = restoreView('overview');
@@ -1481,6 +1532,9 @@ async function viewOverview() {
   }
   const tz = new Date().getTimezoneOffset();
   const [data, sessionsRes, act] = await Promise.all([api('/stats'), api('/sessions?limit=30&roots=1'), api(`/activity?days=14&tz=${tz}`)]);
+  const spanDays = data.dateRange?.earliest ? Math.min(400, Math.ceil((Date.now() - Date.parse(data.dateRange.earliest)) / 86400000) + 1) : 0;
+  const lifetime = spanDays > 14 ? await api(`/activity?days=${spanDays}&tz=${tz}`) : null;
+  if (!stillOn('overview')) return;
   if (!stillOn('overview')) return;
   if (data._error || sessionsRes._error) {
     if (restored) return;
@@ -1505,7 +1559,7 @@ async function viewOverview() {
     <h2 class="section-label">Recent</h2>
     ${renderSessionList(recentSessions, { tree: true })}
 
-    <p class="alltime">All time: ${data.sessions.toLocaleString()} sessions \u00b7 ${fmtCompact(data.messages)} messages \u00b7 ${fmtCompact(data.toolCalls)} tool calls \u00b7 <span title="${(data.totalTokens || 0).toLocaleString()} tokens">${fmtCompact(data.totalTokens || 0)} tokens</span></p>
+    ${renderAllTimeSection(data, lifetime)}
   `;
 
   if (restored) renderInPlace(html);
@@ -1992,6 +2046,8 @@ $$('.nav-item').forEach(item => {
     if (window._timelineSse) { window._timelineSse.close(); window._timelineSse = null; }
     const view = item.dataset.view;
     window._lastView = view;
+    window._restoreScroll = false;
+    window.scrollTo(0, 0); // a tab tap always starts at the top
     updateNavActive(view);
     setHash(view);
     if (view === 'overview') viewOverview();

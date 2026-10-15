@@ -475,7 +475,7 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       // Per local day for the last N days: events, tool calls, sessions with
       // activity, and the same per agent. tz is the browser's getTimezoneOffset()
       // (minutes behind UTC) so "today" means the viewer's day.
-      const days: number = Math.min(Math.max(parseInt(query.days) || 14, 1), 90);
+      const days: number = Math.min(Math.max(parseInt(query.days) || 14, 1), 400);
       const tz: number = Math.max(-840, Math.min(840, parseInt(query.tz) || 0));
       const shift: string = `${-tz} minutes`;
       const since: string = new Date(Date.now() - (days + 1) * 86400000).toISOString();
