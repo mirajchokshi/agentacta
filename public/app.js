@@ -329,7 +329,7 @@ function handleRoute() {
   const raw = (window.location.hash || '').slice(1) || 'overview';
   if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
   if (window._timelineScrollHandler) { window.removeEventListener('scroll', window._timelineScrollHandler); window._timelineScrollHandler = null; }
-  if (window._sessionsScrollHandler) { window.removeEventListener('scroll', window._sessionsScrollHandler); window._sessionsScrollHandler = null; }
+  if (window._sessionsObserver) { window._sessionsObserver.disconnect(); window._sessionsObserver = null; }
 
   if (raw.startsWith('session/')) {
     const id = decodeURIComponent(raw.slice('session/'.length));
@@ -524,7 +524,7 @@ function statusIcon(s) {
   else if (s.status === 'stale') { kind = 'stale'; label = 'Stale: never recorded an end'; }
   else if (s.ended_reason === 'source' && s.source_status && !/^(done|completed?)$/i.test(s.source_status)) { kind = 'failed'; label = s.source_status; }
   const g = {
-    live: '<circle class="ring" cx="8" cy="8" r="3.5"/><circle cx="8" cy="8" r="3.5" fill="currentColor" stroke="none"/>',
+    live: '<circle cx="8" cy="8" r="3.5" fill="currentColor" stroke="none"/>', // pulse ring: .sicon-live::after
     stale: '<circle cx="8" cy="8" r="5.5" stroke-dasharray="2.4 2.2"/>',
     done: '<circle cx="8" cy="8" r="5.5"/><path d="M5.7 8.2l1.6 1.6 3.1-3.3"/>',
     failed: '<circle cx="8" cy="8" r="6" fill="currentColor" stroke="none"/><path d="M6 6l4 4M10 6l-4 4" stroke="var(--bg-surface)"/>',
@@ -712,18 +712,25 @@ async function viewSessions() {
     // New sessions shift offsets while paging; skip any already on screen.
     const fresh = page.sessions.filter(s => !content.querySelector(`.session-item[data-id="${CSS.escape(s.id)}"]`));
     if (list && fresh.length) list.insertAdjacentHTML('beforeend', fresh.map(renderSessionTree).join(''));
+    const more = $('#sessionsMore');
     if (!page.sessions.length || state.loaded >= state.total) {
-      $('#sessionsMore')?.setAttribute('hidden', '');
-      window.removeEventListener('scroll', window._sessionsScrollHandler);
-    } else window._sessionsScrollHandler();
+      more?.setAttribute('hidden', '');
+      window._sessionsObserver?.disconnect();
+    } else if (more) {
+      // Still in range after this page? Observe again to get a fresh callback.
+      window._sessionsObserver?.unobserve(more);
+      window._sessionsObserver?.observe(more);
+    }
   };
-  if (window._sessionsScrollHandler) window.removeEventListener('scroll', window._sessionsScrollHandler);
-  window._sessionsScrollHandler = () => {
-    if (!stillOn('sessions')) return;
-    if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 1500) loadOlder();
-  };
-  window.addEventListener('scroll', window._sessionsScrollHandler, { passive: true });
-  window._sessionsScrollHandler();
+  // Watching the "loading" line (well before it's on screen) avoids reading
+  // layout on every scroll event, which forced a full relayout per page.
+  window._sessionsObserver?.disconnect();
+  const more = $('#sessionsMore');
+  if (!more || more.hidden) return;
+  window._sessionsObserver = new IntersectionObserver(entries => {
+    if (entries.some(e => e.isIntersecting) && stillOn('sessions')) loadOlder();
+  }, { rootMargin: '0px 0px 1500px 0px' });
+  window._sessionsObserver.observe(more);
 }
 
 // At-a-glance picture of one session: the numbers, when it was busy, and

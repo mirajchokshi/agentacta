@@ -600,7 +600,14 @@ code, pre, .mono { font-family: var(--font-mono); }
 .sicon { display: inline-flex; flex-shrink: 0; width: 16px; height: 16px; }
 .sicon svg { overflow: visible; }
 .sicon-live { color: var(--green); }
-.sicon-live .ring { transform-box: fill-box; transform-origin: center; animation: live-ring 1.8s ease-out infinite; }
+/* The pulse is an HTML ring, not an SVG circle: Chrome animates an SVG child's
+   transform by re-running layout, which re-laid out the whole session list
+   every frame while anything was live. This one stays on the compositor. */
+.sicon-live { position: relative; }
+.sicon-live::after {
+  content: ''; position: absolute; inset: 3.75px; border: 1.5px solid currentColor; border-radius: 50%;
+  animation: live-ring 1.8s ease-out infinite; will-change: transform, opacity; pointer-events: none;
+}
 @keyframes live-ring { 0% { transform: scale(1); opacity: 0.7; } 100% { transform: scale(2.3); opacity: 0; } }
 .sicon-stale { color: var(--amber); }
 .sicon-done { color: var(--text-tertiary); opacity: 0.75; }
@@ -1194,7 +1201,7 @@ code, pre, .mono { font-family: var(--font-mono); }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
-  .sicon-live .ring { animation: none; opacity: 0; }
+  .sicon-live::after { animation: none; opacity: 0; }
 }
 
 /* Touch: no hover to discover rows, so show the affordance at rest and
@@ -1279,6 +1286,8 @@ a, button, select, summary, [role="link"], .nav-item, .session-item, .file-item 
 
   .session-list, .file-list { margin-inline: calc(-1 * var(--space-sm)); }
   .session-list { display: block; }
+  /* Block layout here (no shared columns), so off-screen rows can be skipped. */
+  .session-item, .subagent-row { content-visibility: auto; contain-intrinsic-size: auto 64px; }
   .session-item {
     grid-template-columns: auto minmax(0, 1fr) auto auto;
     grid-template-areas: "icon main action go" ". facts facts go";
