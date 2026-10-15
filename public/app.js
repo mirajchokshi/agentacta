@@ -333,8 +333,18 @@ function handleRoute() {
 
   if (raw.startsWith('session/')) {
     const id = decodeURIComponent(raw.slice('session/'.length));
-    if (id) { viewSession(id); return; }
+    if (id) {
+      // A session opened straight from its URL belongs under Sessions; one
+      // reached from a tab keeps that tab lit, and Back returns to it.
+      if (!window._routed) window._lastView = 'sessions';
+      window._routed = true;
+      updateNavActive(window._lastView);
+      updateMobileNavActive(window._lastView);
+      viewSession(id);
+      return;
+    }
   }
+  window._routed = true;
 
   const normalized = raw === 'search' ? 'overview' : raw; // old #search links land on Overview
   const view = normalized === 'overview' || normalized === 'sessions' || normalized === 'timeline' || normalized === 'files' || normalized === 'stats' || normalized === 'insights' ? normalized : 'overview';

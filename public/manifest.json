@@ -4,8 +4,8 @@
   "description": "Agent audit trail and search",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0f1a30",
-  "theme_color": "#1a2744",
+  "background_color": "#0d0e10",
+  "theme_color": "#0d0e10",
   "icons": [
     {
       "src": "/icon.svg",

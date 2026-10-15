@@ -15,22 +15,22 @@ AgentActa is a local audit trail and search engine for AI agent sessions. It ind
 
 ## Key files
 
-- `src/index.ts` — HTTP server, all API routes
-- `src/db.ts` — SQLite schema, init, prepared statements
-- `src/indexer.ts` — JSONL session log parser and indexer
-- `src/index-worker.ts` — Worker thread that runs indexing, file watching and insight scoring off the HTTP thread
-- `src/config.ts` — Config loading (CWD → XDG), env var overrides
-- `src/types.ts` — All TypeScript interfaces and type definitions
-- `src/insights.ts` — Session health scoring
-- `src/project-attribution.ts` — Project-scoped event attribution
-- `src/attribution-store.ts` — Stores each session's attribution at index time (event_attr), with backfill
-- `src/search.ts` — Command-palette search (sessions, files, full-text events with snippets)
-- `src/session-detail.ts` — Session events page / older pages / shape / project filters for the session endpoint
-- `src/delta-attribution-context.ts` — Delta attribution context loader
-- `public/app.js` — Frontend application (~1800 lines)
-- `public/style.css` — All styles
-- `public/index.html` — Shell (sidebar nav + main content area)
-- `index.js` — Thin shebang wrapper → `dist/index.js`
+- `src/index.ts`: HTTP server, all API routes
+- `src/db.ts`: SQLite schema, init, prepared statements
+- `src/indexer.ts`: JSONL session log parser and indexer
+- `src/index-worker.ts`: Worker thread that runs indexing, file watching and insight scoring off the HTTP thread
+- `src/config.ts`: Config loading (CWD → XDG), env var overrides
+- `src/types.ts`: All TypeScript interfaces and type definitions
+- `src/insights.ts`: Session health scoring
+- `src/project-attribution.ts`: Project-scoped event attribution
+- `src/attribution-store.ts`: Stores each session's attribution at index time (event_attr), with backfill
+- `src/search.ts`: Command-palette search (sessions, files, full-text events with snippets)
+- `src/session-detail.ts`: Session events page / older pages / shape / project filters for the session endpoint
+- `src/delta-attribution-context.ts`: Delta attribution context loader
+- `public/app.js`: Frontend application (~1800 lines)
+- `public/style.css`: All styles
+- `public/index.html`: Shell (sidebar nav + main content area)
+- `index.js`: Thin shebang wrapper → `dist/index.js`
 
 ## Architecture
 
@@ -69,7 +69,7 @@ npm start        # run compiled dist/index.js
 ## Patterns to follow
 
 - All routes use `parseQuery()` for URL parsing and `json()` helper for responses
-- No dependencies for HTTP routing — just pathname matching in if/else chain
+- No dependencies for HTTP routing, just pathname matching in if/else chain
 - Frontend uses hash-based routing (`#sessions`, `#overview`, etc.)
 - Agent labels normalized via `normalizeAgentLabel()` (e.g. `claude-*` → `claude-code`)
 - Config supports env var overrides: `PORT`, `AGENTACTA_STORAGE`, `AGENTACTA_SESSIONS_PATH`, `AGENTACTA_DB_PATH`
