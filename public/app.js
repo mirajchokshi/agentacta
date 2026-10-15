@@ -2003,7 +2003,7 @@ async function viewInsights() {
           </div>
           <div class="si-when"><span>${fmtTime(s.start_time)}</span><span class="si-dur">${escHtml(normalizeAgentLabel(s.agent || ''))}</span></div>
           <div class="si-counts" title="Reliability score: higher means fewer errors"><span>${100 - s.confusion_score}<span class="unit">/100</span></span><span>reliability</span></div>
-          <div class="si-action"></div>
+          <span class="si-go" aria-hidden="true">${icon('chevron', 16)}</span>
         </div>`;
       }).join('') : '<div class="empty"><p>No flagged sessions found</p></div>'}
     </div>
