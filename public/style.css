@@ -1505,6 +1505,8 @@ a, button, select, summary, [role="link"], .nav-item, .session-item, .file-item 
 .sub-label { display: flex; gap: var(--space-sm); align-items: baseline; font-size: 12.5px; font-weight: 500; color: var(--text-secondary); margin: var(--space-sm) 0 var(--space-xs); }
 .sub-label .count { color: var(--text-tertiary); font-weight: 400; font-variant-numeric: tabular-nums; }
 
+/* A wrapper, not the table itself: tables ignore the 1px height and would
+   still stretch the page's scroll area. */
 .sr-only {
   position: absolute;
   width: 1px;

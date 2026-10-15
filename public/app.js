@@ -153,7 +153,7 @@ function renderColumnChart({ points, height = 96, caption, unit = '', axis = [] 
   return `<figure class="colchart" style="--plot-h:${height}px">
     <div class="colchart-plot">${cols}</div>
     ${axis.length ? `<div class="colchart-axis">${axis.map(a => `<span>${escHtml(a)}</span>`).join('')}</div>` : ''}
-    <table class="sr-only"><caption>${escHtml(caption)}</caption><tbody>${points.map(p => `<tr><th>${escHtml(p.label)}</th><td>${p.value}${unit}</td></tr>`).join('')}</tbody></table>
+    <div class="sr-only"><table><caption>${escHtml(caption)}</caption><tbody>${points.map(p => `<tr><th>${escHtml(p.label)}</th><td>${p.value}${unit}</td></tr>`).join('')}</tbody></table></div>
   </figure>`;
 }
 
