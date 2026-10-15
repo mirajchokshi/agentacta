@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **New app icon**: the favicon and home-screen icon use the gradient mark from the sidebar and agentacta.com.
+
+### Fixed
+- A session opened straight from its link lit Overview in the sidebar and Back went to Overview. It now lights Sessions, and a session reached from another tab keeps that tab lit, including after browser Back and Forward.
+
 ## [2026.10.15] - 2026-10-15
 
 ### Added
@@ -109,7 +117,7 @@
 ## [2026.3.26] - 2026-03-26
 
 ### Added
-- **Insights tab overhaul**: severity-scaled reliability scoring: each signal now contributes based on actual intensity (retry count, error rate, tool call volume) rather than a fixed weight
+- **Insights tab overhaul**: severity-scaled reliability scoring, where each signal now contributes based on actual intensity (retry count, error rate, tool call volume) rather than a fixed weight
 - **Issue rate badge**: shows what % of possible issue types were detected in a session
 - **Tap-to-reveal signal descriptions**: mobile-friendly alternative to hover tooltips on the issue type chart
 - **Floating mobile nav**: bottom nav is now a floating pill with accent-colored active state
