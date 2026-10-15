@@ -25,13 +25,19 @@ function daysAgo(n, hour = 9, minute = 0) {
   return d;
 }
 
+// Relative to now, so "today" sessions are never in the future and the live
+// session below is live whenever the demo is recorded.
+function minutesAgo(n) {
+  return new Date(Date.now() - n * 60000);
+}
+
 function ts(base, offsetMinutes) {
   return new Date(base.getTime() + offsetMinutes * 60000).toISOString();
 }
 
 function sessionLine(id, timestamp, agent = 'main', sessionType = null) {
-  const obj = { type: 'session', version: 3, id, timestamp, cwd: '/home/demo/weather-app' };
-  if (agent !== 'main') obj.agent = agent;
+  // Always set the agent: otherwise demo mode names it after the folder.
+  const obj = { type: 'session', version: 3, id, timestamp, cwd: '/home/demo/weather-app', agent };
   if (sessionType) obj.sessionType = sessionType;
   return JSON.stringify(obj);
 }
@@ -536,7 +542,7 @@ function writeSession(filename, lines) {
 // ============================================================
 (() => {
   const sid = `${uid()}-subagent-forecast`;
-  const base = daysAgo(0, 9, 0);
+  const base = minutesAgo(5 * 60);
   const model = 'claude-sonnet-4-20250514';
   const lines = [];
   let pid;
@@ -598,7 +604,7 @@ function writeSession(filename, lines) {
 // ============================================================
 (() => {
   const sid = uid();
-  const base = daysAgo(0, 14, 0);
+  const base = minutesAgo(3 * 60);
   const model = 'claude-sonnet-4-20250514';
   const lines = [];
   let pid;
@@ -659,6 +665,118 @@ function writeSession(filename, lines) {
 
   writeSession(`${sid}.jsonl`, lines);
   console.log(`Session 7: ${sid} — Add unit tests (${lines.length} events)`);
+})();
+
+
+// ============================================================
+// Session 8: live now, with two Codex subagent threads nested under it
+// ============================================================
+function codexThread(id, parentId, start, title, steps, finishedAgoMin) {
+  const t = (min) => new Date(start.getTime() + min * 60000).toISOString();
+  const lines = [
+    JSON.stringify({ type: 'session_meta', timestamp: t(0), payload: { id, timestamp: t(0), cwd: '/home/demo/weather-app', originator: 'codex_cli_rs', model_provider: 'openai', source: { subagent: { thread_spawn: { parent_thread_id: parentId, depth: 1 } } } } }),
+    JSON.stringify({ type: 'turn_context', timestamp: t(0), payload: { model: 'gpt-5-codex' } }),
+    JSON.stringify({ type: 'event_msg', timestamp: t(0.2), payload: { type: 'user_message', message: title } }),
+  ];
+  let min = 0.5;
+  for (const [cmd, out] of steps) {
+    const callId = `call_${shortId()}`;
+    lines.push(JSON.stringify({ type: 'response_item', timestamp: t(min), payload: { type: 'function_call', name: 'shell', arguments: JSON.stringify({ command: ['bash', '-lc', cmd] }), call_id: callId } }));
+    lines.push(JSON.stringify({ type: 'response_item', timestamp: t(min + 0.3), payload: { type: 'function_call_output', call_id: callId, output: out } }));
+    min += 1.4;
+  }
+  if (finishedAgoMin != null) lines.push(JSON.stringify({ type: 'event_msg', timestamp: t(min), payload: { type: 'agent_message', message: `Done: ${title.toLowerCase()}.` } }));
+  writeSession(`codex-${id}.jsonl`, lines);
+  return lines.length;
+}
+
+(() => {
+  const sid = uid();
+  const base = minutesAgo(42);
+  const model = 'claude-sonnet-4-20250514';
+  const lines = [];
+  let pid;
+
+  lines.push(sessionLine(sid, ts(base, 0)));
+  pid = shortId(); lines.push(modelChangeLine(model, ts(base, 0), pid));
+  let m = userMsg("Polish the dashboard: add a temperature chart and make it accessible. Split the work across subagents.", ts(base, 1), pid);
+  lines.push(m.line); pid = m.id;
+
+  const steps = [
+    ['Read', { file_path: 'weather-app/public/index.html' }, '<!doctype html> ... 84 lines'],
+    ['Grep', { pattern: 'renderForecast', path: 'weather-app/public' }, 'public/app.js:41: function renderForecast(days) {'],
+    ['Read', { file_path: 'weather-app/public/app.js' }, 'const API = "/api/weather"; ... 212 lines'],
+    ['spawn_agent', { task: 'Write a temperature chart component' }, 'Spawned codex thread: chart component'],
+    ['spawn_agent', { task: 'Audit the dashboard for accessibility issues' }, 'Spawned codex thread: accessibility audit'],
+    ['Edit', { file_path: 'weather-app/public/app.js', old_string: 'renderForecast(days);', new_string: 'renderForecast(days);\n  renderTempChart(days);' }, '✅ Applied edit to weather-app/public/app.js'],
+    ['exec', { command: 'cd weather-app && npx jest --silent' }, 'Tests: 6 passed, 6 total'],
+  ];
+  let at = 2;
+  for (const [name, args, out] of steps) {
+    const tcId = `toolu_${shortId()}${shortId()}`;
+    m = assistantMsg(null, model, ts(base, at), pid, null, [{ id: tcId, name, arguments: args }]);
+    lines.push(m.line); pid = m.id;
+    const tr = toolResult(tcId, name, out, ts(base, at + 0.4), pid);
+    lines.push(tr.line); pid = tr.id;
+    at += 5.5;
+  }
+  // Last activity about a minute ago: this session shows as live.
+  m = assistantMsg("Chart is wired in; waiting on the accessibility audit before the final pass.", model, minutesAgo(1).toISOString(), pid);
+  lines.push(m.line);
+  writeSession(`${sid}.jsonl`, lines);
+
+  const a = codexThread(uid(), sid, minutesAgo(30), 'Write a temperature chart component', [
+    ['cat public/app.js | head -60', 'const API = "/api/weather"; ...'],
+    ['apply_patch public/chart.js', 'Created public/chart.js (58 lines)'],
+    ['npx jest tests/chart.test.js', 'PASS tests/chart.test.js (3 tests)'],
+  ], 12);
+  // Still running: its last step lands a few minutes ago, well inside the live window.
+  const b = codexThread(uid(), sid, minutesAgo(8), 'Audit the dashboard for accessibility issues', [
+    ['npx axe public/index.html', '3 issues: missing labels on 2 inputs, low contrast on .muted'],
+    ['apply_patch public/index.html', 'Added aria-labels to search and unit toggle'],
+    ['apply_patch public/styles.css', 'Raised .muted contrast to 4.8:1'],
+  ], null);
+  console.log(`Session 8: ${sid} — Polish dashboard, live with 2 subagents (${lines.length} + ${a} + ${b} events)`);
+})();
+
+// ============================================================
+// Background history: small sessions over the past ~9 weeks so the
+// per-day and per-week charts have shape (ramping up recently).
+// ============================================================
+(() => {
+  const files = ['weather-app/src/weatherClient.js', 'weather-app/routes/weather.js', 'weather-app/public/app.js', 'weather-app/server.js', 'weather-app/README.md', 'weather-app/tests/routes.test.js'];
+  const prompts = ['Fix the flaky cache test', 'Tidy up error messages', 'Bump dependencies', 'Add request logging', 'Handle city names with accents', 'Document the API endpoints', 'Speed up the forecast route', 'Review open TODOs'];
+  const agents = ['main', 'main', 'main', 'docs-agent'];
+  let count = 0;
+  for (let day = 5; day <= 62; day++) {
+    const perDay = day < 14 ? 2 : (Math.random() < 0.6 ? 1 : 0);
+    for (let k = 0; k < perDay; k++) {
+      const sid = uid();
+      const base = daysAgo(day, 9 + Math.floor(Math.random() * 8), Math.floor(Math.random() * 60));
+      const agent = agents[Math.floor(Math.random() * agents.length)];
+      const model = 'claude-sonnet-4-20250514';
+      const lines = [sessionLine(sid, ts(base, 0), agent)];
+      let pid = shortId(); lines.push(modelChangeLine(model, ts(base, 0), pid));
+      let m = userMsg(prompts[Math.floor(Math.random() * prompts.length)], ts(base, 1), pid);
+      lines.push(m.line); pid = m.id;
+      const n = 3 + Math.floor(Math.random() * (day < 14 ? 14 : 7));
+      for (let i = 0; i < n; i++) {
+        const tcId = `toolu_${shortId()}${shortId()}`;
+        const name = ['Read', 'Edit', 'exec', 'Grep'][Math.floor(Math.random() * 4)];
+        const file = files[Math.floor(Math.random() * files.length)];
+        const args = name === 'exec' ? { command: 'cd weather-app && npm test --silent' } : name === 'Grep' ? { pattern: 'TODO', path: 'weather-app' } : { file_path: file };
+        m = assistantMsg(null, model, ts(base, 2 + i), pid, null, [{ id: tcId, name, arguments: args }]);
+        lines.push(m.line); pid = m.id;
+        const tr = toolResult(tcId, name, name === 'exec' ? 'Tests: 6 passed' : 'ok', ts(base, 2.3 + i), pid);
+        lines.push(tr.line); pid = tr.id;
+      }
+      m = assistantMsg('Done.', model, ts(base, 3 + n), pid);
+      lines.push(m.line);
+      writeSession(`history-${sid}.jsonl`, lines);
+      count++;
+    }
+  }
+  console.log(`History: ${count} small sessions over the past 9 weeks`);
 })();
 
 console.log(`\nDone! Demo files written to ${DEMO_DIR}`);

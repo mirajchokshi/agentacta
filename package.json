@@ -21,6 +21,7 @@
     "test": "tsx --test tests/*.test.ts",
     "demo": "node scripts/seed-demo.js && node dist/index.js --demo",
     "seed-demo": "node scripts/seed-demo.js",
+    "record-demo": "npm run build && node scripts/record-demo.js",
     "prepublishOnly": "npm run build && npm test"
   },
   "keywords": [
