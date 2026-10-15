@@ -57,7 +57,10 @@ export function init(dbPath?: string): void {
 
     CREATE INDEX IF NOT EXISTS idx_sessions_start_time ON sessions(start_time DESC);
     CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
-    CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
+    -- Covers the day/agent activity rollups (timestamp range, type, session)
+    -- so they never read event bodies; also serves plain timestamp ranges.
+    CREATE INDEX IF NOT EXISTS idx_events_ts_cover ON events(timestamp, type, session_id);
+    DROP INDEX IF EXISTS idx_events_timestamp;
     CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
     CREATE INDEX IF NOT EXISTS idx_events_tool_name ON events(tool_name);
 
