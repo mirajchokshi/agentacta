@@ -73,10 +73,11 @@ export function analyzeSession(db: Database.Database, sessionId: string): Insigh
   // 3. high_error_rate: >30% of tool calls returned errors
   const toolResults = events.filter((e: EventRow) => e.type === 'tool_result');
   if (toolResults.length > 0) {
+    // Trust the log's own error flag; guess from the text only when it has none.
     const errorResults = toolResults.filter((e: EventRow) => {
+      if (e.is_error != null) return e.is_error === 1;
       const c = (e.content || e.tool_result || '').toLowerCase();
-      return c.includes('error') || c.includes('Error') || c.includes('ERROR') ||
-             c.includes('failed') || c.includes('exception');
+      return c.includes('error') || c.includes('failed') || c.includes('exception');
     });
     const errorRate: number = errorResults.length / toolResults.length;
     if (errorRate > 0.3) {
@@ -186,7 +187,7 @@ export function analyzeAll(db: Database.Database): InsightResult[] {
 }
 
 // Bump when analyzeSession's scoring changes so stored rows are recomputed once.
-export const INSIGHTS_VERSION = 1;
+export const INSIGHTS_VERSION = 2; // 2: error rate uses is_error
 
 // Startup path: a session's insights depend only on its own rows, so only
 // sessions that were (re)indexed or have no stored insights need analyzing.

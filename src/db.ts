@@ -163,6 +163,10 @@ export function init(dbPath?: string): void {
   if (!colNames.includes('cache_write_tokens')) db.exec("ALTER TABLE sessions ADD COLUMN cache_write_tokens INTEGER DEFAULT 0");
   if (!colNames.includes('initial_prompt')) db.exec("ALTER TABLE sessions ADD COLUMN initial_prompt TEXT");
   if (!colNames.includes('first_message_id')) db.exec("ALTER TABLE sessions ADD COLUMN first_message_id TEXT");
+  // Whether a tool result was an error, when the log says so (1/0); NULL
+  // when the format doesn't record it and readers fall back to the text.
+  const eventCols: string[] = (db.prepare("PRAGMA table_info(events)").all() as PragmaColumnRow[]).map((c: PragmaColumnRow) => c.name);
+  if (!eventCols.includes('is_error')) db.exec("ALTER TABLE events ADD COLUMN is_error INTEGER");
   if (!colNames.includes('first_message_timestamp')) db.exec("ALTER TABLE sessions ADD COLUMN first_message_timestamp TEXT");
   if (!colNames.includes('models')) db.exec("ALTER TABLE sessions ADD COLUMN models TEXT");
   if (!colNames.includes('projects')) db.exec("ALTER TABLE sessions ADD COLUMN projects TEXT");
@@ -184,7 +188,7 @@ export function init(dbPath?: string): void {
   const hasEvents = !!db.prepare('SELECT 1 FROM events LIMIT 1').get();
   if (!hasEvents) db.prepare("INSERT OR IGNORE INTO agentacta_meta (key, value) VALUES ('fts_version', ?)").run(String(FTS_VERSION));
 
-  const INDEX_VERSION = 4; // 2: Claude ai-title/custom-title labels, thread-prompt summaries; 3: skip attachment lines; 4: Claude Code tool_result blocks
+  const INDEX_VERSION = 5; // 2: Claude ai-title/custom-title labels, thread-prompt summaries; 3: skip attachment lines; 4: Claude Code tool_result blocks; 5: is_error
   const row = db.prepare("SELECT value FROM agentacta_meta WHERE key = 'index_version'").get() as { value: string } | undefined;
   if (!row || Number(row.value) < INDEX_VERSION) {
     db.exec("DELETE FROM index_state");
@@ -201,7 +205,7 @@ export function createStmts(db: Database.Database): PreparedStatements {
     deleteEvents: db.prepare('DELETE FROM events WHERE session_id = ?'),
     deleteSession: db.prepare('DELETE FROM sessions WHERE id = ?'),
     deleteFileActivity: db.prepare('DELETE FROM file_activity WHERE session_id = ?'),
-    insertEvent: db.prepare(`INSERT OR REPLACE INTO events (id, session_id, timestamp, type, role, content, tool_name, tool_args, tool_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+    insertEvent: db.prepare(`INSERT OR REPLACE INTO events (id, session_id, timestamp, type, role, content, tool_name, tool_args, tool_result, is_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     upsertSession: db.prepare(`INSERT OR REPLACE INTO sessions (id, start_time, end_time, message_count, tool_count, model, summary, agent, session_type, total_cost, total_tokens, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, initial_prompt, first_message_id, first_message_timestamp, models, projects) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     setSessionLineage: db.prepare('UPDATE sessions SET parent_id = ?, label = ?, source_status = ? WHERE id = ?'),
     upsertState: db.prepare(`INSERT OR REPLACE INTO index_state (file_path, last_offset, last_modified) VALUES (?, ?, ?)`),

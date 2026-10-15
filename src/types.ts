@@ -47,6 +47,7 @@ export interface EventRow {
   tool_name: string | null;
   tool_args: string | null;
   tool_result: string | null;
+  is_error?: number | null;
 }
 
 export interface FileActivityRow {
@@ -138,6 +139,7 @@ export interface ExtractedToolResult {
   toolCallId: string;
   toolName: string;
   content: string;
+  isError: number | null; // 1/0 when the log records it, else null
 }
 
 // ─── JSONL parsing types ─────────────────────────────────────────────

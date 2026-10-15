@@ -6,6 +6,7 @@ import os from 'os';
 
 import { open, init, createStmts } from '../src/db.js';
 import { discoverSessionDirs, listJsonlFiles, indexFile, indexCronRunFile, indexOpenClawDb } from '../src/indexer.js';
+import { analyzeSession } from '../src/insights.js';
 import type { PreparedStatements, SessionRow, SessionDir, IndexResult } from '../src/types.js';
 import Database from 'better-sqlite3';
 
@@ -478,5 +479,40 @@ describe('indexer', () => {
     assert.strictEqual(fts.c, 1, 'tool output is searchable');
     const sess = db.prepare("SELECT message_count, tool_count FROM sessions WHERE id = 'cc-tools-1'").get() as { message_count: number; tool_count: number };
     assert.deepStrictEqual([sess.message_count, sess.tool_count], [1, 2], 'results are not counted as messages');
+  });
+
+  it('stores Claude Code is_error once and skips image-only output', () => {
+    const fp = writeSession('claude-tool-errors.jsonl', [
+      { type: 'user', sessionId: 'cc-err-1', uuid: 'u-1', timestamp: '2026-10-14T20:00:00Z', message: { role: 'user', content: 'Fix it' } },
+      { type: 'assistant', sessionId: 'cc-err-1', uuid: 'a-1', timestamp: '2026-10-14T20:00:01Z', message: { role: 'assistant', content: [
+        { type: 'tool_use', id: 'toolu_r', name: 'Read', input: { file_path: '/x/a.ts' } },
+        { type: 'tool_use', id: 'toolu_b', name: 'Bash', input: { command: 'npm test' } },
+        { type: 'tool_use', id: 'toolu_i', name: 'Read', input: { file_path: '/x/shot.png' } },
+      ] } },
+      { type: 'user', sessionId: 'cc-err-1', uuid: 'u-2', timestamp: '2026-10-14T20:00:02Z', message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'toolu_r', content: 'throw new Error("bad input")' },
+        { type: 'tool_result', tool_use_id: 'toolu_b', content: 'Exit code 1', is_error: true },
+        { type: 'tool_result', tool_use_id: 'toolu_i', content: [{ type: 'image', source: {} }] },
+      ] } },
+    ]);
+    indexFile(db, fp, 'claude-code', stmts, false);
+    const rows = db.prepare("SELECT id, content, tool_result, is_error FROM events WHERE session_id = 'cc-err-1' AND type = 'tool_result' ORDER BY id").all() as Array<{ id: string; content: string; tool_result: string | null; is_error: number }>;
+    assert.deepStrictEqual(rows.map(r => [r.id, r.is_error, r.tool_result]), [['toolu_b:result', 1, null], ['toolu_r:result', 0, null]]);
+    assert.strictEqual(rows[1].content, 'throw new Error("bad input")');
+  });
+
+  it('error rate follows is_error, not words in the output', () => {
+    const results = (flag: boolean) => [0, 1, 2].map(i => ({ type: 'tool_result', tool_use_id: `toolu_${flag}_${i}`, content: 'class ParseError extends Error {} // failed', is_error: flag }));
+    for (const flag of [false, true]) {
+      const sid = `cc-rate-${flag}`;
+      const fp = writeSession(`${sid}.jsonl`, [
+        { type: 'user', sessionId: sid, uuid: `${sid}-u1`, timestamp: '2026-10-14T20:00:00Z', message: { role: 'user', content: 'Read the parser' } },
+        { type: 'assistant', sessionId: sid, uuid: `${sid}-a1`, timestamp: '2026-10-14T20:00:01Z', message: { role: 'assistant', content: [0, 1, 2].map(i => ({ type: 'tool_use', id: `toolu_${flag}_${i}`, name: 'Read', input: { file_path: `/x/p${i}.ts` } })) } },
+        { type: 'user', sessionId: sid, uuid: `${sid}-u2`, timestamp: '2026-10-14T20:00:02Z', message: { role: 'user', content: results(flag) } },
+      ]);
+      indexFile(db, fp, 'claude-code', stmts, false);
+      const signals = analyzeSession(db, sid)!.signals.map(s => s.type);
+      assert.strictEqual(signals.includes('high_error_rate'), flag, `is_error=${flag}`);
+    }
   });
 });

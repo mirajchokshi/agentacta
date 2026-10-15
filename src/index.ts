@@ -257,6 +257,10 @@ function formatEventCursor(row: EventRow): string {
 
 // Init DB and start watcher
 init();
+// A failed tool call: the log's own flag when it has one, else a guess from
+// the result text (LIKE is case-insensitive for ASCII).
+const TOOL_ERROR_SQL = "(is_error = 1 OR (is_error IS NULL AND tool_result LIKE '%error%'))";
+
 const db: Database.Database = open();
 db.pragma('busy_timeout = 5000'); // the indexer worker writes on its own connection
 
@@ -816,10 +820,9 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
       if (sessionIds.length) {
         const placeholders: string = sessionIds.map(() => '?').join(',');
         recentErrors = (db.prepare(
-          `SELECT tool_result FROM events
+          `SELECT COALESCE(tool_result, content) AS tool_result FROM events
            WHERE session_id IN (${placeholders})
-             AND tool_result IS NOT NULL
-             AND (tool_result LIKE '%error%' OR tool_result LIKE '%Error%' OR tool_result LIKE '%ERROR%')
+             AND type = 'tool_result' AND ${TOOL_ERROR_SQL}
            ORDER BY timestamp DESC LIMIT 3`
         ).all(...sessionIds) as Array<{ tool_result: string }>).map((r) => r.tool_result.slice(0, 200));
       }
@@ -883,10 +886,9 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
       ).all(...allIds) as Array<{ tool_name: string; c: number }>).map((r) => ({ tool: r.tool_name, count: r.c }));
 
       const commonErrors: string[] = (db.prepare(
-        `SELECT DISTINCT SUBSTR(tool_result, 1, 200) as err FROM events
+        `SELECT DISTINCT SUBSTR(COALESCE(tool_result, content), 1, 200) as err FROM events
          WHERE session_id IN (${ph})
-           AND tool_result IS NOT NULL
-           AND (tool_result LIKE '%error%' OR tool_result LIKE '%Error%' OR tool_result LIKE '%ERROR%')
+           AND type = 'tool_result' AND ${TOOL_ERROR_SQL}
          ORDER BY timestamp DESC LIMIT 5`
       ).all(...allIds) as Array<{ err: string }>).map((r) => r.err);
 

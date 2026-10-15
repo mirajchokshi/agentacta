@@ -91,6 +91,7 @@ hand), so each round runs one untimed search first, for every tool.
 ## Run it
 
 ```bash
+npm ci && npm run build                                # the image runs this checkout's dist/
 node bench/gen-dataset.js ~/agentacta-bench-env/data
 docker compose -f bench/compose.agentacta.yml up -d --build
 docker compose -f bench/compose.agentsview.yml up -d
@@ -98,3 +99,8 @@ docker compose -f bench/compose.langfuse.yml up -d && node bench/langfuse/load.m
 WARM_SEARCH=1 node bench/ui-bench.mjs agentacta 5    # also: agentsview, langfuse
 bench/teardown.sh                                      # removes all of it
 ```
+
+`teardown.sh` also removes the images the compose files pull (Langfuse,
+ClickHouse, MinIO, Redis, Postgres, agentsview, and `node:24-bookworm`) unless
+another container is using them. It deletes the state folder only if it holds
+the generated `data/normalized.jsonl`.
