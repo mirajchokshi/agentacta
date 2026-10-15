@@ -2042,6 +2042,14 @@ $$('.nav-item').forEach(item => {
   });
 });
 
+// The wordmark goes to the Overview, the same way its tab does. Modified
+// clicks fall through to the link so it can open in a new tab.
+$('.brand-link').addEventListener('click', (e) => {
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+  e.preventDefault();
+  $('.nav-item[data-view="overview"]').click();
+});
+
 // --- Command Palette (Cmd+K) ---
 window._cmdk = { open: false, index: 0, items: [], scrollY: 0 };
 

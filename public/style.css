@@ -216,6 +216,10 @@ code, pre, .mono { font-family: var(--font-mono); }
 }
 .brand-mark svg { width: 16px; height: 16px; fill: #fff; }
 .sidebar h1 span { color: var(--text-secondary); font-weight: 500; }
+.brand-link { display: flex; align-items: center; color: inherit; text-decoration: none; border-radius: 6px; margin: -3px -6px; padding: 3px 6px; transition: background var(--duration-fast); }
+.brand-link:hover { background: var(--bg-hover); }
+.brand-link:active { background: var(--bg-active); }
+.brand-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .theme-toggle,
 .mobile-search-btn,
