@@ -34,7 +34,7 @@ import { analyzeSession, getInsightsSummary } from './insights.js';
 import { isValidDateKey, resolveStaticPath } from './http-utils.js';
 import { withStatus, attachChildren } from './session-status.js';
 import { loadSessionEvents, loadOlderSessionEvents } from './session-detail.js';
-import { quickSearch } from './search.js';
+import { quickSearch, toFtsQuery } from './search.js';
 
 // --version / -v flag: print version and exit
 if (process.argv.includes('--version') || process.argv.includes('-v')) {
@@ -241,19 +241,6 @@ function normalizeAgentLabel(agent: string | null): string | null {
 function looksLikeSessionId(q: string): boolean {
   const s: string = (q || '').trim();
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
-}
-
-function toFtsQuery(q: string): string {
-  const s: string = (q || '').trim();
-  if (!s) return '';
-  // Quote each token so dashes and punctuation don't break FTS parsing.
-  // Example: abc-def -> "abc-def"
-  const tokens: string[] = s.match(/"[^"]+"|\S+/g) || [];
-  return tokens
-    .map((t: string) => t.replace(/^"|"$/g, '').replace(/"/g, '""'))
-    .filter(Boolean)
-    .map((t: string) => `"${t}"`)
-    .join(' AND ');
 }
 
 function parseEventCursor(cursor: string | undefined, fallbackAfter: string, fallbackAfterId?: string): { after: string; afterId: string | null } {

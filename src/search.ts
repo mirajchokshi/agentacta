@@ -10,52 +10,59 @@ export interface QuickSearchResult {
   events: Array<{ id: string; session_id: string; timestamp: string; type: string; role: string | null; tool_name: string | null; snippet: string; session_label: string | null; session_summary: string | null }>;
 }
 
-// Marks around matched terms in snippets (control characters, so they can't
-// collide with text and the client can escape everything else first).
-export const MARK_START = '\u0002';
-export const MARK_END = '\u0003';
-
 function likePattern(q: string): string {
   return '%' + q.replace(/[\\%_]/g, c => '\\' + c) + '%';
 }
 
-// Each word must appear; the last one may be unfinished (prefix match) unless
-// the query ends with a space. Prefixes start at 3 letters: a 2-letter prefix
-// matches most of the index and costs far more than it helps. Quoting keeps
-// punctuation from breaking FTS.
-export function toPrefixFtsQuery(q: string): string {
-  const words = q.match(/[^\s"]+/g) || [];
-  if (!words.length) return '';
-  const tokens = words.map(t => `"${t}"`);
-  if (!/\s$/.test(q) && words[words.length - 1].length >= 3) tokens[tokens.length - 1] += '*';
+// FTS5 query from user text: every word (or "quoted phrase") must appear;
+// each is quoted so dashes and punctuation don't break FTS parsing. With
+// prefix, an unfinished last word (3+ letters, no trailing space, not a
+// quoted phrase) also matches longer words: a 2-letter prefix matches most of
+// the index and costs far more than it helps.
+export function toFtsQuery(q: string, { prefix = false }: { prefix?: boolean } = {}): string {
+  const raw: string[] = (q || '').trim().match(/"[^"]+"|\S+/g) || [];
+  const tokens: string[] = raw
+    .map((t: string) => t.replace(/^"|"$/g, '').replace(/"/g, '""'))
+    .filter(Boolean)
+    .map((t: string) => `"${t}"`);
+  if (!tokens.length) return '';
+  const last: string = raw[raw.length - 1];
+  if (prefix && !/\s$/.test(q) && !last.startsWith('"') && last.length >= 3) tokens[tokens.length - 1] += '*';
   return tokens.join(' AND ');
 }
 
 export function quickSearch(db: Database.Database, query: string): QuickSearchResult {
   const q = query.trim();
   if (!q) return { sessions: [], files: [], events: [] };
-  const like = likePattern(q);
+  // Every word must appear somewhere (in any order), as with the text search.
+  const words: string[] = (q.match(/"[^"]+"|\S+/g) || []).map(w => w.replace(/^"|"$/g, '')).filter(Boolean).slice(0, 8);
+  if (!words.length) return { sessions: [], files: [], events: [] };
+  const params: Record<string, string> = {};
+  words.forEach((w, i) => { params[`w${i}`] = likePattern(w); });
+  const eachWord = (expr: (p: string) => string): string => words.map((_, i) => `(${expr(`@w${i}`)})`).join(' AND ');
+  const inTitle = (p: string): string => `label LIKE ${p} ESCAPE '\\' OR summary LIKE ${p} ESCAPE '\\'`;
 
   const sessions = db.prepare(
     `SELECT id, label, summary, SUBSTR(initial_prompt, 1, 300) AS initial_prompt, agent, start_time, end_time
      FROM sessions
-     WHERE label LIKE @like ESCAPE '\\' OR summary LIKE @like ESCAPE '\\' OR initial_prompt LIKE @like ESCAPE '\\' OR id LIKE @like ESCAPE '\\'
-     ORDER BY (label LIKE @like ESCAPE '\\' OR summary LIKE @like ESCAPE '\\') DESC, COALESCE(end_time, start_time) DESC
+     WHERE ${eachWord(p => `${inTitle(p)} OR initial_prompt LIKE ${p} ESCAPE '\\' OR id LIKE ${p} ESCAPE '\\'`)}
+     ORDER BY (${eachWord(inTitle)}) DESC, COALESCE(end_time, start_time) DESC
      LIMIT 5`
-  ).all({ like }) as QuickSearchResult['sessions'];
+  ).all(params) as QuickSearchResult['sessions'];
 
   // Files whose name matches rank above files that only match on a folder.
+  const baseName = "SUBSTR(file_path, LENGTH(RTRIM(file_path, REPLACE(file_path, '/', ''))) + 1)";
   const files = db.prepare(
     `SELECT file_path, COUNT(*) AS touches, MAX(timestamp) AS last_touched
-     FROM file_activity WHERE file_path LIKE @like ESCAPE '\\'
+     FROM file_activity WHERE ${eachWord(p => `file_path LIKE ${p} ESCAPE '\\'`)}
      GROUP BY file_path
-     ORDER BY (SUBSTR(file_path, LENGTH(RTRIM(file_path, REPLACE(file_path, '/', ''))) + 1) LIKE @like ESCAPE '\\') DESC, touches DESC
+     ORDER BY (${words.map((_, i) => `${baseName} LIKE @w${i} ESCAPE '\\'`).join(' OR ')}) DESC, touches DESC
      LIMIT 4`
-  ).all({ like }) as QuickSearchResult['files'];
+  ).all(params) as QuickSearchResult['files'];
 
   // One character matches nearly every event; wait for a second one.
   let events: QuickSearchResult['events'] = [];
-  const fts = q.replace(/\s/g, '').length >= 2 ? toPrefixFtsQuery(query) : '';
+  const fts = q.replace(/\s/g, '').length >= 2 ? toFtsQuery(query, { prefix: true }) : '';
   if (fts) {
     try {
       // Pick the newest matches first, then build snippets for just those:

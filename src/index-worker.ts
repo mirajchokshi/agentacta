@@ -8,7 +8,7 @@ import { parentPort } from 'node:worker_threads';
 import type Database from 'better-sqlite3';
 import type { AgentActaConfig, IndexResult, IndexAllResult, InsightResult, PreparedStatements, SessionDir } from './types.js';
 import { loadConfig } from './config.js';
-import { open, createStmts } from './db.js';
+import { open, createStmts, FTS_VERSION } from './db.js';
 import { discoverSessionDirs, listSessionFiles, listClaudeSubagentFiles, indexFile, indexOpenClawDb, watchOpenClawDb, indexAll } from './indexer.js';
 import { analyzeSession, analyzeAll, analyzeChanged } from './insights.js';
 import { staleAttributionIds, storeAttributionNow } from './attribution-store.js';
@@ -76,7 +76,6 @@ if (startupChanged.size) post({ type: 'updated', ids: [...startupChanged] });
 // Indexes written before recursive_triggers was on can hold stale full-text
 // entries; rebuild once from the events table.
 try {
-  const FTS_VERSION = 2;
   const row = db.prepare("SELECT value FROM agentacta_meta WHERE key = 'fts_version'").get() as { value: string } | undefined;
   if (!row || Number(row.value) < FTS_VERSION) {
     const tf: number = performance.now();

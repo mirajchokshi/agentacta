@@ -787,6 +787,7 @@ async function viewSession(id, opts = {}) {
   window._recentSessionIds = [id, ...(window._recentSessionIds || []).filter(x => x !== id)].slice(0, 5);
   if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
   window._currentSessionId = id;
+  const viewToken = window._sessionView = {}; // identifies this opening of the page
   setHash('session/' + encodeURIComponent(id));
   window.scrollTo(0, 0);
   content.innerHTML = `
@@ -1078,9 +1079,18 @@ async function viewSession(id, opts = {}) {
 
   // Scroll to one event (loading and rendering as far as needed), highlight it,
   // and offer a way back. Used by "Initial prompt" and by search matches.
-  const revealEvent = async (eventId, { offerReturn = true } = {}) => {
+  const revealEvent = async (eventId, { offerReturn = true, openDetails = false } = {}) => {
     const fromY = window.scrollY || window.pageYOffset || 0;
-    if (!allEvents.some(ev => ev.id === eventId)) await ensureAllEvents();
+    const here = () => window._sessionView === viewToken; // stop if the reader moved on
+    const has = () => allEvents.some(ev => ev.id === eventId);
+    // Page toward the target by cursor; fall back to the full list if paging stalls.
+    while (!has() && !complete && here()) {
+      const before = allEvents.length;
+      await loadOlderPage();
+      if (allEvents.length === before) break;
+    }
+    if (!has() && here()) await ensureAllEvents();
+    if (!here()) return false;
     // Resolve from full session context, not just project-filtered events.
     if (!getFilteredEvents().some(ev => ev.id === eventId) && activeProjectFilter !== 'all') {
       setProjectFilter('all');
@@ -1090,14 +1100,17 @@ async function viewSession(id, opts = {}) {
     // Render only as far as the target, in chunks so the UI stays responsive.
     const sel = `[data-event-id="${CSS.escape(eventId)}"]`;
     let loops = 0;
-    while (!document.querySelector(sel) && rendered < getFilteredEvents().length) {
+    while (here() && !document.querySelector(sel) && rendered < getFilteredEvents().length) {
       renderBatch();
       loops += 1;
       if (loops % 2 === 0) await new Promise(requestAnimationFrame);
     }
+    if (!here()) return false;
     syncScrollHandler();
     const target = document.querySelector(sel);
     if (!target) return false;
+    // A match inside tool arguments or output sits in a collapsed block.
+    if (openDetails) target.querySelectorAll('details').forEach(d => { d.open = true; });
 
     const targetY = Math.max(0, target.getBoundingClientRect().top + window.scrollY - (window.innerHeight * 0.35));
     const useSmooth = Math.abs(targetY - window.scrollY) < 1800;
@@ -1139,7 +1152,7 @@ async function viewSession(id, opts = {}) {
   }
 
   // Opened from a search match: go straight to it.
-  if (opts.eventId) revealEvent(opts.eventId, { offerReturn: false });
+  if (opts.eventId) revealEvent(opts.eventId, { offerReturn: false, openDetails: true });
 
   // --- Lightweight realtime updates (polling fallback first) ---
 
@@ -2033,6 +2046,8 @@ $$('.nav-item').forEach(item => {
 window._cmdk = { open: false, index: 0, items: [], scrollY: 0 };
 
 function closeCmdk() {
+  cmdkSeq++; // drop any search still in flight
+  cmdkQueued = null;
   const el = $('#cmdkOverlay');
   if (el) el.remove();
 
@@ -2105,18 +2120,28 @@ function renderCmdkList() {
   if (active) active.scrollIntoView({ block: 'nearest' });
 }
 
-// Highlight each query word in already-plain text (escaped here).
+// Highlight each query word in plain text: split the raw text on the
+// matches and escape each piece, so a word can't land inside an entity.
 function markText(text, q) {
-  const words = (q || '').trim().split(/\s+/).filter(w => w.length >= 2).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  const safe = escHtml(text || '');
-  if (!words.length) return safe;
-  return safe.replace(new RegExp(`(${words.map(w => escHtml(w)).join('|')})`, 'gi'), '<mark>$1</mark>');
+  const words = (q || '').trim().split(/\s+/).map(w => w.replace(/^"|"$/g, '')).filter(w => w.length >= 2).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (!words.length) return escHtml(text || '');
+  return (text || '').split(new RegExp(`(${words.join('|')})`, 'gi'))
+    .map((part, i) => (i % 2 ? `<mark>${escHtml(part)}</mark>` : escHtml(part))).join('');
 }
-// Server snippets wrap matches in \u0002 \u0003; escape the text, then mark.
-// Tool arguments are stored as JSON text, so unescape \n, \t and \" for reading.
-function markSnippet(snippet) {
-  const text = (snippet || '').replace(/\\[nrt]/g, ' ').replace(/\\"/g, '"');
-  return escHtml(text).replace(/\u0002/g, '<mark>').replace(/\u0003/g, '</mark>').replace(/\s+/g, ' ');
+// Server snippets wrap matches in \u0002 \u0003. Escape the text, then mark,
+// keeping marks balanced even if indexed text itself holds those characters.
+// Tool arguments are stored as JSON text, so only for them unescape \n \t \".
+function markSnippet(snippet, { json = false } = {}) {
+  let text = snippet || '';
+  if (json) text = text.replace(/\\[nrt]/g, ' ').replace(/\\"/g, '"');
+  let open = false;
+  let html = '';
+  for (const piece of text.split(/([\u0002\u0003])/)) {
+    if (piece === '\u0002') { if (!open) { html += '<mark>'; open = true; } }
+    else if (piece === '\u0003') { if (open) { html += '</mark>'; open = false; } }
+    else html += escHtml(piece);
+  }
+  return (open ? html + '</mark>' : html).replace(/\s+/g, ' ');
 }
 
 // Search as you type. A response for an older query is dropped, and the
@@ -2140,6 +2165,7 @@ async function loadCmdkResults(query) {
   cmdkInFlight = true;
   const res = await api(`/find?q=${encodeURIComponent(query)}`);
   cmdkInFlight = false;
+  $('#cmdkList')?.classList.remove('is-busy');
   if (cmdkQueued !== null) {
     const next = cmdkQueued;
     cmdkQueued = null;
@@ -2147,7 +2173,6 @@ async function loadCmdkResults(query) {
     return;
   }
   if (seq !== cmdkSeq || !$('#cmdkList')) return;
-  list.classList.remove('is-busy');
   const items = [];
 
   (res.sessions || []).forEach(s => {
@@ -2171,7 +2196,7 @@ async function loadCmdkResults(query) {
 
   (res.events || []).forEach(e => items.push({
     group: 'Matches',
-    titleHtml: markSnippet(e.snippet),
+    titleHtml: markSnippet(e.snippet, { json: e.type === 'tool_call' }),
     sub: `${e.tool_name ? fmtToolName(e.tool_name) : (EVENT_ROLE_LABELS[e.role] || e.role || e.type)} · ${truncate(e.session_label || cleanSessionSummary(e.session_summary || '', ''), 60)}`,
     meta: fmtTime(e.timestamp),
     action: () => viewSession(e.session_id, { eventId: e.id })
@@ -2239,6 +2264,8 @@ async function loadCmdkHome() {
 
 function openCmdk() {
   if ($('#cmdkOverlay')) { $('#cmdkInput')?.focus(); return; }
+  cmdkSeq++;
+  cmdkQueued = null;
 
   const overlay = document.createElement('div');
   overlay.className = 'cmdk-overlay';

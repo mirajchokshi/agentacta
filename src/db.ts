@@ -21,6 +21,9 @@ export function open(dbPath?: string): Database.Database {
   return db;
 }
 
+// Bump to rebuild the full-text index once on existing databases.
+export const FTS_VERSION = 2;
+
 export function init(dbPath?: string): void {
   const db = open(dbPath);
 
@@ -176,6 +179,11 @@ export function init(dbPath?: string): void {
   // Bump INDEX_VERSION when the parser starts deriving new fields from the
   // same source lines; clearing index_state makes the next pass re-parse all.
   db.exec("CREATE TABLE IF NOT EXISTS agentacta_meta (key TEXT PRIMARY KEY, value TEXT)");
+  // A new database's full-text index is already consistent: mark it current
+  // so the worker's one-time rebuild (see index-worker.ts) skips it.
+  const hasEvents = !!db.prepare('SELECT 1 FROM events LIMIT 1').get();
+  if (!hasEvents) db.prepare("INSERT OR IGNORE INTO agentacta_meta (key, value) VALUES ('fts_version', ?)").run(String(FTS_VERSION));
+
   const INDEX_VERSION = 3; // 2: Claude ai-title/custom-title labels, thread-prompt summaries; 3: skip attachment lines
   const row = db.prepare("SELECT value FROM agentacta_meta WHERE key = 'index_version'").get() as { value: string } | undefined;
   if (!row || Number(row.value) < INDEX_VERSION) {

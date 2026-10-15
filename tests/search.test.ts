@@ -5,8 +5,8 @@ import path from 'path';
 import os from 'os';
 import Database from 'better-sqlite3';
 
-import { open, init } from '../src/db.js';
-import { quickSearch, toPrefixFtsQuery } from '../src/search.js';
+import { open, init, FTS_VERSION } from '../src/db.js';
+import { quickSearch, toFtsQuery } from '../src/search.js';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'agentacta-test-search-'));
 const DB = path.join(TMP, 'test.db');
@@ -33,6 +33,11 @@ describe('quick search', () => {
     fs.rmSync(TMP, { recursive: true, force: true });
   });
 
+  it('marks a new database\'s search index as current (no rebuild needed)', () => {
+    const v = db.prepare("SELECT value FROM agentacta_meta WHERE key = 'fts_version'").get() as { value: string } | undefined;
+    assert.strictEqual(Number(v?.value), FTS_VERSION);
+  });
+
   it('finds a session by title however old it is', () => {
     assert.deepStrictEqual(quickSearch(db, 'billing').sessions.map(s => s.id), ['old-1']);
   });
@@ -51,10 +56,17 @@ describe('quick search', () => {
     assert.strictEqual(quickSearch(db, '%').sessions.length, 0);
   });
 
-  it('builds prefix queries only for a finished-looking last word', () => {
-    assert.strictEqual(toPrefixFtsQuery('sqlite ind'), '"sqlite" AND "ind"*');
-    assert.strictEqual(toPrefixFtsQuery('sqlite '), '"sqlite"');
-    assert.strictEqual(toPrefixFtsQuery('sqlite in'), '"sqlite" AND "in"', 'two letters match exactly');
+  it('builds prefix queries only for an unfinished last word', () => {
+    assert.strictEqual(toFtsQuery('sqlite ind', { prefix: true }), '"sqlite" AND "ind"*');
+    assert.strictEqual(toFtsQuery('sqlite ', { prefix: true }), '"sqlite"');
+    assert.strictEqual(toFtsQuery('sqlite in', { prefix: true }), '"sqlite" AND "in"', 'two letters match exactly');
+    assert.strictEqual(toFtsQuery('"index was" reb', { prefix: true }), '"index was" AND "reb"*', 'quoted phrases are kept');
+    assert.strictEqual(toFtsQuery('sqlite ind'), '"sqlite" AND "ind"', 'no prefix unless asked');
+  });
+
+  it('matches sessions and files on every word in any order', () => {
+    assert.deepStrictEqual(quickSearch(db, 'exporter billing').sessions.map(s => s.id), ['old-1']);
+    assert.deepStrictEqual(quickSearch(db, 'exporter rare').files.map(f => f.file_path), ['/home/u/Developer/rare-project/exporter.ts']);
   });
 
   it('keeps the full-text index in step when an event is replaced', () => {

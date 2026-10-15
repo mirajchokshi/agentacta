@@ -56,7 +56,7 @@ curl http://localhost:4003/api/context/agent?name=claude-code
 npm test
 ```
 
-Uses `node:test` and `node:assert`. Tests are in `tests/` as TypeScript, run via `tsx`. Currently 123 tests.
+Uses `node:test` and `node:assert`. Tests are in `tests/` as TypeScript, run via `tsx`. Currently 125 tests.
 
 ## Building
 
