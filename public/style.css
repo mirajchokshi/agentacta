@@ -531,6 +531,8 @@ code, pre, .mono { font-family: var(--font-mono); }
   margin-inline: calc(-1 * var(--space-md));
 }
 .session-group { display: contents; }
+/* Insights rows have no status icon: title, time, score, action. */
+.insight-list { grid-template-columns: minmax(0, 1fr) auto auto auto; }
 
 .session-item {
   grid-column: 1 / -1;
