@@ -436,19 +436,6 @@ code, pre, .mono { font-family: var(--font-mono); }
   background-position: right 9px center;
 }
 
-/* Quiet inline action, link weight. */
-.text-btn {
-  padding: 0;
-  font: inherit;
-  font-size: 12.5px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  background: none;
-  border: none;
-  cursor: pointer;
-}
-.text-btn:hover, .text-btn:focus-visible { color: var(--text-primary); text-decoration: underline; text-underline-offset: 3px; }
-.text-btn:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
 
 /* Segmented control: one choice from a small set. */
 .seg {
@@ -557,7 +544,6 @@ code, pre, .mono { font-family: var(--font-mono); }
 .subagent-row:focus-visible,
 .file-item:focus-visible,
 .file-group-header:focus-visible,
-.result-item:focus-visible,
 .tl-session:focus-visible {
   outline: none;
   background: var(--bg-active);
@@ -909,32 +895,6 @@ code, pre, .mono { font-family: var(--font-mono); }
 .tl-open .i { transition: transform var(--duration-normal) var(--ease-spring); }
 .tl-session:hover .tl-open .i { transform: translateX(2px); }
 
-/* ---- Search ---- */
-.results-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: var(--space-sm); }
-.result-list { margin-inline: calc(-1 * var(--space-md)); }
-.result-item {
-  padding: 10px var(--space-md);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: background var(--duration-fast);
-}
-.result-item:hover { background: var(--bg-hover); }
-.result-item:active { background: var(--bg-active); }
-.result-meta { display: flex; align-items: baseline; gap: var(--space-md); margin-bottom: 2px; }
-.result-meta time { margin-left: auto; font-size: 12px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
-.result-content {
-  font-size: 13px;
-  line-height: 1.55;
-  color: var(--text-secondary);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  display: -webkit-box;
-  -webkit-line-clamp: 4;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.suggestions { font-size: 13px; color: var(--text-tertiary); margin: var(--space-sm) 0 0; }
-.suggestions .text-btn { font-size: 13px; color: var(--text-secondary); }
 
 /* ---- Files ---- */
 .file-list { margin-inline: calc(-1 * var(--space-md)); }
@@ -1243,7 +1203,7 @@ code, pre, .mono { font-family: var(--font-mono); }
   .si-go { opacity: 0.8; }
   /* No sticky hover after a tap; the press state is the feedback. */
   .session-item:hover, .subagent-row:hover, .file-item:hover, .file-group-header:hover,
-  .result-item:hover, .tl-session:hover, .nav-item:hover, .back-btn:hover,
+  .tl-session:hover, .nav-item:hover, .back-btn:hover,
   .session-parent-link:hover, .subagent-toggle:hover, .subagent-heading:hover,
   .btn:hover, .filter-chip:hover { background: transparent; }
   .btn:hover { background: var(--bg-elevated); color: var(--text-primary); border-color: var(--border-default); }
@@ -1254,7 +1214,7 @@ code, pre, .mono { font-family: var(--font-mono); }
 
 /* Press feedback is immediate (no fade-in) so a tap registers under the finger. */
 .session-item:active, .subagent-row:active, .file-item:active, .file-group-header:active,
-.result-item:active, .tl-session:active, .nav-item:active, .subagent-toggle:active,
+.tl-session:active, .nav-item:active, .subagent-toggle:active,
 .subagent-heading:active, .back-btn:active, .session-parent-link:active,
 .is-pressed {
   background: var(--bg-active) !important;
@@ -1317,7 +1277,7 @@ a, button, select, summary, [role="link"], .nav-item, .session-item, .file-item 
   .metrics { gap: var(--space-md) var(--space-xl); }
   .metric dd { font-size: 22px; }
 
-  .session-list, .file-list, .result-list { margin-inline: calc(-1 * var(--space-sm)); }
+  .session-list, .file-list { margin-inline: calc(-1 * var(--space-sm)); }
   .session-list { display: block; }
   .session-item {
     grid-template-columns: auto minmax(0, 1fr) auto auto;

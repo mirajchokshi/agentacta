@@ -334,7 +334,7 @@ function handleRoute() {
     if (id) { viewSession(id); return; }
   }
 
-  const normalized = raw === 'search' ? 'overview' : raw;
+  const normalized = raw === 'search' ? 'overview' : raw; // old #search links land on Overview
   const view = normalized === 'overview' || normalized === 'sessions' || normalized === 'timeline' || normalized === 'files' || normalized === 'stats' || normalized === 'insights' ? normalized : 'overview';
   window._lastView = view;
   updateNavActive(view);
@@ -663,10 +663,6 @@ content.addEventListener('click', async (e) => {
     return;
   }
 
-  if (row.closest('#results')) {
-    window._lastView = 'search';
-    window._lastSearchQuery = $('#searchInput')?.value || '';
-  }
   viewSession(row.dataset.openSession || row.dataset.id);
 }, true);
 
@@ -677,129 +673,6 @@ content.addEventListener('keydown', (e) => {
   e.preventDefault();
   viewSession(row.dataset.openSession || row.dataset.id);
 });
-
-async function viewSearch(query = '') {
-  clearJumpUi();
-  const typeFilter = window._searchType || '';
-  const roleFilter = window._searchRole || '';
-
-  const seg = (filter, val, label, active) => `<button class="filter-chip${active ? ' active' : ''}" data-filter="${filter}" data-val="${val}" aria-pressed="${active}">${label}</button>`;
-  let html = `<h1 class="page-title">Search</h1>
-    <div class="search-bar">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-      <input type="text" id="searchInput" placeholder="Search messages, tool calls, files\u2026" value="${escHtml(query)}">
-    </div>
-    <div class="toolbar">
-      <div class="seg" role="group" aria-label="Event type">
-        ${seg('type', '', 'All', typeFilter === '')}${seg('type', 'message', 'Messages', typeFilter === 'message')}${seg('type', 'tool_call', 'Tool calls', typeFilter === 'tool_call')}${seg('type', 'tool_result', 'Results', typeFilter === 'tool_result')}
-      </div>
-      <div class="seg" role="group" aria-label="Role">
-        ${seg('role', '', 'Any role', roleFilter === '')}${seg('role', 'user', 'User', roleFilter === 'user')}${seg('role', 'assistant', 'Assistant', roleFilter === 'assistant')}
-      </div>
-    </div>
-    <div id="results">
-      ${skeletonRows(4, 'session')}
-    </div>`;
-
-  content.innerHTML = html;
-  transitionView();
-
-  const input = $('#searchInput');
-  input.focus();
-  let debounce;
-  input.addEventListener('input', () => {
-    clearTimeout(debounce);
-    debounce = setTimeout(() => doSearch(input.value), 250);
-  });
-
-  $$('.filter-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      const f = chip.dataset.filter;
-      const v = chip.dataset.val;
-      if (f === 'type') window._searchType = v;
-      if (f === 'role') window._searchRole = v;
-      viewSearch(input.value);
-    });
-  });
-
-  if (query) doSearch(query);
-  else showSearchHome();
-}
-
-async function showSearchHome() {
-  const el = $('#results');
-  const reqId = (window._searchReqSeq = (window._searchReqSeq || 0) + 1);
-  el.innerHTML = `${skeletonRows(4, 'session')}`;
-
-  const sessions = await api('/sessions?limit=8');
-  if (reqId !== window._searchReqSeq) return;
-  if (sessions._error) {
-    el.innerHTML = '<div class="empty"><h2>Unable to load</h2><p>Server unavailable. Pull to refresh or try again.</p></div>';
-    return;
-  }
-
-  let suggestions = [];
-  try { const r = await fetch('/api/suggestions'); const d = await r.json(); suggestions = d.suggestions || []; } catch(e) { suggestions = []; }
-  if (reqId !== window._searchReqSeq) return;
-
-  let html = `
-    ${suggestions.length ? `<p class="suggestions">Try ${suggestions.map(q => `<button class="suggestion-chip text-btn" data-q="${escHtml(q)}">${escHtml(q)}</button>`).join('<span class="sep" aria-hidden="true">, </span>')}</p>` : ''}
-    <h2 class="section-label">Recent sessions</h2>
-    ${renderSessionList(sessions.sessions)}
-  `;
-
-  el.innerHTML = html;
-
-  $$('.suggestion-chip', el).forEach(chip => {
-    chip.addEventListener('click', () => {
-      $('#searchInput').value = chip.dataset.q;
-      doSearch(chip.dataset.q);
-    });
-  });
-
-  $$('.session-item', el).forEach(item => {
-    item.addEventListener('click', () => {
-      window._lastView = 'search';
-      window._lastSearchQuery = $('#searchInput')?.value || '';
-      viewSession(item.dataset.id);
-    });
-  });
-}
-
-async function doSearch(q) {
-  const el = $('#results');
-  const reqId = (window._searchReqSeq = (window._searchReqSeq || 0) + 1);
-  if (!q.trim()) { el.innerHTML = '<div class="empty"><h2>Type to search</h2><p>Search across all sessions, messages, and tool calls</p></div>'; return; }
-
-  el.innerHTML = `${skeletonRows(6, 'event')}`;
-
-  const type = window._searchType || '';
-  const role = window._searchRole || '';
-  let url = `/search?q=${encodeURIComponent(q)}&limit=100`;
-  if (type) url += `&type=${type}`;
-  if (role) url += `&role=${role}`;
-
-  const data = await api(url);
-  if (reqId !== window._searchReqSeq) return;
-
-  if (data._error || data.error) { el.innerHTML = `<div class="empty"><p>${escHtml(data.error || 'Server error')}</p></div>`; return; }
-  if (!data.results.length) { el.innerHTML = '<div class="empty"><h2>No results</h2><p>Try a different search term or adjust filters</p></div>'; return; }
-
-  el.innerHTML = `<div class="results-head">
-      <span class="page-count">${data.results.length}${data.results.length === 100 ? '+' : ''} results</span>
-      <span class="export-links">Export
-        <a href="#" onclick="dlExport('/api/export/search?q=${encodeURIComponent(q)}&format=md','search.md');return false">Markdown</a>
-        <a href="#" onclick="dlExport('/api/export/search?q=${encodeURIComponent(q)}&format=json','search.json');return false">JSON</a>
-      </span>
-    </div>
-    <div class="result-list">${data.results.map(r => {
-      const kind = eventKind(r);
-      return `<div class="result-item" data-open-session="${escHtml(r.session_id)}" role="link" tabindex="0">
-        <div class="result-meta"><span class="event-role ev-${kind}">${EVENT_ROLE_LABELS[kind] || escHtml(r.role || r.type)}</span>${r.tool_name ? `<span class="tool-name">${escHtml(fmtToolName(r.tool_name))}</span>` : ''}<time>${fmtTime(r.timestamp)}</time></div>
-        <div class="result-content">${escHtml(truncate(r.content || r.tool_args || r.tool_result || '', 400))}</div>
-      </div>`;
-    }).join('')}</div>`;
-}
 
 async function viewSessions() {
   clearJumpUi();
@@ -2037,8 +1910,6 @@ async function viewInsights() {
 }
 
 // --- Navigation ---
-window._searchType = '';
-window._searchRole = '';
 window._lastView = 'overview';
 
 $$('.nav-item').forEach(item => {
@@ -2352,7 +2223,7 @@ document.addEventListener('keydown', e => {
 // pressed state 40ms after the finger lands, drop it if the finger moves
 // (a scroll), and make a quick tap flash briefly so it always registers.
 (function initTouchPress() {
-  const PRESSABLE = '.btn, .filter-chip, .session-id-copy, .subagent-toggle, .subagent-heading, .back-btn, .session-parent-link, .tool-detail > summary, .session-item, .subagent-row, .file-item, .file-group-header, .result-item, .tl-session, .nav-item, .cmdk-item';
+  const PRESSABLE = '.btn, .filter-chip, .session-id-copy, .subagent-toggle, .subagent-heading, .back-btn, .session-parent-link, .tool-detail > summary, .session-item, .subagent-row, .file-item, .file-group-header, .tl-session, .nav-item, .cmdk-item';
   let el = null, timer = null, x0 = 0, y0 = 0;
   const release = (flash) => {
     clearTimeout(timer);
@@ -2382,7 +2253,7 @@ document.addEventListener('keydown', e => {
 
 // Keyboard-first navigation: J/K (or arrows once a row has focus) move
 // between rows, Enter opens, Esc goes back, / searches.
-const NAV_ROWS = '.session-item[data-id], .subagent-row, .result-item, .file-group-header, .file-item, .tl-session';
+const NAV_ROWS = '.session-item[data-id], .subagent-row, .file-group-header, .file-item, .tl-session';
 function handleListKeys(e) {
   if (window._cmdk && window._cmdk.open) return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
