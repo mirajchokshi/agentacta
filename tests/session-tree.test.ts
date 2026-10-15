@@ -172,4 +172,55 @@ describe('subagent indexing', () => {
     assert.strictEqual((db.prepare('SELECT source_status FROM sessions WHERE id = ?').get('oc-child') as SessionRow).source_status, 'killed');
   });
 
+
+  it('labels Claude sessions with their custom title, else their AI title', () => {
+    const fp = path.join(TMP, 'claude-titles', 'titled.jsonl');
+    writeJsonl(fp, [
+      { type: 'mode', mode: 'default', sessionId: 'cc-titled' },
+      { type: 'user', sessionId: 'cc-titled', uuid: 't-1', timestamp: '2026-10-01T00:00:00Z', message: { role: 'user', content: 'Please do the thing' } },
+      { type: 'ai-title', aiTitle: 'First guess', sessionId: 'cc-titled' },
+      { type: 'ai-title', aiTitle: 'Better title', sessionId: 'cc-titled' },
+    ]);
+    indexFile(db, fp, 'claude-code', stmts, false, {} as never);
+    assert.strictEqual((db.prepare('SELECT label FROM sessions WHERE id = ?').get('cc-titled') as SessionRow).label, 'Better title');
+
+    fs.appendFileSync(fp, JSON.stringify({ type: 'custom-title', customTitle: 'Kips ops', sessionId: 'cc-titled' }) + '\n');
+    const future = new Date(Date.now() + 5000);
+    fs.utimesSync(fp, future, future);
+    indexFile(db, fp, 'claude-code', stmts, false, {} as never);
+    assert.strictEqual((db.prepare('SELECT label FROM sessions WHERE id = ?').get('cc-titled') as SessionRow).label, 'Kips ops');
+  });
+
+  it('summarizes a pasted-thread prompt by its last message, not the header', () => {
+    const fp = path.join(TMP, 'claude-thread', 'thread.jsonl');
+    writeJsonl(fp, [
+      { type: 'user', sessionId: 'cc-thread', uuid: 'th-1', timestamp: '2026-10-01T00:00:00Z', message: { role: 'user', content: '(Fresh session. Recent messages in this thread, oldest first:\nKip: Done with the draft.\nMiraj: Did anything break?' } },
+    ]);
+    indexFile(db, fp, 'claude-code', stmts, false, {} as never);
+    assert.strictEqual((db.prepare('SELECT summary FROM sessions WHERE id = ?').get('cc-thread') as SessionRow).summary, 'Did anything break?');
+
+    const fp2 = path.join(TMP, 'claude-thread', 'thread2.jsonl');
+    writeJsonl(fp2, [
+      { type: 'user', sessionId: 'cc-thread2', uuid: 'th-2', timestamp: '2026-10-01T00:00:00Z', message: { role: 'user', content: '(Fresh session. Recent messages in this thread, oldest first:\nMiraj: Update the stack list please\nMiraj: /home/me/.local/state/inbox/IMG_1.png' } },
+    ]);
+    indexFile(db, fp2, 'claude-code', stmts, false, {} as never);
+    assert.strictEqual((db.prepare('SELECT summary FROM sessions WHERE id = ?').get('cc-thread2') as SessionRow).summary, 'Update the stack list please');
+  });
+
+  it('re-parses every source once when the index version goes up', () => {
+    const dbp = path.join(TMP, 'version.db');
+    init(dbp);
+    const v = open(dbp);
+    v.prepare('INSERT INTO index_state (file_path, last_offset, last_modified) VALUES (?, ?, ?)').run('/x.jsonl', 1, 'm');
+    v.prepare("UPDATE agentacta_meta SET value = '1' WHERE key = 'index_version'").run();
+    v.close();
+    init(dbp);
+    const after = open(dbp);
+    assert.strictEqual((after.prepare('SELECT COUNT(*) AS c FROM index_state').get() as { c: number }).c, 0);
+    init(dbp);
+    after.prepare('INSERT INTO index_state (file_path, last_offset, last_modified) VALUES (?, ?, ?)').run('/y.jsonl', 1, 'm');
+    init(dbp);
+    assert.strictEqual((after.prepare('SELECT COUNT(*) AS c FROM index_state').get() as { c: number }).c, 1, 'no reset at the same version');
+    after.close();
+  });
 });

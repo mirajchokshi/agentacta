@@ -145,6 +145,16 @@ export function init(dbPath?: string): void {
   if (!colNames.includes('source_status')) db.exec("ALTER TABLE sessions ADD COLUMN source_status TEXT");
   db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_id)");
 
+  // Bump INDEX_VERSION when the parser starts deriving new fields from the
+  // same source lines; clearing index_state makes the next pass re-parse all.
+  db.exec("CREATE TABLE IF NOT EXISTS agentacta_meta (key TEXT PRIMARY KEY, value TEXT)");
+  const INDEX_VERSION = 2; // 2: Claude ai-title/custom-title labels, thread-prompt summaries
+  const row = db.prepare("SELECT value FROM agentacta_meta WHERE key = 'index_version'").get() as { value: string } | undefined;
+  if (!row || Number(row.value) < INDEX_VERSION) {
+    db.exec("DELETE FROM index_state");
+    db.prepare("INSERT OR REPLACE INTO agentacta_meta (key, value) VALUES ('index_version', ?)").run(String(INDEX_VERSION));
+  }
+
   db.close();
 }
 

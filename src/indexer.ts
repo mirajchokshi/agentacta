@@ -216,6 +216,21 @@ function isSummaryCandidate(text: string | null): boolean {
   return true;
 }
 
+// Prompts that open with a pasted thread ("(Fresh session. Recent messages in
+// this thread, oldest first:" then "Name: message" lines) carry the actual
+// request on the last line, not the header.
+function summarySource(text: string): string {
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length > 1 && /(oldest first|recent messages[^:]*):\s*\)?$/i.test(lines[0])) {
+    // Newest message first; skip ones that are only an attachment or file path.
+    for (let i = lines.length - 1; i >= 1; i--) {
+      const msg = lines[i].replace(/^[A-Z][\w .'-]{0,30}:\s+/, '');
+      if (msg.length > 3 && !/^(\[[^\]]*attachment[^\]]*\]|[~/][^\s]*)$/i.test(msg)) return msg;
+    }
+  }
+  return text;
+}
+
 function stripLeadingDatetimePrefix(text: string | null): string {
   if (!text) return text as string;
   return text
@@ -501,6 +516,8 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
   let sawNonSnapshotRecord = false;
   let parentId: string | null = lineage.parentId || null;
   let label: string | null = lineage.label || null;
+  let customTitle: string | null = null;
+  let aiTitle: string | null = null;
   const sourceStatus: string | null = lineage.sourceStatus || null;
 
   let firstLine: JsonlLine;
@@ -592,6 +609,11 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
     if (obj.type === 'file-history-snapshot') sawSnapshotRecord = true;
     else sawNonSnapshotRecord = true;
 
+    // Claude Code titles: one the user set (/rename) wins over its own AI title;
+    // both can be rewritten during a session, so keep the latest.
+    if (obj.type === 'custom-title' && typeof obj.customTitle === 'string' && obj.customTitle.trim()) { customTitle = obj.customTitle.trim(); continue; }
+    if (obj.type === 'ai-title' && typeof obj.aiTitle === 'string' && obj.aiTitle.trim()) { aiTitle = obj.aiTitle.trim(); continue; }
+
     if (isCodexCli) {
       if (obj.type === 'session_meta') {
         const meta = (obj.payload || {}) as CodexSessionMeta;
@@ -655,7 +677,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
           if (content) {
             pendingEvents.push([p.id || eventId, sessionId as string, ts, 'message', role, content, null, null, null]);
             msgCount++;
-            if (!summary && role === 'user' && isSummaryCandidate(content)) summary = content.slice(0, 200);
+            if (!summary && role === 'user' && isSummaryCandidate(content)) summary = summarySource(content).slice(0, 200);
             if (!initialPrompt && role === 'user' && isSummaryCandidate(content)) {
               initialPrompt = content.slice(0, 500);
               firstMessageId = p.id || eventId;
@@ -682,7 +704,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
         if (p.type === 'user_message' && p.message) {
           pendingEvents.push([eventId, sessionId as string, ts, 'message', 'user', p.message, null, null, null]);
           msgCount++;
-          if (!summary && isSummaryCandidate(p.message)) summary = p.message.slice(0, 200);
+          if (!summary && isSummaryCandidate(p.message)) summary = summarySource(p.message).slice(0, 200);
           if (!initialPrompt && isSummaryCandidate(p.message)) {
             initialPrompt = p.message.slice(0, 500);
             firstMessageId = eventId;
@@ -767,7 +789,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
         msgCount++;
         // Better summary: skip heartbeat/boilerplate messages
         if (!summary && role === 'user' && isSummaryCandidate(content)) {
-          summary = content.slice(0, 200);
+          summary = summarySource(content).slice(0, 200);
         }
         // Capture initial prompt from first substantial user message
         if (!initialPrompt && role === 'user' && isSummaryCandidate(content)) {
@@ -851,6 +873,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
 
     stmts.upsertSession.run(sessionId, sessionStart, sessionEnd, msgCount, toolCount, model, summary, agent, sessionType, totalCost, totalTokens, totalInputTokens, totalOutputTokens, totalCacheReadTokens, totalCacheWriteTokens, initialPrompt, firstMessageId, firstMessageTimestamp, modelsJson, projectsJson);
     if (parentId === sessionId) parentId = null;
+    if (!label) label = customTitle || aiTitle;
     if (parentId || label || sourceStatus) stmts.setSessionLineage.run(parentId, label, sourceStatus, sessionId);
     for (const ev of pendingEvents) stmts.insertEvent.run(...ev);
     for (const fa of fileActivities) stmts.insertFileActivity.run(...fa);
