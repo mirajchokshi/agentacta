@@ -1109,8 +1109,6 @@ async function viewSession(id) {
   };
 
   // Subscribe to real-time updates via SSE, with polling as a fallback.
-  // "Following" is the client side of a live session: it can be paused, and it
-  // can be paused from the page.
   let lastSeenTs = allEvents.length ? allEvents[0].timestamp : new Date(0).toISOString();
   let lastSeenId = allEvents.length ? allEvents[0].id : '';
   let sessionState = { status: s.status, ended_reason: s.ended_reason, ended_at: s.ended_at, source_status: s.source_status };
@@ -1136,13 +1134,6 @@ async function viewSession(id) {
   const startPolling = () => {
     if (pollInterval || !following) return;
     pollInterval = setInterval(pollNewEvents, 3000);
-  };
-
-  const stopFollowing = () => {
-    following = false;
-    if (eventSource) { eventSource.close(); eventSource = null; }
-    if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
-    renderStatusControls();
   };
 
   const startFollowing = () => {
@@ -1179,10 +1170,7 @@ async function viewSession(id) {
     const st = { ...s, ...sessionState };
     slot.innerHTML = `
       ${renderSessionStatus(st)}
-      <button class="export-btn session-action-btn" id="followToggleBtn" aria-pressed="${following}" title="${following ? 'New events are streaming into this page' : 'New events are not being streamed into this page'}">${following ? 'Pause updates' : 'Resume updates'}</button>
     `;
-    const followBtn = document.getElementById('followToggleBtn');
-    if (followBtn) followBtn.onclick = () => (following ? stopFollowing() : startFollowing());
   }
 
   // Sessions their source reports as finished open without a live stream;
