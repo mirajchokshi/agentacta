@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// seed-demo.js — Generate realistic demo JSONL sessions for AgentActa
+// seed-demo.js: Generate realistic demo JSONL sessions for AgentActa
 // Usage: node scripts/seed-demo.js
 
 const fs = require('fs');
@@ -185,7 +185,7 @@ function writeSession(filename, lines) {
   lines.push(m.line);
 
   writeSession(`${sid}.jsonl`, lines);
-  console.log(`Session 1: ${sid} — Initial project setup (${lines.length} events)`);
+  console.log(`Session 1: ${sid}: Initial project setup (${lines.length} events)`);
 })();
 
 // ============================================================
@@ -244,7 +244,7 @@ function writeSession(filename, lines) {
   tr = toolResult(tcId, 'exec', JSON.stringify({ status: 'completed', exitCode: 0, aggregated: '{\n  "city": "London",\n  "country": "GB",\n  "temp": 8.3,\n  "feelsLike": 5.1,\n  "humidity": 76,\n  "description": "overcast clouds",\n  "icon": "04d",\n  "windSpeed": 5.2\n}' }), ts(base, 3.5), pid);
   lines.push(tr.line); pid = tr.id;
 
-  m = assistantMsg("The API integration is working. Here's a summary of what was built:\n\n- **`src/weatherClient.js`** — Axios-based client that calls OpenWeatherMap's current weather endpoint, returns a clean object with city, temp, humidity, description, wind speed, and icon code\n- **`routes/weather.js`** — Express route handler at `/api/weather/:city` with proper error handling for 404 (city not found) and 500 (API failures)\n\nI tested it with London and got back valid data. The API returns metric units by default.", model, ts(base, 4), pid);
+  m = assistantMsg("The API integration is working. Here's a summary of what was built:\n\n- **`src/weatherClient.js`**: Axios-based client that calls OpenWeatherMap's current weather endpoint, returns a clean object with city, temp, humidity, description, wind speed, and icon code\n- **`routes/weather.js`**: Express route handler at `/api/weather/:city` with proper error handling for 404 (city not found) and 500 (API failures)\n\nI tested it with London and got back valid data. The API returns metric units by default.", model, ts(base, 4), pid);
   lines.push(m.line); pid = m.id;
 
   m = userMsg("Nice! But can you add retry logic? Sometimes the API is flaky.", ts(base, 8), pid);
@@ -297,7 +297,7 @@ function writeSession(filename, lines) {
   lines.push(m.line);
 
   writeSession(`${sid}.jsonl`, lines);
-  console.log(`Session 2: ${sid} — OpenWeatherMap integration (${lines.length} events)`);
+  console.log(`Session 2: ${sid}: OpenWeatherMap integration (${lines.length} events)`);
 })();
 
 // ============================================================
@@ -313,7 +313,7 @@ function writeSession(filename, lines) {
   lines.push(sessionLine(sid, ts(base, 0)));
   pid = shortId(); lines.push(modelChangeLine(model, ts(base, 0), pid));
 
-  let m = userMsg("Now let's build the frontend. I want a clean, modern design — search bar at the top, weather card below. Dark mode.", ts(base, 1), pid);
+  let m = userMsg("Now let's build the frontend. I want a clean, modern design: search bar at the top, weather card below. Dark mode.", ts(base, 1), pid);
   lines.push(m.line); pid = m.id;
 
   // Write HTML
@@ -346,7 +346,7 @@ function writeSession(filename, lines) {
   tr = toolResult(tcId, 'Write', '✅ Successfully wrote to weather-app/public/app.js (40 lines)', ts(base, 3.3), pid);
   lines.push(tr.line); pid = tr.id;
 
-  m = assistantMsg("Here's the frontend — three files:\n\n- **`public/index.html`** — Semantic HTML with search form and weather card\n- **`public/style.css`** — Dark mode with `#1a1a2e` background, rounded cards, grid layout for details\n- **`public/app.js`** — Fetch-based API client with error handling\n\nThe design is minimal: search bar at top, weather card below with icon, temperature, description, and three detail columns (feels like, humidity, wind).\n\nWant to preview it?", model, ts(base, 4), pid);
+  m = assistantMsg("Here's the frontend: three files:\n\n- **`public/index.html`**: Semantic HTML with search form and weather card\n- **`public/style.css`**: Dark mode with `#1a1a2e` background, rounded cards, grid layout for details\n- **`public/app.js`**: Fetch-based API client with error handling\n\nThe design is minimal: search bar at top, weather card below with icon, temperature, description, and three detail columns (feels like, humidity, wind).\n\nWant to preview it?", model, ts(base, 4), pid);
   lines.push(m.line); pid = m.id;
 
   m = userMsg("Looks good but can you make the search bar have a subtle animation? Maybe a glow effect on focus.", ts(base, 12), pid);
@@ -361,11 +361,11 @@ function writeSession(filename, lines) {
   tr = toolResult(tcId, 'Edit', '✅ Applied edit to weather-app/public/style.css', ts(base, 12.7), pid);
   lines.push(tr.line); pid = tr.id;
 
-  m = assistantMsg("Added a focus glow effect — when you click on the search input, it gets a soft blue box-shadow that fades in over 300ms. Subtle but clean.", model, ts(base, 13), pid);
+  m = assistantMsg("Added a focus glow effect: when you click on the search input, it gets a soft blue box-shadow that fades in over 300ms. Subtle but clean.", model, ts(base, 13), pid);
   lines.push(m.line);
 
   writeSession(`${sid}.jsonl`, lines);
-  console.log(`Session 3: ${sid} — Build the frontend (${lines.length} events)`);
+  console.log(`Session 3: ${sid}: Build the frontend (${lines.length} events)`);
 })();
 
 // ============================================================
@@ -396,13 +396,13 @@ function writeSession(filename, lines) {
 
   // Check if OpenWeatherMap is down
   tcId = `toolu_${shortId()}${shortId()}`;
-  m = assistantMsg("Lots of timeouts hitting `95.217.228.33:443` — that's OpenWeatherMap. Let me check if their API is having issues.", model, ts(base, 2), pid, null, [
+  m = assistantMsg("Lots of timeouts hitting `95.217.228.33:443`: that's OpenWeatherMap. Let me check if their API is having issues.", model, ts(base, 2), pid, null, [
     { id: tcId, name: 'web_search', arguments: { query: 'OpenWeatherMap API down status February 2026' } }
   ]);
   lines.push(m.line); pid = m.id;
 
   tr = toolResult(tcId, 'web_search', JSON.stringify([
-    { title: 'OpenWeatherMap Status — Degraded Performance', url: 'https://status.openweathermap.org', snippet: 'We are experiencing degraded performance on our free tier API endpoints. Premium endpoints are unaffected.' },
+    { title: 'OpenWeatherMap Status: Degraded Performance', url: 'https://status.openweathermap.org', snippet: 'We are experiencing degraded performance on our free tier API endpoints. Premium endpoints are unaffected.' },
     { title: 'OpenWeatherMap API slowdowns reported', url: 'https://community.openweathermap.org/t/12345', snippet: 'Multiple users reporting timeouts on /data/2.5/weather endpoint since Feb 12...' }
   ]), ts(base, 2.3), pid);
   lines.push(tr.line); pid = tr.id;
@@ -457,11 +457,11 @@ function writeSession(filename, lines) {
   tr = toolResult(tcId, 'exec', JSON.stringify({ status: 'completed', exitCode: 0, aggregated: 'First: undefined\nCached: true' }), ts(base, 5), pid);
   lines.push(tr.line); pid = tr.id;
 
-  m = assistantMsg("Fixed. Here's what I did:\n\n1. **Added in-memory caching** with a 10-minute TTL — repeated searches for the same city return instantly from cache instead of hitting the degraded API\n2. **Cache eviction** at 500 entries to prevent memory leaks\n3. Responses include a `fromCache` flag so you can show staleness in the UI if you want\n\nThe root cause is OpenWeatherMap's free tier degradation (confirmed on their status page). The cache will absorb most of the impact — popular cities will be served from cache, and only the first request for each city will potentially be slow.\n\nFor a longer-term fix, you might want to consider:\n- Redis caching if you scale to multiple instances\n- A fallback weather API (WeatherAPI.com has a free tier)\n- Circuit breaker pattern to fail fast when the API is consistently down", model, ts(base, 5.5), pid);
+  m = assistantMsg("Fixed. Here's what I did:\n\n1. **Added in-memory caching** with a 10-minute TTL: repeated searches for the same city return instantly from cache instead of hitting the degraded API\n2. **Cache eviction** at 500 entries to prevent memory leaks\n3. Responses include a `fromCache` flag so you can show staleness in the UI if you want\n\nThe root cause is OpenWeatherMap's free tier degradation (confirmed on their status page). The cache will absorb most of the impact: popular cities will be served from cache, and only the first request for each city will potentially be slow.\n\nFor a longer-term fix, you might want to consider:\n- Redis caching if you scale to multiple instances\n- A fallback weather API (WeatherAPI.com has a free tier)\n- Circuit breaker pattern to fail fast when the API is consistently down", model, ts(base, 5.5), pid);
   lines.push(m.line);
 
   writeSession(`${sid}.jsonl`, lines);
-  console.log(`Session 4: ${sid} — Debug API timeout (${lines.length} events)`);
+  console.log(`Session 4: ${sid}: Debug API timeout (${lines.length} events)`);
 })();
 
 // ============================================================
@@ -530,11 +530,11 @@ function writeSession(filename, lines) {
   tr = toolResult(tcId, 'exec', JSON.stringify({ status: 'completed', exitCode: 0, aggregated: '[+] Running 2/2\n ✔ Network weather-app_default  Created\n ✔ Container weather-app-weather-app-1  Started\n{"city":"London","country":"GB","temp":7.8,"feelsLike":4.9,"humidity":79,"description":"light rain","icon":"10d","windSpeed":4.8}' }), ts(base, 4.2), pid);
   lines.push(tr.line); pid = tr.id;
 
-  m = assistantMsg("Deployed and verified! The Docker setup includes:\n\n- **Multi-stage build** — builder stage installs deps, final image is lean (147MB)\n- **Non-root user** (`USER node`) for security\n- **Health check** — Docker monitors the app every 30s\n- **Auto-restart** (`unless-stopped`)\n- **`.dockerignore`** — keeps node_modules and .env out of the build context\n\nThe container is running and responding to API requests. For production, you'll want to add:\n- Nginx reverse proxy with SSL (Let's Encrypt)\n- Log aggregation\n- Rate limiting", model, ts(base, 5), pid);
+  m = assistantMsg("Deployed and verified! The Docker setup includes:\n\n- **Multi-stage build**: builder stage installs deps, final image is lean (147MB)\n- **Non-root user** (`USER node`) for security\n- **Health check**: Docker monitors the app every 30s\n- **Auto-restart** (`unless-stopped`)\n- **`.dockerignore`**: keeps node_modules and .env out of the build context\n\nThe container is running and responding to API requests. For production, you'll want to add:\n- Nginx reverse proxy with SSL (Let's Encrypt)\n- Log aggregation\n- Rate limiting", model, ts(base, 5), pid);
   lines.push(m.line);
 
   writeSession(`${sid}.jsonl`, lines);
-  console.log(`Session 5: ${sid} — Deploy to production (${lines.length} events)`);
+  console.log(`Session 5: ${sid}: Deploy to production (${lines.length} events)`);
 })();
 
 // ============================================================
@@ -592,11 +592,11 @@ function writeSession(filename, lines) {
   tr = toolResult(tcId, 'exec', JSON.stringify({ status: 'completed', exitCode: 0, aggregated: '[\n  { "date": "2026-02-14", "high": 12.4, "low": 5.1, "description": "clear sky", "icon": "01d" },\n  { "date": "2026-02-15", "high": 10.8, "low": 4.3, "description": "few clouds", "icon": "02d" },\n  { "date": "2026-02-16", "high": 8.2, "low": 2.9, "description": "light rain", "icon": "10d" },\n  { "date": "2026-02-17", "high": 11.1, "low": 5.6, "description": "scattered clouds", "icon": "03d" },\n  { "date": "2026-02-18", "high": 13.0, "low": 6.2, "description": "clear sky", "icon": "01d" }\n]' }), ts(base, 3.2), pid);
   lines.push(tr.line); pid = tr.id;
 
-  m = assistantMsg("5-day forecast feature is complete:\n\n- **New endpoint:** `GET /api/weather/:city/forecast` — returns 5 days with high/low temps, description, and icon\n- **Aggregation logic:** Groups the 3-hour forecast data by day, picks midday conditions for description\n- **Caching:** Same 10-min cache pattern as current weather\n\nThe forecast data is ready to be consumed by the frontend. The main agent can update the UI to render it.", model, ts(base, 3.5), pid);
+  m = assistantMsg("5-day forecast feature is complete:\n\n- **New endpoint:** `GET /api/weather/:city/forecast`: returns 5 days with high/low temps, description, and icon\n- **Aggregation logic:** Groups the 3-hour forecast data by day, picks midday conditions for description\n- **Caching:** Same 10-min cache pattern as current weather\n\nThe forecast data is ready to be consumed by the frontend. The main agent can update the UI to render it.", model, ts(base, 3.5), pid);
   lines.push(m.line);
 
   writeSession(`${sid}.jsonl`, lines);
-  console.log(`Session 6: ${sid} — Add 5-day forecast / sub-agent (${lines.length} events)`);
+  console.log(`Session 6: ${sid}: Add 5-day forecast / sub-agent (${lines.length} events)`);
 })();
 
 // ============================================================
@@ -660,11 +660,11 @@ function writeSession(filename, lines) {
   tr = toolResult(tcId, 'Edit', '✅ Applied edit to weather-app/package.json', ts(base, 6.2), pid);
   lines.push(tr.line); pid = tr.id;
 
-  m = assistantMsg("Test suite is set up and passing:\n\n- **6 tests** across 2 test files\n- **weatherClient.test.js** — unit tests for `getCurrentWeather` and `getForecast` with mocked axios\n- **routes.test.js** — integration tests using supertest for all API endpoints\n- **`npm test`** runs the full suite, `npm run test:watch` for development\n\nAll green. Ready to ship.", model, ts(base, 7), pid);
+  m = assistantMsg("Test suite is set up and passing:\n\n- **6 tests** across 2 test files\n- **weatherClient.test.js**: unit tests for `getCurrentWeather` and `getForecast` with mocked axios\n- **routes.test.js**: integration tests using supertest for all API endpoints\n- **`npm test`** runs the full suite, `npm run test:watch` for development\n\nAll green. Ready to ship.", model, ts(base, 7), pid);
   lines.push(m.line);
 
   writeSession(`${sid}.jsonl`, lines);
-  console.log(`Session 7: ${sid} — Add unit tests (${lines.length} events)`);
+  console.log(`Session 7: ${sid}: Add unit tests (${lines.length} events)`);
 })();
 
 
@@ -736,7 +736,7 @@ function codexThread(id, parentId, start, title, steps, finishedAgoMin) {
     ['apply_patch public/index.html', 'Added aria-labels to search and unit toggle'],
     ['apply_patch public/styles.css', 'Raised .muted contrast to 4.8:1'],
   ], null);
-  console.log(`Session 8: ${sid} — Polish dashboard, live with 2 subagents (${lines.length} + ${a} + ${b} events)`);
+  console.log(`Session 8: ${sid}: Polish dashboard, live with 2 subagents (${lines.length} + ${a} + ${b} events)`);
 })();
 
 // ============================================================
