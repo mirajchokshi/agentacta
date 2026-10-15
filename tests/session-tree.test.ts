@@ -154,10 +154,10 @@ describe('subagent indexing', () => {
       ins.run(sid, 2, JSON.stringify({ type: 'message', id: `${sid}-m`, timestamp: '2026-10-01T00:01:00Z', message: { role: 'user', content: `Hello ${sid}` } }), 2);
     }
     const node = src.prepare('INSERT INTO session_nodes VALUES (?, ?, ?, ?, ?, ?, ?)');
-    node.run('agent:main:signal', 'oc-parent', null, null, null, null, '{}');
-    node.run('agent:main:dash:1', 'oc-child', 'agent:main:signal', 'agent:main:signal', 'running', 'Deck work', JSON.stringify({ parentSessionId: 'oc-parent' }));
+    node.run('agent:main:chat', 'oc-parent', null, null, null, null, '{}');
+    node.run('agent:main:dash:1', 'oc-child', 'agent:main:chat', 'agent:main:chat', 'running', 'Deck work', JSON.stringify({ parentSessionId: 'oc-parent' }));
     // No parentSessionId in entry_json: falls back to the parent key's current session.
-    node.run('agent:main:dash:2', 'oc-child2', 'agent:main:signal', null, 'done', null, JSON.stringify({ label: 'From entry' }));
+    node.run('agent:main:dash:2', 'oc-child2', 'agent:main:chat', null, 'done', null, JSON.stringify({ label: 'From entry' }));
 
     indexOpenClawDb(db, dbp, 'main', stmts, false, {} as never);
     const child = db.prepare('SELECT * FROM sessions WHERE id = ?').get('oc-child') as SessionRow;
@@ -184,24 +184,24 @@ describe('subagent indexing', () => {
     indexFile(db, fp, 'claude-code', stmts, false, {} as never);
     assert.strictEqual((db.prepare('SELECT label FROM sessions WHERE id = ?').get('cc-titled') as SessionRow).label, 'Better title');
 
-    fs.appendFileSync(fp, JSON.stringify({ type: 'custom-title', customTitle: 'Kips ops', sessionId: 'cc-titled' }) + '\n');
+    fs.appendFileSync(fp, JSON.stringify({ type: 'custom-title', customTitle: 'Ops notes', sessionId: 'cc-titled' }) + '\n');
     const future = new Date(Date.now() + 5000);
     fs.utimesSync(fp, future, future);
     indexFile(db, fp, 'claude-code', stmts, false, {} as never);
-    assert.strictEqual((db.prepare('SELECT label FROM sessions WHERE id = ?').get('cc-titled') as SessionRow).label, 'Kips ops');
+    assert.strictEqual((db.prepare('SELECT label FROM sessions WHERE id = ?').get('cc-titled') as SessionRow).label, 'Ops notes');
   });
 
   it('summarizes a pasted-thread prompt by its last message, not the header', () => {
     const fp = path.join(TMP, 'claude-thread', 'thread.jsonl');
     writeJsonl(fp, [
-      { type: 'user', sessionId: 'cc-thread', uuid: 'th-1', timestamp: '2026-10-01T00:00:00Z', message: { role: 'user', content: '(Fresh session. Recent messages in this thread, oldest first:\nKip: Done with the draft.\nMiraj: Did anything break?' } },
+      { type: 'user', sessionId: 'cc-thread', uuid: 'th-1', timestamp: '2026-10-01T00:00:00Z', message: { role: 'user', content: '(Fresh session. Recent messages in this thread, oldest first:\nSam: Done with the draft.\nAlex: Did anything break?' } },
     ]);
     indexFile(db, fp, 'claude-code', stmts, false, {} as never);
     assert.strictEqual((db.prepare('SELECT summary FROM sessions WHERE id = ?').get('cc-thread') as SessionRow).summary, 'Did anything break?');
 
     const fp2 = path.join(TMP, 'claude-thread', 'thread2.jsonl');
     writeJsonl(fp2, [
-      { type: 'user', sessionId: 'cc-thread2', uuid: 'th-2', timestamp: '2026-10-01T00:00:00Z', message: { role: 'user', content: '(Fresh session. Recent messages in this thread, oldest first:\nMiraj: Update the stack list please\n[iMessage attachment: IMG_1.png]\nAttached file(s), read them with the Read tool:\n/home/me/.local/state/inbox/IMG_1.png' } },
+      { type: 'user', sessionId: 'cc-thread2', uuid: 'th-2', timestamp: '2026-10-01T00:00:00Z', message: { role: 'user', content: '(Fresh session. Recent messages in this thread, oldest first:\nAlex: Update the stack list please\n[Message attachment: IMG_1.png]\nAttached file(s), read them with the Read tool:\n/home/me/.local/state/inbox/IMG_1.png' } },
     ]);
     indexFile(db, fp2, 'claude-code', stmts, false, {} as never);
     assert.strictEqual((db.prepare('SELECT summary FROM sessions WHERE id = ?').get('cc-thread2') as SessionRow).summary, 'Update the stack list please');
