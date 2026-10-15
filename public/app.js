@@ -129,6 +129,46 @@ function fmtCompact(n) {
   return n.toLocaleString();
 }
 
+// ---- Small charts (no library) ----
+// Columns: one series, thin bars from a shared baseline. `highlight` marks the
+// one bar the story is about (today, the busiest bucket); only it and the peak
+// get a direct label. Every column is focusable and shows its exact value on
+// hover/focus/tap; a visually hidden table carries all values for screen readers.
+function renderColumnChart({ points, height = 96, caption, unit = '', axis = [] }) {
+  if (!points.length) return '';
+  const max = Math.max(1, ...points.map(p => p.value));
+  const peakIdx = points.reduce((best, p, i) => (p.value > points[best].value ? i : best), 0);
+  const cols = points.map((p, i) => {
+    const h = p.value ? Math.max(2, Math.round((p.value / max) * height)) : 0;
+    const label = (p.highlight || (i === peakIdx && p.value > 0)) ? `<span class="col-val">${fmtCompact(p.value)}</span>` : '';
+    return `<div class="col${p.highlight ? ' is-hl' : ''}" tabindex="0" role="img" aria-label="${escHtml(p.tip)}" data-tip="${escHtml(p.tip)}">
+      <div class="col-bar" style="height:${h}px">${label}</div>
+    </div>`;
+  }).join('');
+  return `<figure class="colchart" style="--plot-h:${height}px">
+    <div class="colchart-plot">${cols}</div>
+    ${axis.length ? `<div class="colchart-axis">${axis.map(a => `<span>${escHtml(a)}</span>`).join('')}</div>` : ''}
+    <table class="sr-only"><caption>${escHtml(caption)}</caption><tbody>${points.map(p => `<tr><th>${escHtml(p.label)}</th><td>${p.value}${unit}</td></tr>`).join('')}</tbody></table>
+  </figure>`;
+}
+
+// Ranked horizontal bars for nominal categories (agents, tools): one color,
+// length = magnitude, value in a text column so it is never color-only.
+function renderBarList(rows, { valueLabel = v => fmtCompact(v), max } = {}) {
+  if (!rows.length) return '';
+  const top = max || Math.max(1, ...rows.map(r => r.value));
+  return `<ul class="barlist">${rows.map(r => `
+    <li class="barlist-row" title="${escHtml(r.tip || '')}">
+      <span class="barlist-name">${escHtml(r.name)}</span>
+      <span class="barlist-track"><span class="barlist-bar" style="width:${Math.max(1, (r.value / top) * 100)}%"></span></span>
+      <span class="barlist-val">${valueLabel(r.value)}${r.sub ? `<span class="barlist-sub"> ${escHtml(r.sub)}</span>` : ''}</span>
+    </li>`).join('')}</ul>`;
+}
+
+function renderStatTiles(items) {
+  return `<dl class="tiles">${items.map(m => `<div class="tile"><dt>${escHtml(m.label)}</dt><dd title="${escHtml(m.title || String(m.value))}">${escHtml(String(m.value))}</dd>${m.note ? `<p class="tile-note">${escHtml(m.note)}</p>` : ''}</div>`).join('')}</dl>`;
+}
+
 function renderMetrics(items) {
   return `<dl class="metrics">${items.map(m => `<div class="metric"><dt>${escHtml(m.label)}</dt><dd title="${escHtml(m.title || String(m.value))}">${escHtml(String(m.value))}</dd>${m.note ? `<p class="metric-note">${escHtml(m.note)}</p>` : ''}</div>`).join('')}</dl>`;
 }
@@ -182,6 +222,7 @@ function shortSessionId(id) {
 // One short fade per navigation: the skeleton fades in, the real content
 // that replaces it a moment later does not fade again.
 function transitionView() {
+  window.hideChartTip?.();
   const now = performance.now();
   if (now - (window._lastViewFade || 0) < 700) return;
   window._lastViewFade = now;
@@ -201,6 +242,7 @@ function rememberCurrentView() {
 function restoreView(name) {
   const c = viewCache[name];
   if (!c || Date.now() - c.at > VIEW_CACHE_MS) return false;
+  window.hideChartTip?.();
   content.innerHTML = c.html;
   window.scrollTo(0, c.y);
   return true;
@@ -772,8 +814,54 @@ async function viewSessions() {
   else { content.innerHTML = html; transitionView(); }
 }
 
+// At-a-glance picture of one session: the numbers, when it was busy, and
+// what it spent its tool calls on. Built from the events already loaded.
+function renderSessionShape(s, events) {
+  const startMs = Date.parse(s.start_time);
+  const endMs = Date.parse(s.end_time || '') || (events.length ? Date.parse(events[0].timestamp) : startMs);
+  const durMs = Math.max(0, endMs - startMs);
+  const tokens = s.output_tokens ? (s.output_tokens + (s.input_tokens || 0) + (s.cache_read_tokens || 0)) : (s.total_tokens || 0);
+  let html = renderStatTiles([
+    { label: 'Duration', value: s.end_time || s.status === 'live' ? fmtDuration(s.start_time, s.end_time || null) : '\u2013' },
+    { label: 'Messages', value: fmtCompact(s.message_count), title: s.message_count.toLocaleString() },
+    { label: 'Tool calls', value: fmtCompact(s.tool_count), title: s.tool_count.toLocaleString() },
+    { label: 'Tokens', value: fmtCompact(tokens), title: `${tokens.toLocaleString()} tokens${s.output_tokens ? ` (${s.output_tokens.toLocaleString()} output)` : ''}`, note: s.output_tokens ? `${fmtCompact(s.output_tokens)} output` : '' },
+  ]);
+
+  const stamped = events.map(e => Date.parse(e.timestamp)).filter(t => Number.isFinite(t) && t >= startMs);
+  if (stamped.length >= 6 && durMs >= 60000) {
+    const n = Math.min(40, Math.max(12, Math.round(durMs / 60000)));
+    const step = durMs / n;
+    const counts = new Array(n).fill(0);
+    for (const t of stamped) counts[Math.min(n - 1, Math.floor((t - startMs) / step))]++;
+    const fmt = ms => new Date(ms).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    const points = counts.map((c, i) => ({
+      label: `${fmt(startMs + i * step)}\u2013${fmt(startMs + (i + 1) * step)}`,
+      value: c,
+      tip: `${fmt(startMs + i * step)}\u2013${fmt(startMs + (i + 1) * step)}: ${c} event${c === 1 ? '' : 's'}`,
+    }));
+    html += `<section class="panel-block"><h2 class="section-label">Activity <span class="count">events over the session</span></h2>
+      ${renderColumnChart({ points, height: 56, caption: 'Events over the session', unit: ' events', axis: [fmt(startMs), fmt(startMs + durMs / 2), s.status === 'live' ? 'now' : fmt(endMs)] })}</section>`;
+  }
+
+  const toolCounts = new Map();
+  for (const e of events) if (e.type === 'tool_call' && e.tool_name) {
+    const name = fmtToolName(e.tool_name);
+    toolCounts.set(name, (toolCounts.get(name) || 0) + 1);
+  }
+  const ranked = [...toolCounts.entries()].sort((a, b) => b[1] - a[1]);
+  if (ranked.length >= 2) {
+    const top = ranked.slice(0, 5).map(([name, value]) => ({ name, value, tip: `${name}: ${value} calls` }));
+    const rest = ranked.slice(5);
+    if (rest.length) top.push({ name: `${rest.length} other tool${rest.length === 1 ? '' : 's'}`, value: rest.reduce((n, [, v]) => n + v, 0), tip: rest.map(([n, v]) => `${n} ${v}`).join(', ') });
+    html += `<section class="panel-block"><h2 class="section-label">Top tools</h2>${renderBarList(top)}</section>`;
+  }
+  return `<div class="session-shape">${html}</div>`;
+}
+
 async function viewSession(id) {
   rememberCurrentView();
+  window.hideChartTip?.();
   clearJumpUi();
   window._recentSessionIds = [id, ...(window._recentSessionIds || []).filter(x => x !== id)].slice(0, 5);
   if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
@@ -800,17 +888,13 @@ async function viewSession(id) {
   const childrenCollapsed = children.length > 10 && !children.some(c => c.status === 'live');
   const headline = s.label || cleanSessionSummary(s.summary, s.initial_prompt);
   const endText = s.end_time ? fmtTimeShort(s.end_time) : (s.status === 'live' ? 'now' : 'no end recorded');
-  const spanText = s.end_time ? ` (${fmtDuration(s.start_time, s.end_time)})` : '';
-  const tokenStats = s.output_tokens
-    ? [`<span title="${(s.output_tokens).toLocaleString()} output tokens">${fmtCompact(s.output_tokens)} output</span>`, `<span title="${(s.input_tokens + s.cache_read_tokens).toLocaleString()} input tokens incl. cache reads">${fmtCompact(s.input_tokens + s.cache_read_tokens)} input tokens</span>`]
-    : (s.total_tokens ? [`<span>${fmtCompact(s.total_tokens)} tokens</span>`] : []);
   let html = `
     <button class="back-btn" id="backBtn">\u2190 Back</button>
     ${parent ? `<button class="session-parent-link" id="parentSessionLink" title="Open parent session">${icon('up', 13)}Subagent of <span>${escHtml(truncate(parent.label || cleanSessionSummary(parent.summary, parent.initial_prompt), 90))}</span></button>` : ''}
     <header class="detail-head">
       <h1 class="page-title detail-title">${escHtml(truncate(headline, 240))}</h1>
-      <p class="detail-meta">${renderSessionMeta(s)}<span class="sep" aria-hidden="true"> \u00b7 </span>${fmtDate(s.start_time)}, ${fmtTimeShort(s.start_time)} \u2013 ${endText}${spanText}</p>
-      <p class="detail-stats"><span>${s.message_count.toLocaleString()} messages</span><span>${s.tool_count.toLocaleString()} tool calls</span>${tokenStats.join('')}</p>
+      <p class="detail-meta">${renderSessionMeta(s)}</p>
+      <p class="detail-meta">${fmtDate(s.start_time)}, ${fmtTimeShort(s.start_time)} \u2013 ${endText}</p>
       <div class="detail-actions">
         <span id="sessionStatusSlot" class="detail-status"></span>
         ${s.first_message_id ? `<button class="btn" id="jumpToStartBtn" title="Scroll to the first user prompt">${icon('toStart', 12)}Initial prompt</button>` : ''}
@@ -826,6 +910,7 @@ async function viewSession(id) {
         </span>
       </div>
     </header>
+    ${renderSessionShape(s, data.events || [])}
     ${projectFilters.length ? `
       <div class="seg" id="sessionProjectFilters" role="group" aria-label="Filter events by project">
         <button class="filter-chip active" data-project-filter="all">All projects</button>
@@ -1341,6 +1426,52 @@ async function viewTimeline(date) {
   });
 }
 
+function fmtDayShort(day) {
+  const d = new Date(day + 'T12:00:00');
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function renderTodaySection(act) {
+  if (!act || !Array.isArray(act.days) || !act.days.length) return '';
+  const days = act.days;
+  const today = days[days.length - 1];
+  const past = days.slice(0, -1);
+  const avg = key => past.length ? past.reduce((n, d) => n + d[key], 0) / past.length : 0;
+  const note = key => `${fmtCompact(Math.round(avg(key)))}/day avg`;
+  const agentsToday = (act.agents || []).filter(a => a.todayEvents > 0).length;
+
+  const points = days.map((d, i) => ({
+    label: d.day,
+    value: d.toolCalls,
+    highlight: i === days.length - 1,
+    tip: `${i === days.length - 1 ? 'Today' : fmtDayShort(d.day)}: ${d.toolCalls.toLocaleString()} tool calls, ${d.sessions} session${d.sessions === 1 ? '' : 's'}`,
+  }));
+  const mid = Math.floor((days.length - 1) / 2);
+  const axis = [fmtDayShort(days[0].day), fmtDayShort(days[mid].day), 'Today'];
+
+  const agents = (act.agents || []).slice();
+  const shown = agents.slice(0, 5);
+  const rest = agents.slice(5);
+  if (rest.length) shown.push({ agent: `${rest.length} other${rest.length === 1 ? '' : 's'}`, toolCalls: rest.reduce((n, a) => n + a.toolCalls, 0), sessions: rest.reduce((n, a) => n + a.sessions, 0) });
+
+  return `
+    ${renderStatTiles([
+      { label: 'Sessions today', value: today.sessions.toLocaleString(), note: note('sessions') },
+      { label: 'Tool calls today', value: fmtCompact(today.toolCalls), title: today.toolCalls.toLocaleString(), note: note('toolCalls') },
+      { label: 'Messages today', value: fmtCompact(today.messages), title: today.messages.toLocaleString(), note: note('messages') },
+      { label: 'Agents active', value: String(agentsToday), note: `of ${agents.length} in 14 days` },
+    ])}
+    <section class="panel-block">
+      <h2 class="section-label">Tool calls per day <span class="count">last ${days.length} days</span></h2>
+      ${renderColumnChart({ points, height: 88, caption: 'Tool calls per day', unit: ' tool calls', axis })}
+    </section>
+    ${shown.length ? `<section class="panel-block">
+      <h2 class="section-label">By agent <span class="count">tool calls, last ${days.length} days</span></h2>
+      ${renderBarList(shown.map(a => ({ name: a.agent, value: a.toolCalls, sub: `${a.sessions} session${a.sessions === 1 ? '' : 's'}`, tip: `${a.agent}: ${a.toolCalls.toLocaleString()} tool calls in ${a.sessions} sessions` })))}
+    </section>` : ''}
+  `;
+}
+
 async function viewOverview() {
   clearJumpUi();
   const restored = restoreView('overview');
@@ -1348,7 +1479,8 @@ async function viewOverview() {
     content.innerHTML = `<h1 class="page-title">Overview</h1>${skeletonRows(4, 'stats')}${skeletonRows(4, 'session')}`;
     transitionView();
   }
-  const [data, sessionsRes] = await Promise.all([api('/stats'), api('/sessions?limit=30&roots=1')]);
+  const tz = new Date().getTimezoneOffset();
+  const [data, sessionsRes, act] = await Promise.all([api('/stats'), api('/sessions?limit=30&roots=1'), api(`/activity?days=14&tz=${tz}`)]);
   if (!stillOn('overview')) return;
   if (data._error || sessionsRes._error) {
     if (restored) return;
@@ -1362,21 +1494,18 @@ async function viewOverview() {
     .slice(0, 4);
   const activeIds = new Set(activeNow.map(s => s.id));
   const recentSessions = sessions.filter(s => !activeIds.has(s.id)).slice(0, 6);
-  const uniqueTools = new Set((data.tools || []).filter(t => t).map(t => fmtToolGroup(t)));
+  const todayLabel = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
 
-  let html = `<h1 class="page-title">Overview</h1>
-    ${renderMetrics([
-      { label: 'Sessions', value: fmtCompact(data.sessions), title: data.sessions.toLocaleString() },
-      { label: 'Messages', value: fmtCompact(data.messages), title: data.messages.toLocaleString() },
-      { label: 'Tool calls', value: fmtCompact(data.toolCalls), title: data.toolCalls.toLocaleString() },
-      { label: 'Tokens', value: fmtCompact(data.totalTokens || 0), title: (data.totalTokens || 0).toLocaleString() },
-    ])}
+  let html = `<header class="page-head"><h1 class="page-title">Overview</h1><span class="page-count">${todayLabel}</span></header>
+    ${act && !act._error ? renderTodaySection(act) : ''}
 
     <h2 class="section-label">Active now${activeNow.length ? ` <span class="count">${activeNow.length}</span>` : ''}</h2>
     ${activeNow.length ? renderSessionList(activeNow, { tree: true }) : `<p class="quiet-note">Nothing has written in the last 15 minutes.</p>`}
 
     <h2 class="section-label">Recent</h2>
     ${renderSessionList(recentSessions, { tree: true })}
+
+    <p class="alltime">All time: ${data.sessions.toLocaleString()} sessions \u00b7 ${fmtCompact(data.messages)} messages \u00b7 ${fmtCompact(data.toolCalls)} tool calls \u00b7 <span title="${(data.totalTokens || 0).toLocaleString()} tokens">${fmtCompact(data.totalTokens || 0)} tokens</span></p>
   `;
 
   if (restored) renderInPlace(html);
@@ -2134,6 +2263,31 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && window._cmdk.open) { e.preventDefault(); closeCmdk(); return; }
   handleListKeys(e);
 });
+
+// One tooltip element for every chart mark: follows hover, keyboard focus and
+// taps (columns are focusable, so a tap focuses them), clamped to the viewport.
+(function initChartTips() {
+  let tip = null;
+  const show = (el) => {
+    const text = el.dataset.tip;
+    if (!text) return;
+    if (!tip) { tip = document.createElement('div'); tip.className = 'chart-tip'; tip.setAttribute('role', 'tooltip'); document.body.appendChild(tip); }
+    tip.textContent = text;
+    tip.hidden = false;
+    const r = el.getBoundingClientRect();
+    const w = tip.offsetWidth, h = tip.offsetHeight;
+    const x = Math.min(window.innerWidth - w - 8, Math.max(8, r.left + r.width / 2 - w / 2));
+    const y = Math.max(8, r.top - h - 6);
+    tip.style.left = x + 'px';
+    tip.style.top = y + 'px';
+  };
+  const hide = () => { if (tip) tip.hidden = true; };
+  window.hideChartTip = hide;
+  document.addEventListener('pointerover', e => { const c = e.target.closest && e.target.closest('.col[data-tip]'); if (c) show(c); }, { passive: true });
+  document.addEventListener('pointerout', e => { const c = e.target.closest && e.target.closest('.col[data-tip]'); if (c && !c.contains(e.relatedTarget)) hide(); }, { passive: true });
+  document.addEventListener('focusin', e => { if (e.target.matches && e.target.matches('.col[data-tip]')) show(e.target); else hide(); });
+  window.addEventListener('scroll', hide, { passive: true });
+})();
 
 // Touch press feedback. Mobile browsers delay or skip :active on touch so
 // rows don't flash while scrolling, which leaves taps feeling dead. Show the
