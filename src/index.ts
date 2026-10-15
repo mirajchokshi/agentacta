@@ -587,9 +587,9 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
       if (!row) { json(res, { error: 'Not found' }, 404); }
       else if (query.before) {
         // ?before=<timestamp>|<id>&limit=N: the next N older events while scrolling.
-        const sep: number = query.before.indexOf('|'); // ids may contain '|', timestamps don't
+        const cursor = parseEventCursor(query.before, '');
         const limit: number = Math.min(Math.max(parseInt(query.limit) || 500, 1), 2000);
-        const older = loadOlderSessionEvents(db, withStatus(row, Date.now()), { timestamp: query.before.slice(0, sep), id: query.before.slice(sep + 1) }, limit)
+        const older = loadOlderSessionEvents(db, withStatus(row, Date.now()), { timestamp: cursor.after, id: cursor.afterId || '' }, limit)
           .map(({ session_id: _sid, tool_result: _tr, project_confidence: _pc, ...e }) => e);
         json(res, { events: older, hasMore: older.length === limit });
       }

@@ -856,13 +856,17 @@ async function viewSession(id) {
   const PAGE_SIZE = 50;
   const allEvents = Array.isArray(data.events) ? [...data.events] : [];
   const knownIds = new Set(allEvents.map(e => e.id));
-  const firstPageCount = allEvents.length;
+  let liveCount = 0; // events that arrived live (not in the server's eventTotal)
   let complete = allEvents.length >= (data.eventTotal ?? allEvents.length);
   let fullLoad = null;
+  let olderLoad = null;
+  let olderRetryAt = 0;
   // Appends everything older than the loaded page. Newer events keep arriving
   // through the live channel, so only the older tail is taken from here.
   const ensureAllEvents = () => {
     if (complete) return Promise.resolve();
+    // Let an older-page request land first so the two don't fetch the same events.
+    if (olderLoad) return olderLoad.then(ensureAllEvents);
     if (!fullLoad) {
       fullLoad = api(`/sessions/${id}`).then(full => {
         // On failure, wait before allowing another try instead of refetching
@@ -881,17 +885,19 @@ async function viewSession(id) {
   };
   // Scrolling pulls older events a page at a time from the oldest one loaded,
   // so even a very long session never downloads all of it just to scroll.
-  let olderLoad = null;
   const loadOlderPage = () => {
     if (complete) return Promise.resolve();
+    if (fullLoad) return fullLoad;
     if (olderLoad) return olderLoad;
+    if (Date.now() < olderRetryAt) return Promise.resolve(); // backing off after a failure
     const oldest = allEvents[allEvents.length - 1];
     if (!oldest) return ensureAllEvents();
     olderLoad = api(`/sessions/${id}?before=${encodeURIComponent(`${oldest.timestamp}|${oldest.id}`)}&limit=500`).then(page => {
-      if (page._error || !Array.isArray(page.events)) { setTimeout(() => { olderLoad = null; }, 5000); return; }
+      olderLoad = null;
+      if (page._error || !Array.isArray(page.events)) { olderRetryAt = Date.now() + 5000; return; }
+      if (complete) return;
       for (const e of page.events) if (!knownIds.has(e.id)) { knownIds.add(e.id); allEvents.push(e); }
       if (!page.hasMore) complete = true;
-      olderLoad = null;
       updateEventsLabel();
       syncScrollHandler();
     });
@@ -911,7 +917,7 @@ async function viewSession(id) {
     const el = $('#sessionEventsLabel');
     if (!el) return;
     // Before the rest loads: the server's total plus anything that arrived live.
-    const count = complete ? getFilteredEvents().length : (data.eventTotal || 0) + allEvents.length - firstPageCount;
+    const count = complete ? getFilteredEvents().length : (data.eventTotal || 0) + liveCount;
     if (activeProjectFilter === 'all') {
       el.textContent = `Events (${count})`;
       return;
@@ -1160,6 +1166,7 @@ async function viewSession(id) {
 
     // Delta endpoint returns oldest -> newest, and view is newest-first.
     for (const ev of fresh) allEvents.unshift(ev);
+    liveCount += fresh.length;
 
     const visibleFresh = activeProjectFilter === 'all'
       ? fresh

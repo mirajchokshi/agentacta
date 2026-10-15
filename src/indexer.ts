@@ -467,6 +467,7 @@ function indexCronRunFile(db: Database.Database, filePath: string, agentName: st
     );
 
     stmts.upsertState.run(filePath, 1, mtime);
+    storeSessionAttribution(db, sessionId);
   });
 
   commitIndex();
