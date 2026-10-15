@@ -34,6 +34,7 @@ import { analyzeSession, getInsightsSummary } from './insights.js';
 import { isValidDateKey, resolveStaticPath } from './http-utils.js';
 import { withStatus, attachChildren } from './session-status.js';
 import { loadSessionEvents, loadOlderSessionEvents } from './session-detail.js';
+import { quickSearch } from './search.js';
 
 // --version / -v flag: print version and exit
 if (process.argv.includes('--version') || process.argv.includes('-v')) {
@@ -662,6 +663,10 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
       } else {
         download(res, { query: q, results }, `search-${q.slice(0,20)}.json`, 'application/json');
       }
+    }
+    else if (pathname === '/api/find') {
+      // Command palette: sessions, files and text matches in one request.
+      json(res, quickSearch(db, query.q || ''));
     }
     else if (pathname === '/api/search') {
       const q: string = query.q || '';

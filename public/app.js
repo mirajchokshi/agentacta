@@ -780,7 +780,7 @@ function renderSessionShape(s, shape) {
   return `<div class="session-shape">${html}</div>`;
 }
 
-async function viewSession(id) {
+async function viewSession(id, opts = {}) {
   rememberCurrentView();
   window.hideChartTip?.();
   clearJumpUi();
@@ -1076,83 +1076,70 @@ async function viewSession(id) {
     }
   });
 
+  // Scroll to one event (loading and rendering as far as needed), highlight it,
+  // and offer a way back. Used by "Initial prompt" and by search matches.
+  const revealEvent = async (eventId, { offerReturn = true } = {}) => {
+    const fromY = window.scrollY || window.pageYOffset || 0;
+    if (!allEvents.some(ev => ev.id === eventId)) await ensureAllEvents();
+    // Resolve from full session context, not just project-filtered events.
+    if (!getFilteredEvents().some(ev => ev.id === eventId) && activeProjectFilter !== 'all') {
+      setProjectFilter('all');
+    }
+    // Let button state paint before heavy DOM work.
+    await new Promise(requestAnimationFrame);
+    // Render only as far as the target, in chunks so the UI stays responsive.
+    const sel = `[data-event-id="${CSS.escape(eventId)}"]`;
+    let loops = 0;
+    while (!document.querySelector(sel) && rendered < getFilteredEvents().length) {
+      renderBatch();
+      loops += 1;
+      if (loops % 2 === 0) await new Promise(requestAnimationFrame);
+    }
+    syncScrollHandler();
+    const target = document.querySelector(sel);
+    if (!target) return false;
+
+    const targetY = Math.max(0, target.getBoundingClientRect().top + window.scrollY - (window.innerHeight * 0.35));
+    const useSmooth = Math.abs(targetY - window.scrollY) < 1800;
+    window.scrollTo({ top: targetY, behavior: useSmooth ? 'smooth' : 'auto' });
+    await new Promise(r => setTimeout(r, useSmooth ? 500 : 120));
+    target.classList.add('event-highlight');
+    setTimeout(() => target.classList.remove('event-highlight'), 2000);
+    if (!offerReturn) return true;
+
+    let returnBtn = document.getElementById('returnJumpBtn');
+    if (!returnBtn) {
+      returnBtn = document.createElement('button');
+      returnBtn.id = 'returnJumpBtn';
+      returnBtn.className = 'return-jump-btn';
+      returnBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"></path><polyline points="5 12 12 5 19 12"></polyline></svg>`;
+      returnBtn.setAttribute('aria-label', 'Back to previous spot');
+      returnBtn.title = 'Back to previous spot';
+      document.body.appendChild(returnBtn);
+    }
+    returnBtn.classList.add('show');
+    returnBtn.onclick = () => {
+      window.scrollTo({ top: fromY, behavior: 'smooth' });
+      returnBtn.classList.remove('show');
+    };
+    setTimeout(() => { if (returnBtn) returnBtn.classList.remove('show'); }, 9000);
+    return true;
+  };
+
   const jumpBtn = $('#jumpToStartBtn');
   if (jumpBtn) {
     jumpBtn.addEventListener('click', async () => {
-      const fromY = window.scrollY || window.pageYOffset || 0;
-      const firstMessageId = s.first_message_id;
-
+      if (!s.first_message_id) return;
       jumpBtn.classList.add('jumping');
       jumpBtn.disabled = true;
-
-      if (!firstMessageId) {
-        jumpBtn.classList.remove('jumping');
-        jumpBtn.disabled = false;
-        return;
-      }
-
-      await ensureAllEvents();
-      // Resolve from full session context, not just project-filtered events.
-      const inCurrentFilter = getFilteredEvents().some(ev => ev.id === firstMessageId);
-      if (!inCurrentFilter && activeProjectFilter !== 'all') {
-        setProjectFilter('all');
-      }
-
-      // Let button state paint before heavy DOM work.
-      await new Promise(requestAnimationFrame);
-
-      // Load remaining events in chunks so UI stays responsive.
-      let loops = 0;
-      while (rendered < getFilteredEvents().length) {
-        renderBatch();
-        loops += 1;
-        if (loops % 2 === 0) await new Promise(requestAnimationFrame);
-      }
-
-      const firstMessage = document.querySelector(`[data-event-id="${firstMessageId}"]`);
-      if (!firstMessage) {
-        jumpBtn.classList.remove('jumping');
-        jumpBtn.disabled = false;
-        return;
-      }
-
-      const targetY = Math.max(0, firstMessage.getBoundingClientRect().top + fromY - (window.innerHeight * 0.35));
-      const distance = Math.abs(targetY - fromY);
-      const useSmooth = distance < 1800;
-
-      window.scrollTo({ top: targetY, behavior: useSmooth ? 'smooth' : 'auto' });
-
-      const doneDelay = useSmooth ? 500 : 120;
-      setTimeout(() => {
-        firstMessage.classList.add('event-highlight');
-        setTimeout(() => firstMessage.classList.remove('event-highlight'), 2000);
-
-        jumpBtn.classList.remove('jumping');
-        jumpBtn.disabled = false;
-
-        let returnBtn = document.getElementById('returnJumpBtn');
-        if (!returnBtn) {
-          returnBtn = document.createElement('button');
-          returnBtn.id = 'returnJumpBtn';
-          returnBtn.className = 'return-jump-btn';
-          returnBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"></path><polyline points="5 12 12 5 19 12"></polyline></svg>`;
-          returnBtn.setAttribute('aria-label', 'Back to previous spot');
-          returnBtn.title = 'Back to previous spot';
-          document.body.appendChild(returnBtn);
-        }
-        returnBtn.classList.add('show');
-
-        returnBtn.onclick = () => {
-          window.scrollTo({ top: fromY, behavior: 'smooth' });
-          returnBtn.classList.remove('show');
-        };
-
-        setTimeout(() => {
-          if (returnBtn) returnBtn.classList.remove('show');
-        }, 9000);
-      }, doneDelay);
+      await revealEvent(s.first_message_id);
+      jumpBtn.classList.remove('jumping');
+      jumpBtn.disabled = false;
     });
   }
+
+  // Opened from a search match: go straight to it.
+  if (opts.eventId) revealEvent(opts.eventId, { offerReturn: false });
 
   // --- Lightweight realtime updates (polling fallback first) ---
 
@@ -2080,8 +2067,8 @@ function renderCmdkList() {
     }
     html += `<button type="button" class="cmdk-item ${i === index ? 'active' : ''}" data-i="${i}">
       <div class="cmdk-item-body">
-        <div class="cmdk-item-title">${escHtml(item.title)}</div>
-        ${item.sub ? `<div class="cmdk-item-sub">${escHtml(item.sub)}</div>` : ''}
+        <div class="cmdk-item-title">${item.titleHtml || escHtml(item.title)}</div>
+        ${item.subHtml || item.sub ? `<div class="cmdk-item-sub">${item.subHtml || escHtml(item.sub)}</div>` : ''}
       </div>
       ${item.meta ? `<span class="cmdk-item-meta">${escHtml(item.meta)}</span>` : ''}
     </button>`;
@@ -2103,8 +2090,10 @@ function renderCmdkList() {
       if (!btn) return;
       const idx = Number(btn.dataset.i || -1);
       if (idx >= 0 && idx !== window._cmdk.index) {
+        // Move the highlight only; rebuilding the list on every hover was wasteful.
+        list.querySelector('.cmdk-item.active')?.classList.remove('active');
+        btn.classList.add('active');
         window._cmdk.index = idx;
-        renderCmdkList();
       }
     });
 
@@ -2116,50 +2105,76 @@ function renderCmdkList() {
   if (active) active.scrollIntoView({ block: 'nearest' });
 }
 
+// Highlight each query word in already-plain text (escaped here).
+function markText(text, q) {
+  const words = (q || '').trim().split(/\s+/).filter(w => w.length >= 2).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const safe = escHtml(text || '');
+  if (!words.length) return safe;
+  return safe.replace(new RegExp(`(${words.map(w => escHtml(w)).join('|')})`, 'gi'), '<mark>$1</mark>');
+}
+// Server snippets wrap matches in \u0002 \u0003; escape the text, then mark.
+// Tool arguments are stored as JSON text, so unescape \n, \t and \" for reading.
+function markSnippet(snippet) {
+  const text = (snippet || '').replace(/\\[nrt]/g, ' ').replace(/\\"/g, '"');
+  return escHtml(text).replace(/\u0002/g, '<mark>').replace(/\u0003/g, '</mark>').replace(/\s+/g, ' ');
+}
+
+// Search as you type. A response for an older query is dropped, and the
+// previous results stay up (dimmed) until the new ones arrive.
+let cmdkSeq = 0;
+let cmdkInFlight = false;
+let cmdkQueued = null;
 async function loadCmdkResults(query) {
   const list = $('#cmdkList');
   if (!list) return;
   const q = (query || '').trim();
-  if (!q) { loadCmdkHome(); return; }
+  const seq = ++cmdkSeq;
+  if (!q) { cmdkQueued = null; loadCmdkHome(); return; }
 
-  list.innerHTML = '<div class="cmdk-loading">Searching\u2026</div>';
+  if (window._cmdk.items.length && !list.querySelector('.cmdk-loading')) list.classList.add('is-busy');
+  else list.innerHTML = '<div class="cmdk-loading">Searching…</div>';
 
-  const [searchRes, sessionsRes, filesRes] = await Promise.all([
-    api(`/search?q=${encodeURIComponent(q)}&limit=6`),
-    api('/sessions?limit=20'),
-    api('/files?limit=20')
-  ]);
-
+  // One request in flight at a time: typing during it queues only the latest
+  // query, so the server never works through a backlog of stale keystrokes.
+  if (cmdkInFlight) { cmdkQueued = query; return; }
+  cmdkInFlight = true;
+  const res = await api(`/find?q=${encodeURIComponent(query)}`);
+  cmdkInFlight = false;
+  if (cmdkQueued !== null) {
+    const next = cmdkQueued;
+    cmdkQueued = null;
+    loadCmdkResults(next);
+    return;
+  }
+  if (seq !== cmdkSeq || !$('#cmdkList')) return;
+  list.classList.remove('is-busy');
   const items = [];
 
-  (sessionsRes.sessions || [])
-    .filter(s => cleanSessionSummary(s.summary, s.initial_prompt).toLowerCase().includes(q.toLowerCase()))
-    .slice(0, 3)
-    .forEach(s => items.push({
+  (res.sessions || []).forEach(s => {
+    const title = s.label || cleanSessionSummary(s.summary, s.initial_prompt);
+    items.push({
       group: 'Sessions',
-      title: truncate(cleanSessionSummary(s.summary, s.initial_prompt), 64),
-      sub: shortSessionId(s.id),
+      titleHtml: markText(truncate(title, 80), q),
+      sub: `${normalizeAgentLabel(s.agent || '') || 'session'} · ${shortSessionId(s.id)}`,
       meta: fmtTime(s.start_time),
       action: () => viewSession(s.id)
-    }));
+    });
+  });
 
-  (filesRes.files || [])
-    .filter(f => f.file_path.toLowerCase().includes(q.toLowerCase()))
-    .slice(0, 2)
-    .forEach(f => items.push({
-      group: 'Files',
-      title: f.file_path.split('/').pop(),
-      sub: f.file_path,
-      meta: `${f.touch_count} touches`,
-      action: () => viewFileDetail(f.file_path)
-    }));
+  (res.files || []).forEach(f => items.push({
+    group: 'Files',
+    titleHtml: markText(f.file_path.split('/').pop(), q),
+    subHtml: markText(f.file_path.replace(/^\/home\/[^/]+/, '~').replace(/^\/Users\/[^/]+/, '~'), q),
+    meta: `${f.touches} touch${f.touches === 1 ? '' : 'es'}`,
+    action: () => viewFileDetail(f.file_path)
+  }));
 
-  (searchRes.results || []).slice(0, 4).forEach(r => items.push({
-    group: 'Search Results',
-    title: truncate(r.content || r.tool_args || r.tool_result || '', 66),
-    sub: shortSessionId(r.session_id),
-    meta: fmtTime(r.timestamp),
-    action: () => viewSession(r.session_id)
+  (res.events || []).forEach(e => items.push({
+    group: 'Matches',
+    titleHtml: markSnippet(e.snippet),
+    sub: `${e.tool_name ? fmtToolName(e.tool_name) : (EVENT_ROLE_LABELS[e.role] || e.role || e.type)} · ${truncate(e.session_label || cleanSessionSummary(e.session_summary || '', ''), 60)}`,
+    meta: fmtTime(e.timestamp),
+    action: () => viewSession(e.session_id, { eventId: e.id })
   }));
 
   window._cmdk.items = items;
@@ -2170,6 +2185,7 @@ async function loadCmdkResults(query) {
 async function loadCmdkHome() {
   const list = $('#cmdkList');
   if (!list) return;
+  const seq = cmdkSeq;
   list.innerHTML = '<div class="cmdk-loading">Loading\u2026</div>';
 
   const items = [
@@ -2188,7 +2204,8 @@ async function loadCmdkHome() {
   const recentIds = window._recentSessionIds || [];
   const missingIds = recentIds.filter(id => !sessionMap.has(id));
   if (missingIds.length) {
-    const fetched = await Promise.all(missingIds.map(id => api(`/sessions/${id}`)));
+    // limit=1: only the session row is needed here, not its events.
+    const fetched = await Promise.all(missingIds.map(id => api(`/sessions/${id}?limit=1`)));
     fetched.forEach(r => {
       if (r && !r._error && r.session) sessionMap.set(r.session.id, r.session);
     });
@@ -2206,6 +2223,7 @@ async function loadCmdkHome() {
     });
   });
 
+  if (seq !== cmdkSeq) return; // a search started meanwhile
   sessionList.forEach(s => items.push({
     group: 'Recent Sessions',
     title: truncate(cleanSessionSummary(s.summary, s.initial_prompt), 64),
@@ -2257,7 +2275,7 @@ function openCmdk() {
   let debounce;
   input.addEventListener('input', () => {
     clearTimeout(debounce);
-    debounce = setTimeout(() => loadCmdkResults(input.value), 150);
+    debounce = setTimeout(() => loadCmdkResults(input.value), 90);
   });
 
   overlay.addEventListener('click', e => { if (e.target === overlay) closeCmdk(); });

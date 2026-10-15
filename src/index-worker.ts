@@ -73,6 +73,23 @@ post({ type: 'ready', changed: startupChanged.size, ms: Math.round(performance.n
 // Pages opened while the pass ran were served the older index; let them catch up.
 if (startupChanged.size) post({ type: 'updated', ids: [...startupChanged] });
 
+// Indexes written before recursive_triggers was on can hold stale full-text
+// entries; rebuild once from the events table.
+try {
+  const FTS_VERSION = 2;
+  const row = db.prepare("SELECT value FROM agentacta_meta WHERE key = 'fts_version'").get() as { value: string } | undefined;
+  if (!row || Number(row.value) < FTS_VERSION) {
+    const tf: number = performance.now();
+    db.transaction(() => {
+      db.prepare("INSERT INTO events_fts(events_fts) VALUES('rebuild')").run();
+      db.prepare("INSERT OR REPLACE INTO agentacta_meta (key, value) VALUES ('fts_version', ?)").run(String(FTS_VERSION));
+    })();
+    console.log(`Rebuilt search index (${Math.round(performance.now() - tf)} ms)`);
+  }
+} catch (err: unknown) {
+  console.error('Error rebuilding search index:', (err as Error).message);
+}
+
 // Sessions indexed before attribution was stored get it now (one-time), a few
 // at a time so watch events and live updates keep flowing meanwhile.
 {

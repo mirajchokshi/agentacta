@@ -186,6 +186,7 @@ Config written on first run (`sessionsPath` lists whichever known session folder
 | `GET /api/sessions/:id/stream?after=<ts>` | SSE stream for live session-detail updates |
 | `GET /api/activity?days=14&tz=<offset>` | Per-day and per-agent activity (events, tool calls, sessions) in the viewer's timezone |
 | `GET /api/search?q=<query>` | Full-text search + filters |
+| `GET /api/find?q=<query>` | Search-as-you-type for the command palette: matching sessions (title, prompt, id), files (path) and event text (last word matched as a prefix, with a snippet), in one response |
 | `GET /api/suggestions` | Search suggestions |
 | `GET /api/timeline?date=YYYY-MM-DD` | Events for one day |
 | `GET /api/files` | Touched-file inventory |

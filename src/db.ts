@@ -14,6 +14,10 @@ export function open(dbPath?: string): Database.Database {
   const db = new Database(p);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  // Events are written with INSERT OR REPLACE; without this the implicit delete
+  // of a replaced row skips the events_ad trigger and leaves a stale full-text
+  // entry behind (wrong matches, and snippet() fails on them).
+  db.pragma('recursive_triggers = ON');
   return db;
 }
 

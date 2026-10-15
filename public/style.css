@@ -1196,6 +1196,8 @@ code, pre, .mono { font-family: var(--font-mono); }
 .cmdk-item-title { font-size: 13.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cmdk-item-sub { font-size: 12px; color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cmdk-item-meta { flex-shrink: 0; font-size: 12px; color: var(--text-tertiary); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.cmdk-list.is-busy { opacity: 0.6; transition: opacity 0.15s 0.1s; }
+.cmdk-item mark { background: var(--accent-medium); color: inherit; border-radius: 2px; padding: 0 1px; }
 .cmdk-empty, .cmdk-loading { padding: 28px 14px; text-align: center; color: var(--text-tertiary); font-size: 13px; }
 .cmdk-empty h4 { color: var(--text-secondary); font-size: 14px; margin-bottom: 4px; }
 
@@ -1355,7 +1357,9 @@ a, button, select, summary, [role="link"], .nav-item, .session-item, .file-item 
 
   .cmdk-overlay { align-items: center; padding: calc(env(safe-area-inset-top, 0px) + 12px) 12px calc(env(safe-area-inset-bottom, 0px) + 12px); }
   .cmdk-dialog { width: calc(100vw - 32px); max-height: min(72vh, calc(100vh - 52px)); }
-  .cmdk-input-wrap kbd, .cmdk-item-sub { display: none; }
+  .cmdk-input-wrap kbd { display: none; }
+  /* Narrow screens: let a result wrap to two lines so the match isn't cut off. */
+  .cmdk-item-title { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 }
 
 
