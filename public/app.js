@@ -329,6 +329,7 @@ function handleRoute() {
   const raw = (window.location.hash || '').slice(1) || 'overview';
   if (window._sseCleanup) { window._sseCleanup(); window._sseCleanup = null; }
   if (window._timelineScrollHandler) { window.removeEventListener('scroll', window._timelineScrollHandler); window._timelineScrollHandler = null; }
+  if (window._sessionsScrollHandler) { window.removeEventListener('scroll', window._sessionsScrollHandler); window._sessionsScrollHandler = null; }
 
   if (raw.startsWith('session/')) {
     const id = decodeURIComponent(raw.slice('session/'.length));
@@ -679,7 +680,12 @@ async function viewSessions() {
     content.innerHTML = `<div class="page-title">Sessions</div>${skeletonRows(4, 'session')}`;
     transitionView();
   }
-  const data = await api('/sessions?limit=200&roots=1');
+  // The first page is small so the list paints fast; older sessions load in
+  // pages as the reader nears the end. A restored list refreshes as many rows
+  // as it had, so Back keeps its place.
+  const PAGE = 50;
+  const shown = restored ? content.querySelectorAll('.session-list > .session-item, .session-list > .session-group').length : 0;
+  const data = await api(`/sessions?limit=${Math.max(PAGE, shown)}&roots=1`);
   if (!stillOn('sessions')) return;
   if (data._error) {
     if (restored) return;
@@ -689,16 +695,41 @@ async function viewSessions() {
 
   let html = `<header class="page-head"><h1 class="page-title">Sessions</h1><span class="page-count">${data.total.toLocaleString()} top-level</span></header>`;
   html += renderSessionList(data.sessions, { tree: true });
+  html += `<div id="sessionsMore" class="loading-more"${data.sessions.length >= data.total ? ' hidden' : ''}>Loading older sessions…</div>`;
   if (restored) renderInPlace(html);
   else { content.innerHTML = html; transitionView(); }
+
+  const state = { loaded: data.sessions.length, total: data.total, loading: false };
+  const loadOlder = async () => {
+    if (state.loading || state.loaded >= state.total) return;
+    state.loading = true;
+    const page = await api(`/sessions?limit=${PAGE}&offset=${state.loaded}&roots=1`);
+    state.loading = false;
+    if (page._error || !stillOn('sessions')) return;
+    state.loaded += page.sessions.length;
+    state.total = page.total;
+    const list = content.querySelector('.session-list');
+    // New sessions shift offsets while paging; skip any already on screen.
+    const fresh = page.sessions.filter(s => !content.querySelector(`.session-item[data-id="${CSS.escape(s.id)}"]`));
+    if (list && fresh.length) list.insertAdjacentHTML('beforeend', fresh.map(renderSessionTree).join(''));
+    if (!page.sessions.length || state.loaded >= state.total) {
+      $('#sessionsMore')?.setAttribute('hidden', '');
+      window.removeEventListener('scroll', window._sessionsScrollHandler);
+    } else window._sessionsScrollHandler();
+  };
+  if (window._sessionsScrollHandler) window.removeEventListener('scroll', window._sessionsScrollHandler);
+  window._sessionsScrollHandler = () => {
+    if (!stillOn('sessions')) return;
+    if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 1500) loadOlder();
+  };
+  window.addEventListener('scroll', window._sessionsScrollHandler, { passive: true });
+  window._sessionsScrollHandler();
 }
 
 // At-a-glance picture of one session: the numbers, when it was busy, and
-// what it spent its tool calls on. Built from the events already loaded.
-function renderSessionShape(s, events) {
-  const startMs = Date.parse(s.start_time);
-  const endMs = Date.parse(s.end_time || '') || (events.length ? Date.parse(events[0].timestamp) : startMs);
-  const durMs = Math.max(0, endMs - startMs);
+// what it spent its tool calls on. The server summarizes every event (shape),
+// so this doesn't wait for the full event list.
+function renderSessionShape(s, shape) {
   const tokens = s.output_tokens ? (s.output_tokens + (s.input_tokens || 0) + (s.cache_read_tokens || 0)) : (s.total_tokens || 0);
   let html = renderStatTiles([
     { label: 'Duration', value: s.end_time || s.status === 'live' ? fmtDuration(s.start_time, s.end_time || null) : '\u2013' },
@@ -707,12 +738,11 @@ function renderSessionShape(s, events) {
     { label: 'Tokens', value: fmtCompact(tokens), title: `${tokens.toLocaleString()} tokens${s.output_tokens ? ` (${s.output_tokens.toLocaleString()} output)` : ''}`, note: s.output_tokens ? `${fmtCompact(s.output_tokens)} output` : '' },
   ]);
 
-  const stamped = events.map(e => Date.parse(e.timestamp)).filter(t => Number.isFinite(t) && t >= startMs);
-  if (stamped.length >= 6 && durMs >= 60000) {
-    const n = Math.min(40, Math.max(12, Math.round(durMs / 60000)));
-    const step = durMs / n;
-    const counts = new Array(n).fill(0);
-    for (const t of stamped) counts[Math.min(n - 1, Math.floor((t - startMs) / step))]++;
+  const activity = shape?.activity;
+  if (activity) {
+    const { startMs, endMs, counts } = activity;
+    const durMs = endMs - startMs;
+    const step = durMs / counts.length;
     const fmt = ms => new Date(ms).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
     const points = counts.map((c, i) => ({
       label: `${fmt(startMs + i * step)}\u2013${fmt(startMs + (i + 1) * step)}`,
@@ -724,9 +754,9 @@ function renderSessionShape(s, events) {
   }
 
   const toolCounts = new Map();
-  for (const e of events) if (e.type === 'tool_call' && e.tool_name) {
-    const name = fmtToolName(e.tool_name);
-    toolCounts.set(name, (toolCounts.get(name) || 0) + 1);
+  for (const [raw, count] of shape?.tools || []) {
+    const name = fmtToolName(raw);
+    toolCounts.set(name, (toolCounts.get(name) || 0) + count);
   }
   const ranked = [...toolCounts.entries()].sort((a, b) => b[1] - a[1]);
   if (ranked.length >= 2) {
@@ -753,7 +783,10 @@ async function viewSession(id) {
     ${skeletonRows(8, 'event')}
   `;
   transitionView();
-  const data = await api(`/sessions/${id}`);
+  // The first page of events is enough to paint; the rest loads only when the
+  // reader scrolls near it, filters by project, or jumps to the first prompt.
+  const FIRST_PAGE = 150;
+  const data = await api(`/sessions/${id}?limit=${FIRST_PAGE}`);
 
   if (data._error || data.error) { content.innerHTML = `<div class="empty"><h2>${escHtml(data.error || 'Unable to load')}</h2></div>`; return; }
 
@@ -789,7 +822,7 @@ async function viewSession(id) {
         </span>
       </div>
     </header>
-    ${renderSessionShape(s, data.events || [])}
+    ${renderSessionShape(s, data.shape)}
     ${projectFilters.length ? `
       <div class="seg" id="sessionProjectFilters" role="group" aria-label="Filter events by project">
         <button class="filter-chip active" data-project-filter="all">All projects</button>
@@ -810,6 +843,27 @@ async function viewSession(id) {
 
   const PAGE_SIZE = 50;
   const allEvents = Array.isArray(data.events) ? [...data.events] : [];
+  const knownIds = new Set(allEvents.map(e => e.id));
+  let complete = allEvents.length >= (data.eventTotal ?? allEvents.length);
+  let fullLoad = null;
+  // Appends everything older than the loaded page. Newer events keep arriving
+  // through the live channel, so only the older tail is taken from here.
+  const ensureAllEvents = () => {
+    if (complete) return Promise.resolve();
+    if (!fullLoad) {
+      fullLoad = api(`/sessions/${id}`).then(full => {
+        if (full._error || !Array.isArray(full.events)) { fullLoad = null; return; }
+        const oldest = allEvents[allEvents.length - 1];
+        const at = oldest ? full.events.findIndex(e => e.id === oldest.id) : -1;
+        const older = (at >= 0 ? full.events.slice(at + 1) : full.events).filter(e => !knownIds.has(e.id));
+        for (const e of older) { knownIds.add(e.id); allEvents.push(e); }
+        complete = true;
+        updateEventsLabel();
+        syncScrollHandler();
+      });
+    }
+    return fullLoad;
+  };
   let activeProjectFilter = 'all';
   let rendered = 0;
   let onScroll = null;
@@ -823,7 +877,7 @@ async function viewSession(id) {
   const updateEventsLabel = () => {
     const el = $('#sessionEventsLabel');
     if (!el) return;
-    const count = getFilteredEvents().length;
+    const count = complete ? getFilteredEvents().length : (data.eventTotal || allEvents.length);
     if (activeProjectFilter === 'all') {
       el.textContent = `Events (${count})`;
       return;
@@ -837,8 +891,9 @@ async function viewSession(id) {
     empty.style.display = getFilteredEvents().length ? 'none' : 'block';
   };
 
-  const setProjectFilter = (nextFilter) => {
+  const setProjectFilter = async (nextFilter) => {
     if (nextFilter === activeProjectFilter) return;
+    if (nextFilter !== 'all') await ensureAllEvents();
     activeProjectFilter = nextFilter;
     const chips = $$('#sessionProjectFilters .filter-chip');
     chips.forEach(node => node.classList.toggle('active', node.dataset.projectFilter === activeProjectFilter));
@@ -866,7 +921,7 @@ async function viewSession(id) {
 
   const syncScrollHandler = () => {
     const total = getFilteredEvents().length;
-    if (total <= rendered) {
+    if (total <= rendered && complete) {
       if (onScroll) {
         window.removeEventListener('scroll', onScroll);
         onScroll = null;
@@ -878,14 +933,22 @@ async function viewSession(id) {
 
     let loading = false;
     onScroll = () => {
-      if (loading || rendered >= getFilteredEvents().length) return;
+      if (loading) return;
+      // Fetch the rest a page ahead of need so scrolling never waits on it.
+      if (!complete && rendered >= allEvents.length - PAGE_SIZE) ensureAllEvents();
       const scrollBottom = window.innerHeight + window.scrollY;
       const threshold = document.body.offsetHeight - 300;
       if (scrollBottom >= threshold) {
+        if (rendered >= getFilteredEvents().length) {
+          if (complete) return;
+          loading = true;
+          ensureAllEvents().then(() => { loading = false; onScroll && onScroll(); });
+          return;
+        }
         loading = true;
         renderBatch();
         loading = false;
-        if (rendered >= getFilteredEvents().length) {
+        if (rendered >= getFilteredEvents().length && complete) {
           window.removeEventListener('scroll', onScroll);
           onScroll = null;
         }
@@ -984,6 +1047,7 @@ async function viewSession(id) {
         return;
       }
 
+      await ensureAllEvents();
       // Resolve from full session context, not just project-filtered events.
       const inCurrentFilter = getFilteredEvents().some(ev => ev.id === firstMessageId);
       if (!inCurrentFilter && activeProjectFilter !== 'all') {
@@ -1047,7 +1111,6 @@ async function viewSession(id) {
   }
 
   // --- Lightweight realtime updates (polling fallback first) ---
-  const knownIds = new Set(allEvents.map(e => e.id));
 
   const applyIncomingEvents = (incoming) => {
     const container = document.getElementById('eventsContainer');

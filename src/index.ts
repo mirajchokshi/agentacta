@@ -36,7 +36,7 @@ import { attributeSessionEvents, attributeEventDelta } from './project-attributi
 import { loadDeltaAttributionContext } from './delta-attribution-context.js';
 import { analyzeSession, getInsightsSummary } from './insights.js';
 import { isValidDateKey, resolveStaticPath } from './http-utils.js';
-import { withStatus, attachChildren } from './session-status.js';
+import { withStatus, attachChildren, sessionShape } from './session-status.js';
 
 // --version / -v flag: print version and exit
 if (process.argv.includes('--version') || process.argv.includes('-v')) {
@@ -567,7 +567,13 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
           : undefined;
         const parent = parentRow ? withStatus(parentRow, nowMs) : null;
         const [tree] = attachChildren([{ ...session }], loadDescendants([id], nowMs), sessionSortKey);
-        json(res, { session, parent, children: tree.children || [], events: attributed.events, projectFilters: attributed.projectFilters, hasArchive });
+        // ?limit=N sends only the newest N events (the page fetches the rest when
+        // needed); the shape and project filters still cover every event. Fields
+        // the page never reads are left out of each event.
+        const limit: number = parseInt(query.limit) || 0;
+        const page = limit > 0 ? attributed.events.slice(0, limit) : attributed.events;
+        const slim = page.map(({ session_id: _sid, tool_result: _tr, project_confidence: _pc, ...e }) => e);
+        json(res, { session, parent, children: tree.children || [], events: slim, eventTotal: attributed.events.length, shape: sessionShape(session, events), projectFilters: attributed.projectFilters, hasArchive });
       }
     }
     else if (pathname.match(/^\/api\/archive\/session\/[^/]+$/)) {
