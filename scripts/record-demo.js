@@ -36,6 +36,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // -- Demo data + server -----------------------------------------------------
 
 function seed() {
+  // demo/ is gitignored, so it doesn't exist on a fresh clone.
+  fs.mkdirSync(path.join(REPO, 'demo'), { recursive: true });
   for (const f of fs.readdirSync(path.join(REPO, 'demo')).filter(f => f.startsWith('demo.db'))) {
     fs.unlinkSync(path.join(REPO, 'demo', f));
   }

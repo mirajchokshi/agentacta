@@ -243,6 +243,7 @@ const viewCache = {};
 const VIEW_CACHE_MS = 5 * 60 * 1000;
 function rememberCurrentView() {
   const v = (location.hash || '').slice(1) || 'overview';
+  content.querySelectorAll('.is-pressed').forEach(el => el.classList.remove('is-pressed'));
   if (v === 'sessions' || v === 'overview') viewCache[v] = { html: content.innerHTML, y: window.scrollY, at: Date.now() };
 }
 function restoreView(name) {
@@ -410,16 +411,12 @@ function renderTimelineEvents(events, prevSessionId = null) {
   return events.map(ev => {
     let head = '';
     if (ev.session_id && ev.session_id !== prev) {
-      const title = cleanSessionSummary(ev.session_summary || '', '');
+      const title = ev.session_label || cleanSessionSummary(ev.session_summary || '', '');
       head = `<button class="tl-session" data-open-session="${escHtml(ev.session_id)}"><span class="tl-session-title">${escHtml(truncate(title, 110))}</span><span class="tl-session-id">${escHtml(shortSessionId(ev.session_id))}</span><span class="tl-open">Open${icon('chevron', 12)}</span></button>`;
       prev = ev.session_id;
     }
     return head + renderEvent(ev);
   }).join('');
-}
-
-function renderTimelineEvent(ev) {
-  return renderEvent(ev);
 }
 
 function fmtDuration(start, end) {
@@ -1290,8 +1287,13 @@ async function viewTimeline(date) {
         const empty = $('#timelineEmpty');
         if (empty) empty.remove();
 
-        const html = renderTimelineEvents(fresh);
-        wrap.insertAdjacentHTML('afterbegin', html);
+        // The list is newest first; the stream delivers oldest first.
+        const batch = fresh.slice().sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+        const seam = wrap.firstElementChild;
+        wrap.insertAdjacentHTML('afterbegin', renderTimelineEvents(batch));
+        // The run continues the same session that was on top: drop its old header.
+        const lastNew = batch[batch.length - 1];
+        if (seam && seam.matches('.tl-session') && seam.dataset.openSession === lastNew.session_id) seam.remove();
         state.offset += fresh.length;
 
         // Flash new events
@@ -1407,9 +1409,6 @@ async function viewOverview() {
   }
   const tz = new Date().getTimezoneOffset();
   const [data, sessionsRes, act] = await Promise.all([api('/stats'), api('/sessions?limit=30&roots=1'), api(`/activity?days=14&tz=${tz}`)]);
-  const spanDays = data.dateRange?.earliest ? Math.min(400, Math.ceil((Date.now() - Date.parse(data.dateRange.earliest)) / 86400000) + 1) : 0;
-  const lifetime = spanDays > 14 ? await api(`/activity?days=${spanDays}&tz=${tz}`) : null;
-  if (!stillOn('overview')) return;
   if (!stillOn('overview')) return;
   if (data._error || sessionsRes._error) {
     if (restored) return;
@@ -1434,11 +1433,22 @@ async function viewOverview() {
     <h2 class="section-label">Recent</h2>
     ${renderSessionList(recentSessions, { tree: true })}
 
-    ${renderAllTimeSection(data, lifetime)}
+    ${renderAllTimeSection(data, window._lifetimeActivity || null)}
   `;
 
   if (restored) renderInPlace(html);
   else { content.innerHTML = html; transitionView(); }
+
+  // The weekly chart scans the whole history, so it loads after the page is up
+  // (showing the last result meanwhile) and swaps into place.
+  const spanDays = data.dateRange?.earliest ? Math.min(400, Math.ceil((Date.now() - Date.parse(data.dateRange.earliest)) / 86400000) + 1) : 0;
+  if (spanDays > 14) {
+    const lifetime = await api(`/activity?days=${spanDays}&tz=${tz}`);
+    if (lifetime._error || !stillOn('overview')) return;
+    window._lifetimeActivity = lifetime;
+    const section = content.querySelector('.alltime');
+    if (section) section.outerHTML = renderAllTimeSection(data, lifetime);
+  }
 }
 
 async function viewStats() {
@@ -1757,9 +1767,6 @@ async function viewFileDetail(filePath) {
   transitionView();
 
   $('#backBtn').addEventListener('click', () => viewFiles());
-  $$('.session-item').forEach(item => {
-    item.addEventListener('click', () => viewSession(item.dataset.id));
-  });
 }
 
 // --- Insights helpers ---
@@ -1897,10 +1904,6 @@ async function viewInsights() {
 
   content.innerHTML = html;
   transitionView();
-
-  $$('.session-item', content).forEach(item => {
-    item.addEventListener('click', () => viewSession(item.dataset.id));
-  });
 
   $$('.signal-lollipop-expandable', content).forEach(row => {
     row.addEventListener('click', () => {
