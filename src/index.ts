@@ -471,6 +471,56 @@ const server: http.Server = http.createServer((req: http.IncomingMessage, res: h
       }
       json(res, { suggestions });
     }
+    else if (pathname === '/api/activity') {
+      // Per local day for the last N days: events, tool calls, sessions with
+      // activity, and the same per agent. tz is the browser's getTimezoneOffset()
+      // (minutes behind UTC) so "today" means the viewer's day.
+      const days: number = Math.min(Math.max(parseInt(query.days) || 14, 1), 90);
+      const tz: number = Math.max(-840, Math.min(840, parseInt(query.tz) || 0));
+      const shift: string = `${-tz} minutes`;
+      const since: string = new Date(Date.now() - (days + 1) * 86400000).toISOString();
+      const perDay = db.prepare(
+        `SELECT date(timestamp, ?) AS day, COUNT(*) AS events, SUM(type = 'tool_call') AS tool_calls,
+                SUM(type = 'message') AS messages, COUNT(DISTINCT session_id) AS sessions
+         FROM events WHERE timestamp >= ? GROUP BY day ORDER BY day`
+      ).all(shift, since) as Array<{ day: string; events: number; tool_calls: number; messages: number; sessions: number }>;
+      const perAgentDay = db.prepare(
+        `SELECT date(e.timestamp, ?) AS day, s.agent AS agent, COUNT(*) AS events, SUM(e.type = 'tool_call') AS tool_calls,
+                COUNT(DISTINCT e.session_id) AS sessions
+         FROM events e JOIN sessions s ON s.id = e.session_id
+         WHERE e.timestamp >= ? GROUP BY day, s.agent`
+      ).all(shift, since) as Array<{ day: string; agent: string | null; events: number; tool_calls: number; sessions: number }>;
+      const local = (d: Date): string => new Date(d.getTime() - tz * 60000).toISOString().slice(0, 10);
+      const today: string = local(new Date());
+      const dayKeys: string[] = [];
+      for (let i = days - 1; i >= 0; i--) dayKeys.push(local(new Date(Date.now() - i * 86400000)));
+      const byDay = new Map(perDay.map(r => [r.day, r]));
+      const series = dayKeys.map(day => {
+        const r = byDay.get(day);
+        return { day, events: r?.events || 0, toolCalls: r?.tool_calls || 0, messages: r?.messages || 0, sessions: r?.sessions || 0 };
+      });
+      const agents = new Map<string, { agent: string; events: number; toolCalls: number; sessions: number; todayEvents: number; todaySessions: number }>();
+      for (const r of perAgentDay) {
+        if (!dayKeys.includes(r.day)) continue;
+        const name: string = normalizeAgentLabel(r.agent) || 'unknown';
+        const a = agents.get(name) || { agent: name, events: 0, toolCalls: 0, sessions: 0, todayEvents: 0, todaySessions: 0 };
+        a.events += r.events; a.toolCalls += r.tool_calls;
+        if (r.day === today) { a.todayEvents += r.events; a.todaySessions += r.sessions; }
+        agents.set(name, a);
+      }
+      // Distinct sessions per agent over the window (a session spanning two days counts once).
+      const firstDayUtc: string = new Date(Date.parse(dayKeys[0] + 'T00:00:00Z') + tz * 60000).toISOString();
+      const distinct = db.prepare(
+        `SELECT s.agent AS agent, COUNT(DISTINCT e.session_id) AS sessions
+         FROM events e JOIN sessions s ON s.id = e.session_id
+         WHERE e.timestamp >= ? GROUP BY s.agent`
+      ).all(firstDayUtc) as Array<{ agent: string | null; sessions: number }>;
+      for (const r of distinct) {
+        const a = agents.get(normalizeAgentLabel(r.agent) || 'unknown');
+        if (a) a.sessions += r.sessions;
+      }
+      json(res, { today, days: series, agents: [...agents.values()].sort((x, y) => y.events - x.events) });
+    }
     else if (pathname === '/api/stats') {
       const sessions: number = (db.prepare('SELECT COUNT(*) as c FROM sessions').get() as CountRow).c;
       const events: number = (db.prepare('SELECT COUNT(*) as c FROM events').get() as CountRow).c;

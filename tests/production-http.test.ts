@@ -156,4 +156,12 @@ describe('production HTTP routes', () => {
     const data = JSON.parse(zlib.gunzipSync(res.body).toString('utf8')) as { sessions: unknown[] };
     assert.ok(data.sessions.length >= 1);
   });
+
+  it('reports per-day and per-agent activity for the viewer\'s timezone', async () => {
+    const data = JSON.parse((await request('/api/activity?days=14&tz=0')).body) as { today: string; days: Array<{ day: string; events: number }>; agents: unknown[] };
+    assert.strictEqual(data.days.length, 14);
+    assert.strictEqual(data.days[13].day, data.today);
+    assert.match(data.today, /^\d{4}-\d{2}-\d{2}$/);
+    assert.ok(Array.isArray(data.agents));
+  });
 });
