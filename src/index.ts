@@ -26,7 +26,7 @@ import type {
 } from './types.js';
 import { loadConfig } from './config.js';
 import { open, init } from './db.js';
-import { discoverSessionDirs } from './indexer.js';
+import { discoverSessionDirs, recordIndexCrash, recordStartupCrashes, clearIndexingMark, MAX_INDEX_CRASHES } from './indexer.js';
 import type { WorkerMessage } from './index-worker.js';
 import { attributeEventDelta } from './project-attribution.js';
 import { loadDeltaAttributionContext } from './delta-attribution-context.js';
@@ -281,7 +281,31 @@ let nextReindexId: number = 1;
 const workerFile: string = path.join(__dirname, 'index-worker' + path.extname(__filename));
 let indexWorker: Worker;
 let shuttingDown: boolean = false;
+// Restart delay after the worker dies: doubles on each quick death (up to 5
+// minutes) so a crash loop can't peg the CPU, and resets once a worker has
+// stayed up for a while.
+const WORKER_RESTART_MIN_MS: number = 2000;
+const WORKER_RESTART_MAX_MS: number = 5 * 60 * 1000;
+const WORKER_HEALTHY_MS: number = 10 * 60 * 1000;
+let workerRestartMs: number = WORKER_RESTART_MIN_MS;
+let workerRestartTimer: ReturnType<typeof setTimeout> | null = null;
+// Blames the file the indexer died parsing; after a few crashes it is skipped.
+// At startup it looks for marks left by a process that died outright.
+function blameIndexCrash(atStartup: boolean): void {
+  try {
+    const crashes = atStartup ? recordStartupCrashes(db) : [recordIndexCrash(db)].filter(c => c !== null);
+    for (const crash of crashes) {
+      const note = crash.crashes >= MAX_INDEX_CRASHES ? '; skipping it for now' : '';
+      console.error(`Indexer crashed while indexing ${path.basename(crash.sourceKey)} (${crash.crashes} time${crash.crashes === 1 ? '' : 's'})${note}`);
+    }
+  } catch (err: unknown) {
+    console.error('Could not record the indexer crash:', (err as Error).message);
+  }
+}
 function startIndexWorker(): void {
+  workerRestartTimer = null;
+  if (shuttingDown) return;
+  const startedAt: number = Date.now();
   // Under tsx (npm run dev, tests) the worker needs tsx's loader registered itself.
   const worker: Worker = workerFile.endsWith('.ts')
     ? new Worker(`require('tsx/cjs/api').register(); require(${JSON.stringify(workerFile)});`, { eval: true })
@@ -305,14 +329,20 @@ function startIndexWorker(): void {
   // fail what was waiting on it and start a new one (which re-runs the pass).
   worker.on('exit', (code: number) => {
     if (shuttingDown) return;
-    console.error(`Indexer stopped (exit ${code}); restarting in 2s`);
+    blameIndexCrash(false);
+    if (Date.now() - startedAt >= WORKER_HEALTHY_MS) workerRestartMs = WORKER_RESTART_MIN_MS;
+    const delay: number = workerRestartMs;
+    workerRestartMs = Math.min(workerRestartMs * 2, WORKER_RESTART_MAX_MS);
+    console.error(`Indexer stopped (exit ${code}); restarting in ${Math.round(delay / 1000)}s`);
     indexReady = true;
     for (const fn of indexReadyWaiters.splice(0)) fn();
     for (const [requestId, done] of reindexRequests) done({ type: 'reindexed', requestId, error: 'Indexer restarted' });
     reindexRequests.clear();
-    setTimeout(startIndexWorker, 2000).unref();
+    workerRestartTimer = setTimeout(startIndexWorker, delay);
+    workerRestartTimer.unref();
   });
 }
+blameIndexCrash(true); // the whole process can die mid-parse too (see MAX_LINE_BYTES)
 startIndexWorker();
 
 const SESSION_SELECT: string = 'SELECT s.* FROM sessions s';
@@ -1035,13 +1065,24 @@ server.listen(PORT, HOST, () => console.log(`AgentActa running on http://${HOST}
 function shutdown(signal: string): void {
   shuttingDown = true;
   console.log(`\n${signal} received, shutting down...`);
+  // Stop the worker before clearing its mark, so a file it was parsing isn't
+  // blamed for a crash on the next start.
+  if (workerRestartTimer) clearTimeout(workerRestartTimer);
+  const workerStopped: Promise<void> = indexWorker.terminate()
+    .catch(() => 0)
+    .then(() => { try { clearIndexingMark(db); } catch { /* ignore */ } });
   server.close(() => {
-    try { db.close(); } catch { /* ignore */ }
-    console.log('AgentActa stopped.');
-    process.exit(0);
+    void workerStopped.then(() => {
+      try { db.close(); } catch { /* ignore */ }
+      console.log('AgentActa stopped.');
+      process.exit(0);
+    });
   });
   // Force exit after 5s if server doesn't close
   setTimeout(() => {
+    // The worker may still be in a long native call; exiting stops it, and
+    // this is still a clean shutdown, so its mark goes too.
+    try { clearIndexingMark(db); } catch { /* ignore */ }
     try { db.close(); } catch { /* ignore */ }
     process.exit(1);
   }, 5000);

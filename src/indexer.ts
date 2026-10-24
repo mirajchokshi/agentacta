@@ -504,6 +504,73 @@ function indexCronRunFile(db: Database.Database, filePath: string, agentName: st
 // message; every line carries the sessionId.
 const CLAUDE_CODE_LINE_TYPES = new Set(['user', 'assistant', 'system', 'summary', 'file-history-snapshot', 'queue-operation', 'mode', 'permission-mode', 'agent-setting', 'ai-title', 'custom-title', 'attachment']);
 
+// Reads a JSONL file one line at a time, a chunk at a time, so memory stays
+// flat however big the file is. A session log can grow past a gigabyte, and
+// reading it whole (plus splitting it) ran the indexer out of heap.
+const LINE_CHUNK_BYTES = 4 * 1024 * 1024;
+// A single line has to be held whole to be parsed, and one big enough aborts
+// the process outright (V8 can't recover from it even in a worker). Real lines
+// top out around a few MB (an image or a file snapshot), so anything past this
+// is skipped with a warning rather than read.
+export const MAX_LINE_BYTES = 32 * 1024 * 1024;
+const warnedLongLines = new Set<string>(); // files already warned about, so a re-parse doesn't repeat it
+export function* readLinesSync(filePath: string, maxLineBytes: number = MAX_LINE_BYTES): Generator<string> {
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const chunk = Buffer.allocUnsafe(LINE_CHUNK_BYTES);
+    // Pieces of a line that runs past the end of a chunk, joined once its
+    // newline arrives (joining every chunk would copy a long line over and over).
+    let pieces: Buffer[] = [];
+    let pending = 0; // bytes in pieces
+    let oversized = false; // dropping the rest of a line past maxLineBytes
+    const emit = (tail: Buffer): string => {
+      const tooLong = oversized || pending + tail.length > maxLineBytes;
+      const size = pending + tail.length;
+      const bytes = tooLong || !pieces.length ? tail : Buffer.concat([...pieces, tail]);
+      pieces = [];
+      pending = 0;
+      if (tooLong) {
+        if (!warnedLongLines.has(filePath)) {
+          warnedLongLines.add(filePath);
+          const mb = Math.round((oversized ? maxLineBytes : size) / 1024 / 1024);
+          console.error(`Skipping a line of ${oversized ? 'over ' : ''}${mb} MB in ${path.basename(filePath)}`);
+        }
+        oversized = false;
+        return '';
+      }
+      return bytes.toString('utf8').trim();
+    };
+    for (;;) {
+      const n = fs.readSync(fd, chunk, 0, LINE_CHUNK_BYTES, null);
+      if (n === 0) break;
+      const buf = chunk.subarray(0, n);
+      let start = 0;
+      let nl: number;
+      while ((nl = buf.indexOf(10, start)) !== -1) {
+        const line = emit(buf.subarray(start, nl));
+        if (line) yield line;
+        start = nl + 1;
+      }
+      if (start < n && !oversized) {
+        pieces.push(Buffer.from(buf.subarray(start))); // chunk is reused
+        pending += n - start;
+        if (pending > maxLineBytes) { oversized = true; pieces = []; }
+      }
+    }
+    if (pieces.length || oversized) {
+      const line = emit(Buffer.alloc(0));
+      if (line) yield line;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function firstOf(lines: Iterable<string>): string | undefined {
+  for (const line of lines) return line;
+  return undefined;
+}
+
 function isClaudeCodeFirstLine(line: JsonlLine): boolean {
   if (line.type && CLAUDE_CODE_LINE_TYPES.has(line.type)) return true;
   return typeof line.sessionId === 'string' && line.type !== 'session' && line.type !== 'session_meta';
@@ -518,17 +585,112 @@ function indexFile(db: Database.Database, filePath: string, agentName: string, s
     if (state && state.last_modified === mtime) return { skipped: true };
   }
 
-  const raw = fs.readFileSync(filePath, 'utf8');
-  const lines = raw.trim().split('\n').filter(Boolean);
-  if (lines.length === 0) return { skipped: true };
+  return guardCrashes(db, filePath, () => indexSessionLines(db, filePath, () => readLinesSync(filePath), agentName, stmts, archiveMode, config, mtime));
+}
 
-  return indexSessionLines(db, filePath, lines, agentName, stmts, archiveMode, config, mtime);
+// --- Crash quarantine ---
+// A source that kills the indexer (out of memory, say) would otherwise be
+// retried on every restart forever. The indexer marks each source while it
+// parses it, under a key for its process. The server counts a crash against a
+// marked source when its worker dies (recordIndexCrash) and, at startup, for
+// any mark whose process is gone (recordStartupCrashes), which catches a
+// process that died outright. A clean shutdown stops the worker and clears the
+// mark. After MAX_INDEX_CRASHES the source is left alone for
+// INDEX_QUARANTINE_MS, then given one more try.
+export const MAX_INDEX_CRASHES = 3;
+export const INDEX_QUARANTINE_MS = 6 * 60 * 60 * 1000;
+const MARK_PREFIX = 'indexing_file:';
+const ownMarkKey = (): string => MARK_PREFIX + process.pid;
+const warnedQuarantine = new Set<string>();
+
+type CrashStmts = Record<'mark' | 'unmark' | 'getMark' | 'allMarks' | 'dropMark' | 'failures' | 'forget' | 'count', Database.Statement>;
+const crashStmtCache = new WeakMap<Database.Database, CrashStmts>();
+function crashStmts(db: Database.Database): CrashStmts {
+  let c = crashStmtCache.get(db);
+  if (!c) {
+    c = {
+      mark: db.prepare('INSERT OR REPLACE INTO agentacta_meta (key, value) VALUES (?, ?)'),
+      unmark: db.prepare('DELETE FROM agentacta_meta WHERE key = ? AND value = ?'),
+      getMark: db.prepare('SELECT value FROM agentacta_meta WHERE key = ?'),
+      allMarks: db.prepare(`SELECT key, value FROM agentacta_meta WHERE key LIKE '${MARK_PREFIX}%'`),
+      dropMark: db.prepare('DELETE FROM agentacta_meta WHERE key = ?'),
+      failures: db.prepare('SELECT crashes, last_crash_at FROM index_failures WHERE source_key = ?'),
+      forget: db.prepare('DELETE FROM index_failures WHERE source_key = ?'),
+      count: db.prepare(`INSERT INTO index_failures (source_key, crashes, last_crash_at) VALUES (?, 1, ?)
+        ON CONFLICT(source_key) DO UPDATE SET crashes = crashes + 1, last_crash_at = excluded.last_crash_at RETURNING crashes`),
+    };
+    crashStmtCache.set(db, c);
+  }
+  return c;
+}
+
+/** Parses one source with the crash mark set, unless it is quarantined. */
+function guardCrashes(db: Database.Database, sourceKey: string, parse: () => IndexResult): IndexResult {
+  if (isQuarantined(db, sourceKey)) return { skipped: true };
+  const c = crashStmts(db);
+  c.mark.run(ownMarkKey(), sourceKey);
+  let ok = false;
+  try {
+    const result = parse();
+    ok = true;
+    return result;
+  } finally {
+    // Only a dead worker leaves the mark behind; a thrown error is not a crash.
+    c.unmark.run(ownMarkKey(), sourceKey);
+    if (ok && c.failures.get(sourceKey)) c.forget.run(sourceKey);
+  }
+}
+
+export interface IndexCrash { sourceKey: string; crashes: number }
+
+function blame(db: Database.Database, key: string, sourceKey: string, now: number): IndexCrash {
+  const c = crashStmts(db);
+  c.dropMark.run(key);
+  const { crashes } = c.count.get(sourceKey, now) as { crashes: number };
+  return { sourceKey, crashes };
+}
+
+/** Called by the server when its worker dies: blames the source the worker was parsing. */
+export function recordIndexCrash(db: Database.Database, now: number = Date.now()): IndexCrash | null {
+  const row = crashStmts(db).getMark.get(ownMarkKey()) as { value: string } | undefined;
+  return row ? blame(db, ownMarkKey(), row.value, now) : null;
+}
+
+function processAlive(pid: number): boolean {
+  if (pid === process.pid) return false; // a mark under our pid is from an earlier process
+  try { process.kill(pid, 0); return true; } catch (err: unknown) { return (err as NodeJS.ErrnoException).code === 'EPERM'; }
+}
+
+/** Called by the server at startup: blames sources left marked by processes that died. */
+export function recordStartupCrashes(db: Database.Database, now: number = Date.now()): IndexCrash[] {
+  const out: IndexCrash[] = [];
+  for (const row of crashStmts(db).allMarks.all() as Array<{ key: string; value: string }>) {
+    const pid = Number(row.key.slice(MARK_PREFIX.length));
+    if (Number.isInteger(pid) && processAlive(pid)) continue; // another live indexer's mark
+    out.push(blame(db, row.key, row.value, now));
+  }
+  return out;
+}
+
+/** Called on a clean shutdown, after the worker has stopped: a mark left then is not a crash. */
+export function clearIndexingMark(db: Database.Database): void {
+  crashStmts(db).dropMark.run(ownMarkKey());
+}
+
+export function isQuarantined(db: Database.Database, sourceKey: string, now: number = Date.now()): boolean {
+  const row = crashStmts(db).failures.get(sourceKey) as { crashes: number; last_crash_at: number } | undefined;
+  if (!row || row.crashes < MAX_INDEX_CRASHES || now - row.last_crash_at >= INDEX_QUARANTINE_MS) return false;
+  if (!warnedQuarantine.has(sourceKey)) {
+    warnedQuarantine.add(sourceKey);
+    console.error(`Skipping ${path.basename(sourceKey)}: it crashed the indexer ${row.crashes} times; next try after ${new Date(row.last_crash_at + INDEX_QUARANTINE_MS).toISOString()}`);
+  }
+  return true;
 }
 
 // Core parser shared by file-backed sessions (indexFile) and DB-backed sessions
 // (indexOpenClawDb). sourceKey identifies the source in index_state (a file path,
 // or dbPath#sessionId); stateToken is the change marker stored as last_modified.
-function indexSessionLines(db: Database.Database, sourceKey: string, lines: string[], agentName: string, stmts: PreparedStatements, archiveMode: boolean, config: AgentActaConfig, stateToken: string, fallbackSessionId?: string, lineage: SessionLineage = {}): IndexResult {
+function indexSessionLines(db: Database.Database, sourceKey: string, lines: () => Iterable<string>, agentName: string, stmts: PreparedStatements, archiveMode: boolean, config: AgentActaConfig, stateToken: string, fallbackSessionId?: string, lineage: SessionLineage = {}): IndexResult {
   let sessionId: string | null = null;
   let sessionStart: string | null = null;
   let sessionEnd: string | null = null;
@@ -559,9 +721,11 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
   let aiTitle: string | null = null;
   const sourceStatus: string | null = lineage.sourceStatus || null;
 
+  const firstRaw = firstOf(lines());
+  if (firstRaw === undefined) return { skipped: true };
   let firstLine: JsonlLine;
   try {
-    firstLine = JSON.parse(lines[0]) as JsonlLine;
+    firstLine = JSON.parse(firstRaw) as JsonlLine;
   } catch {
     return { skipped: true };
   }
@@ -579,7 +743,7 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
   } else if (isClaudeCodeFirstLine(firstLine)) {
     // Claude Code format — no session header, extract from first message or queue-operation line
     isClaudeCode = true;
-    for (const line of lines) {
+    for (const line of lines()) {
       let obj: JsonlLine; try { obj = JSON.parse(line) as JsonlLine; } catch { continue; }
       // Subagent (sidechain) transcripts carry the PARENT's sessionId; give them
       // their own id so they don't overwrite the parent, and link them to it.
@@ -638,318 +802,319 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: stri
     return { skipped: true };
   }
 
-  // --- Parse the entire file BEFORE any DB operations ---
-  const pendingEvents: Array<[string, string, string, string, string, string | null, string | null, string | null, string | null, number | null]> = [];
-  const toolNameById = new Map<string, string>(); // tool call id -> name, for results that only carry the id
-  const fileActivities: Array<[string, string, string, string]> = [];
-  const projectCounts: Map<string, number> = new Map();
-
-  // Seed project from session cwd when available (helps chat-only sessions)
-  const sessionCwd = (firstLine && firstLine.cwd) || (firstLine && firstLine.payload && (firstLine.payload as Record<string, unknown>).cwd as string | undefined);
-  if (sessionCwd) {
-    const p = extractProjectFromPath(sessionCwd, config);
-    if (p) projectCounts.set(p, 1);
-  }
-
-  for (const line of lines) {
-    let obj: Record<string, unknown>;
-    try { obj = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
-
-    if (obj.type === 'file-history-snapshot') sawSnapshotRecord = true;
-    else sawNonSnapshotRecord = true;
-
-    // Claude Code titles: one the user set (/rename) wins over its own AI title;
-    // both can be rewritten during a session, so keep the latest.
-    if (obj.type === 'custom-title' && typeof obj.customTitle === 'string' && obj.customTitle.trim()) { customTitle = obj.customTitle.trim(); continue; }
-    if (obj.type === 'ai-title' && typeof obj.aiTitle === 'string' && obj.aiTitle.trim()) { aiTitle = obj.aiTitle.trim(); continue; }
-
-    if (isCodexCli) {
-      if (obj.type === 'session_meta') {
-        const meta = (obj.payload || {}) as CodexSessionMeta;
-        if (meta.id) sessionId = meta.id;
-        if (meta.timestamp && !sessionStart) sessionStart = meta.timestamp;
-        if (meta.model) {
-          if (!model) model = meta.model;
-          modelsSet.add(meta.model);
-        }
-        if (meta.model_provider) codexProvider = meta.model_provider;
-        if (meta.source) codexSource = describeCodexSource(meta.source);
-        if (meta.originator) codexOriginator = meta.originator;
-        if (codexOriginator && codexOriginator.includes('symphony') && sessionType !== 'subagent') sessionType = 'codex-symphony';
-        if (meta.model_provider && !model) model = meta.model_provider;
-        continue;
-      }
-
-      if (obj.type === 'turn_context' && obj.payload) {
-        const tc = obj.payload as Record<string, unknown>;
-        if (tc.model && typeof tc.model === 'string') {
-          if (!model || model === codexProvider) model = tc.model;
-          modelsSet.add(tc.model);
-        }
-        continue;
-      }
-
-      if (obj.type === 'response_item' && obj.payload) {
-        const p = obj.payload as CodexResponsePayload;
-        const ts = (obj.timestamp as string) || sessionStart as string;
-        const eventId = `evt-${obj.type}-${Date.parse(ts) || Math.random()}`;
-
-        if (p.type === 'function_call') {
-          const toolName = p.name || p.tool_name || '';
-          const toolArgs = typeof p.arguments === 'string' ? p.arguments : JSON.stringify(p.arguments || {});
-          const callBaseId = p.call_id || p.id || eventId;
-          pendingEvents.push([`${callBaseId}:call`, sessionId as string, ts, 'tool_call', 'assistant', null, toolName, toolArgs, null, null]);
-          toolCount++;
-
-          const fps = extractFilePaths(toolName, toolArgs);
-          for (const fp of fps) {
-            fileActivities.push([sessionId as string, fp, 'read', ts]);
-            const project = extractProjectFromPath(fp, config);
-            if (project) projectCounts.set(project, (projectCounts.get(project) || 0) + 1);
-          }
-          sessionEnd = ts;
-          continue;
-        }
-
-        if (p.type === 'function_call_output') {
-          const output = (typeof p.output === 'string' ? p.output : JSON.stringify(p.output || '')).slice(0, 10000);
-          const resultBaseId = p.call_id || p.id || eventId;
-          pendingEvents.push([`${resultBaseId}:result`, sessionId as string, ts, 'tool_result', 'tool', output, p.name || p.tool_name || '', null, output, null]);
-          sessionEnd = ts;
-          continue;
-        }
-
-        if (p.type === 'message') {
-          const rawRole = p.role || 'assistant';
-          const role = rawRole === 'assistant' ? 'assistant' : 'user';
-          const content = extractCodexMessageText(p.content);
-          if (content) {
-            pendingEvents.push([p.id || eventId, sessionId as string, ts, 'message', role, content, null, null, null, null]);
-            msgCount++;
-            if (!summary && role === 'user' && isSummaryCandidate(content)) summary = summarySource(content).slice(0, 200);
-            if (!initialPrompt && role === 'user' && isSummaryCandidate(content)) {
-              initialPrompt = content.slice(0, 500);
-              firstMessageId = p.id || eventId;
-              firstMessageTimestamp = ts;
-            }
-          }
-          sessionEnd = ts;
-          continue;
-        }
-      }
-
-      if (obj.type === 'event_msg' && obj.payload) {
-        const p = obj.payload as CodexEventPayload;
-        const ts = (obj.timestamp as string) || sessionStart as string;
-        const eventId = `evt-${p.type || 'event'}-${Date.parse(ts) || Math.random()}`;
-
-        if (p.type === 'agent_message' && p.message) {
-          pendingEvents.push([eventId, sessionId as string, ts, 'message', 'assistant', p.message, null, null, null, null]);
-          msgCount++;
-          sessionEnd = ts;
-          continue;
-        }
-
-        if (p.type === 'user_message' && p.message) {
-          pendingEvents.push([eventId, sessionId as string, ts, 'message', 'user', p.message, null, null, null, null]);
-          msgCount++;
-          if (!summary && isSummaryCandidate(p.message)) summary = summarySource(p.message).slice(0, 200);
-          if (!initialPrompt && isSummaryCandidate(p.message)) {
-            initialPrompt = p.message.slice(0, 500);
-            firstMessageId = eventId;
-            firstMessageTimestamp = ts;
-          }
-          sessionEnd = ts;
-          continue;
-        }
-      }
-
-      continue;
-    }
-
-    if (obj.type === 'session' || obj.type === 'model_change' || obj.type === 'thinking_level_change' || obj.type === 'custom' || obj.type === 'file-history-snapshot') {
-      if (obj.type === 'model_change' && obj.modelId) {
-        if (!model) model = obj.modelId as string; // First model for backwards compat
-        modelsSet.add(obj.modelId as string); // Collect all unique models
-      }
-      continue;
-    }
-
-    // Normalize: Claude Code uses top-level type "user"/"assistant" with message object
-    // OpenClaw uses type "message" with message.role
-    let msg: Record<string, unknown> | undefined;
-    let ts: string | undefined;
-    if (obj.type === 'message' && obj.message) {
-      msg = obj.message as Record<string, unknown>;
-      ts = obj.timestamp as string;
-    } else if ((obj.type === 'user' || obj.type === 'assistant') && obj.message) {
-      // Claude Code format: wrap into consistent shape
-      msg = obj.message as Record<string, unknown>;
-      if (!msg.role) msg.role = obj.type === 'user' ? 'user' : 'assistant';
-      ts = obj.timestamp as string;
-    } else {
-      continue;
-    }
-
-    if (msg) {
-      sessionEnd = ts || null;
-
-      // Extract model from assistant messages
-      if (msg.role === 'assistant' && msg.model && msg.model !== 'delivery-mirror' && !(msg.model as string).startsWith('<')) {
-        if (!model) model = msg.model as string; // Keep first model for backwards compat
-        modelsSet.add(msg.model as string); // Collect all unique models
-      }
-
-      // Cost tracking
-      const usage = msg.usage as Record<string, unknown> | undefined;
-      if (usage) {
-        const cost = usage.cost as Record<string, unknown> | undefined;
-        if (cost && typeof cost.total === 'number') {
-          totalCost += cost.total;
-        }
-        if (typeof usage.totalTokens === 'number') {
-          totalTokens += usage.totalTokens;
-        }
-        // OpenClaw format
-        if (typeof usage.input === 'number') totalInputTokens += usage.input;
-        if (typeof usage.output === 'number') totalOutputTokens += usage.output;
-        if (typeof usage.cacheRead === 'number') totalCacheReadTokens += usage.cacheRead;
-        if (typeof usage.cacheWrite === 'number') totalCacheWriteTokens += usage.cacheWrite;
-        // Claude Code format
-        if (typeof usage.input_tokens === 'number') totalInputTokens += usage.input_tokens;
-        if (typeof usage.output_tokens === 'number') totalOutputTokens += usage.output_tokens;
-        if (typeof usage.cache_read_input_tokens === 'number') totalCacheReadTokens += usage.cache_read_input_tokens;
-        if (typeof usage.cache_creation_input_tokens === 'number') totalCacheWriteTokens += usage.cache_creation_input_tokens;
-      }
-
-      const eventId = (obj.id as string) || (obj.uuid as string) || `evt-${Date.parse(ts as string) || Math.random()}`;
-
-      const tr = extractToolResult(msg);
-      if (tr) {
-        pendingEvents.push([eventId, sessionId as string, ts as string, 'tool_result', 'tool', tr.content, tr.toolName, null, tr.content, tr.isError]);
-        continue;
-      }
-
-      // Claude Code returns tool output as a user message of tool_result blocks.
-      const blockResults = extractToolResultBlocks(msg);
-      // The text is stored once (content); Claude Code says whether it failed.
-      blockResults.forEach((r, i) => {
-        pendingEvents.push([r.toolCallId ? `${r.toolCallId}:result` : `${eventId}:${i}:result`, sessionId as string, ts as string, 'tool_result', 'tool', r.content, toolNameById.get(r.toolCallId) || '', null, null, r.isError]);
-      });
-      if (blockResults.length && !hasTextBlocks(msg)) continue;
-
-      const content = extractContent(msg);
-      const role = (msg.role as string) || 'unknown';
-
-      if (content) {
-        pendingEvents.push([eventId, sessionId as string, ts as string, 'message', role, content, null, null, null, null]);
-        msgCount++;
-        // Better summary: skip heartbeat/boilerplate messages
-        if (!summary && role === 'user' && isSummaryCandidate(content)) {
-          summary = summarySource(content).slice(0, 200);
-        }
-        // Capture initial prompt from first substantial user message
-        if (!initialPrompt && role === 'user' && isSummaryCandidate(content)) {
-          initialPrompt = content.slice(0, 500); // Limit to 500 chars
-          firstMessageId = eventId;
-          firstMessageTimestamp = ts || null;
-        }
-      }
-
-      const tools = extractToolCalls(msg);
-      for (const tool of tools) {
-        if (tool.id) toolNameById.set(tool.id, tool.name);
-        pendingEvents.push([tool.id || `${eventId}-${tool.name}`, sessionId as string, ts as string, 'tool_call', role, null, tool.name, tool.args, null, null]);
-        toolCount++;
-
-        // File activity tracking
-        const fps = extractFilePaths(tool.name, tool.args);
-        for (const fp of fps) {
-          const op = tool.name.includes('write') || tool.name === 'Write' ? 'write'
-            : tool.name.includes('edit') || tool.name === 'Edit' ? 'edit'
-            : 'read';
-          fileActivities.push([sessionId as string, fp, op, ts as string]);
-
-          const project = extractProjectFromPath(fp, config);
-          if (project) projectCounts.set(project, (projectCounts.get(project) || 0) + 1);
-        }
-      }
-    }
-  }
-
-  // Classify snapshot-only Claude files explicitly (avoid heartbeat mislabel)
-  if (isClaudeCode && sawSnapshotRecord && !sawNonSnapshotRecord) {
-    sessionType = 'snapshot';
-    if (!summary) summary = 'Claude file snapshot';
-  }
-
-  // Normalize summary text
-  if (summary) summary = stripLeadingDatetimePrefix(summary);
-
-  // If no real summary found, set a sensible default
-  if (!summary) {
-    if (isCodexCli) {
-      const parts = ['Codex CLI session'];
-      if (codexProvider) parts.push(`provider=${codexProvider}`);
-      if (codexSource) parts.push(`source=${codexSource}`);
-      if (codexOriginator) parts.push(`originator=${codexOriginator}`);
-      summary = parts.join(' · ');
-    } else {
-      summary = 'Heartbeat session';
-    }
-  }
-
-  if (!sessionType && parentId) sessionType = 'subagent';
-
-  // Infer session type from first user message content
-  if (!sessionType && initialPrompt) {
-    const p = initialPrompt.toLowerCase();
-    if (p.includes('[cron:')) sessionType = 'cron';
-    else if (p.includes('heartbeat') && p.includes('heartbeat_ok')) sessionType = 'heartbeat';
-  }
-  if (!sessionType && !initialPrompt) sessionType = 'heartbeat';
-  // Detect subagent: task-style prompts injected by sessions_spawn
-  if (!sessionType && initialPrompt) {
-    const p = initialPrompt.trim();
-    if (/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-/.test(p) && !p.includes('[System Message]')) {
-      sessionType = 'subagent';
-    }
-  }
-
-  const modelsJson = modelsSet.size > 0 ? JSON.stringify([...modelsSet]) : null;
-  const projects = [...projectCounts.entries()]
-    .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
-    .map(([name]) => name);
-  const projectsJson = projects.length > 0 ? JSON.stringify(projects) : null;
-
-  // --- All DB operations in a single transaction for atomicity ---
-  const commitIndex = db.transaction(() => {
+  // --- Parse and write in one transaction ---
+  // Events go to the database as each line is parsed rather than being held
+  // until the end, so a huge session never sits in memory all at once. The
+  // transaction keeps it atomic: readers see the old copy until it commits.
+  // Foreign keys are checked at commit, since the session row is written last.
+  return db.transaction((): IndexResult => {
+    db.pragma('defer_foreign_keys = ON');
     stmts.deleteEvents.run(sessionId);
     stmts.deleteFileActivity.run(sessionId);
     if (stmts.deleteArchive) stmts.deleteArchive.run(sessionId);
     stmts.deleteSession.run(sessionId);
+    const emitEvent = (ev: [string, string, string, string, string, string | null, string | null, string | null, string | null, number | null]): void => {
+      stmts.insertEvent.run(...ev);
+    };
+    let lineCount = 0;
+    const toolNameById = new Map<string, string>(); // tool call id -> name, for results that only carry the id
+    const fileActivities: Array<[string, string, string, string]> = [];
+    const projectCounts: Map<string, number> = new Map();
+
+    // Seed project from session cwd when available (helps chat-only sessions)
+    const sessionCwd = (firstLine && firstLine.cwd) || (firstLine && firstLine.payload && (firstLine.payload as Record<string, unknown>).cwd as string | undefined);
+    if (sessionCwd) {
+      const p = extractProjectFromPath(sessionCwd, config);
+      if (p) projectCounts.set(p, 1);
+    }
+
+    for (const line of lines()) {
+      lineCount++;
+      // Archive mode keeps every raw line, parseable or not.
+      if (archiveMode && stmts.insertArchive) stmts.insertArchive.run(sessionId, lineCount, line);
+      let obj: Record<string, unknown>;
+      try { obj = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+
+      if (obj.type === 'file-history-snapshot') sawSnapshotRecord = true;
+      else sawNonSnapshotRecord = true;
+
+      // Claude Code titles: one the user set (/rename) wins over its own AI title;
+      // both can be rewritten during a session, so keep the latest.
+      if (obj.type === 'custom-title' && typeof obj.customTitle === 'string' && obj.customTitle.trim()) { customTitle = obj.customTitle.trim(); continue; }
+      if (obj.type === 'ai-title' && typeof obj.aiTitle === 'string' && obj.aiTitle.trim()) { aiTitle = obj.aiTitle.trim(); continue; }
+
+      if (isCodexCli) {
+        if (obj.type === 'session_meta') {
+          const meta = (obj.payload || {}) as CodexSessionMeta;
+          // A forked rollout repeats its parent's session_meta after its own.
+          // The file's session is the first one; the parent's is ignored.
+          if (meta.id && meta.id !== sessionId) continue;
+          if (meta.timestamp && !sessionStart) sessionStart = meta.timestamp;
+          if (meta.model) {
+            if (!model) model = meta.model;
+            modelsSet.add(meta.model);
+          }
+          if (meta.model_provider) codexProvider = meta.model_provider;
+          if (meta.source) codexSource = describeCodexSource(meta.source);
+          if (meta.originator) codexOriginator = meta.originator;
+          if (codexOriginator && codexOriginator.includes('symphony') && sessionType !== 'subagent') sessionType = 'codex-symphony';
+          if (meta.model_provider && !model) model = meta.model_provider;
+          continue;
+        }
+
+        if (obj.type === 'turn_context' && obj.payload) {
+          const tc = obj.payload as Record<string, unknown>;
+          if (tc.model && typeof tc.model === 'string') {
+            if (!model || model === codexProvider) model = tc.model;
+            modelsSet.add(tc.model);
+          }
+          continue;
+        }
+
+        if (obj.type === 'response_item' && obj.payload) {
+          const p = obj.payload as CodexResponsePayload;
+          const ts = (obj.timestamp as string) || sessionStart as string;
+          const eventId = `evt-${obj.type}-${Date.parse(ts) || Math.random()}`;
+
+          if (p.type === 'function_call') {
+            const toolName = p.name || p.tool_name || '';
+            const toolArgs = typeof p.arguments === 'string' ? p.arguments : JSON.stringify(p.arguments || {});
+            const callBaseId = p.call_id || p.id || eventId;
+            emitEvent([`${callBaseId}:call`, sessionId as string, ts, 'tool_call', 'assistant', null, toolName, toolArgs, null, null]);
+            toolCount++;
+
+            const fps = extractFilePaths(toolName, toolArgs);
+            for (const fp of fps) {
+              fileActivities.push([sessionId as string, fp, 'read', ts]);
+              const project = extractProjectFromPath(fp, config);
+              if (project) projectCounts.set(project, (projectCounts.get(project) || 0) + 1);
+            }
+            sessionEnd = ts;
+            continue;
+          }
+
+          if (p.type === 'function_call_output') {
+            const output = (typeof p.output === 'string' ? p.output : JSON.stringify(p.output || '')).slice(0, 10000);
+            const resultBaseId = p.call_id || p.id || eventId;
+            emitEvent([`${resultBaseId}:result`, sessionId as string, ts, 'tool_result', 'tool', output, p.name || p.tool_name || '', null, output, null]);
+            sessionEnd = ts;
+            continue;
+          }
+
+          if (p.type === 'message') {
+            const rawRole = p.role || 'assistant';
+            const role = rawRole === 'assistant' ? 'assistant' : 'user';
+            const content = extractCodexMessageText(p.content);
+            if (content) {
+              emitEvent([p.id || eventId, sessionId as string, ts, 'message', role, content, null, null, null, null]);
+              msgCount++;
+              if (!summary && role === 'user' && isSummaryCandidate(content)) summary = summarySource(content).slice(0, 200);
+              if (!initialPrompt && role === 'user' && isSummaryCandidate(content)) {
+                initialPrompt = content.slice(0, 500);
+                firstMessageId = p.id || eventId;
+                firstMessageTimestamp = ts;
+              }
+            }
+            sessionEnd = ts;
+            continue;
+          }
+        }
+
+        if (obj.type === 'event_msg' && obj.payload) {
+          const p = obj.payload as CodexEventPayload;
+          const ts = (obj.timestamp as string) || sessionStart as string;
+          const eventId = `evt-${p.type || 'event'}-${Date.parse(ts) || Math.random()}`;
+
+          if (p.type === 'agent_message' && p.message) {
+            emitEvent([eventId, sessionId as string, ts, 'message', 'assistant', p.message, null, null, null, null]);
+            msgCount++;
+            sessionEnd = ts;
+            continue;
+          }
+
+          if (p.type === 'user_message' && p.message) {
+            emitEvent([eventId, sessionId as string, ts, 'message', 'user', p.message, null, null, null, null]);
+            msgCount++;
+            if (!summary && isSummaryCandidate(p.message)) summary = summarySource(p.message).slice(0, 200);
+            if (!initialPrompt && isSummaryCandidate(p.message)) {
+              initialPrompt = p.message.slice(0, 500);
+              firstMessageId = eventId;
+              firstMessageTimestamp = ts;
+            }
+            sessionEnd = ts;
+            continue;
+          }
+        }
+
+        continue;
+      }
+
+      if (obj.type === 'session' || obj.type === 'model_change' || obj.type === 'thinking_level_change' || obj.type === 'custom' || obj.type === 'file-history-snapshot') {
+        if (obj.type === 'model_change' && obj.modelId) {
+          if (!model) model = obj.modelId as string; // First model for backwards compat
+          modelsSet.add(obj.modelId as string); // Collect all unique models
+        }
+        continue;
+      }
+
+      // Normalize: Claude Code uses top-level type "user"/"assistant" with message object
+      // OpenClaw uses type "message" with message.role
+      let msg: Record<string, unknown> | undefined;
+      let ts: string | undefined;
+      if (obj.type === 'message' && obj.message) {
+        msg = obj.message as Record<string, unknown>;
+        ts = obj.timestamp as string;
+      } else if ((obj.type === 'user' || obj.type === 'assistant') && obj.message) {
+        // Claude Code format: wrap into consistent shape
+        msg = obj.message as Record<string, unknown>;
+        if (!msg.role) msg.role = obj.type === 'user' ? 'user' : 'assistant';
+        ts = obj.timestamp as string;
+      } else {
+        continue;
+      }
+
+      if (msg) {
+        sessionEnd = ts || null;
+
+        // Extract model from assistant messages
+        if (msg.role === 'assistant' && msg.model && msg.model !== 'delivery-mirror' && !(msg.model as string).startsWith('<')) {
+          if (!model) model = msg.model as string; // Keep first model for backwards compat
+          modelsSet.add(msg.model as string); // Collect all unique models
+        }
+
+        // Cost tracking
+        const usage = msg.usage as Record<string, unknown> | undefined;
+        if (usage) {
+          const cost = usage.cost as Record<string, unknown> | undefined;
+          if (cost && typeof cost.total === 'number') {
+            totalCost += cost.total;
+          }
+          if (typeof usage.totalTokens === 'number') {
+            totalTokens += usage.totalTokens;
+          }
+          // OpenClaw format
+          if (typeof usage.input === 'number') totalInputTokens += usage.input;
+          if (typeof usage.output === 'number') totalOutputTokens += usage.output;
+          if (typeof usage.cacheRead === 'number') totalCacheReadTokens += usage.cacheRead;
+          if (typeof usage.cacheWrite === 'number') totalCacheWriteTokens += usage.cacheWrite;
+          // Claude Code format
+          if (typeof usage.input_tokens === 'number') totalInputTokens += usage.input_tokens;
+          if (typeof usage.output_tokens === 'number') totalOutputTokens += usage.output_tokens;
+          if (typeof usage.cache_read_input_tokens === 'number') totalCacheReadTokens += usage.cache_read_input_tokens;
+          if (typeof usage.cache_creation_input_tokens === 'number') totalCacheWriteTokens += usage.cache_creation_input_tokens;
+        }
+
+        const eventId = (obj.id as string) || (obj.uuid as string) || `evt-${Date.parse(ts as string) || Math.random()}`;
+
+        const tr = extractToolResult(msg);
+        if (tr) {
+          emitEvent([eventId, sessionId as string, ts as string, 'tool_result', 'tool', tr.content, tr.toolName, null, tr.content, tr.isError]);
+          continue;
+        }
+
+        // Claude Code returns tool output as a user message of tool_result blocks.
+        const blockResults = extractToolResultBlocks(msg);
+        // The text is stored once (content); Claude Code says whether it failed.
+        blockResults.forEach((r, i) => {
+          emitEvent([r.toolCallId ? `${r.toolCallId}:result` : `${eventId}:${i}:result`, sessionId as string, ts as string, 'tool_result', 'tool', r.content, toolNameById.get(r.toolCallId) || '', null, null, r.isError]);
+        });
+        if (blockResults.length && !hasTextBlocks(msg)) continue;
+
+        const content = extractContent(msg);
+        const role = (msg.role as string) || 'unknown';
+
+        if (content) {
+          emitEvent([eventId, sessionId as string, ts as string, 'message', role, content, null, null, null, null]);
+          msgCount++;
+          // Better summary: skip heartbeat/boilerplate messages
+          if (!summary && role === 'user' && isSummaryCandidate(content)) {
+            summary = summarySource(content).slice(0, 200);
+          }
+          // Capture initial prompt from first substantial user message
+          if (!initialPrompt && role === 'user' && isSummaryCandidate(content)) {
+            initialPrompt = content.slice(0, 500); // Limit to 500 chars
+            firstMessageId = eventId;
+            firstMessageTimestamp = ts || null;
+          }
+        }
+
+        const tools = extractToolCalls(msg);
+        for (const tool of tools) {
+          if (tool.id) toolNameById.set(tool.id, tool.name);
+          emitEvent([tool.id || `${eventId}-${tool.name}`, sessionId as string, ts as string, 'tool_call', role, null, tool.name, tool.args, null, null]);
+          toolCount++;
+
+          // File activity tracking
+          const fps = extractFilePaths(tool.name, tool.args);
+          for (const fp of fps) {
+            const op = tool.name.includes('write') || tool.name === 'Write' ? 'write'
+              : tool.name.includes('edit') || tool.name === 'Edit' ? 'edit'
+              : 'read';
+            fileActivities.push([sessionId as string, fp, op, ts as string]);
+
+            const project = extractProjectFromPath(fp, config);
+            if (project) projectCounts.set(project, (projectCounts.get(project) || 0) + 1);
+          }
+        }
+      }
+    }
+
+    // Classify snapshot-only Claude files explicitly (avoid heartbeat mislabel)
+    if (isClaudeCode && sawSnapshotRecord && !sawNonSnapshotRecord) {
+      sessionType = 'snapshot';
+      if (!summary) summary = 'Claude file snapshot';
+    }
+
+    // Normalize summary text
+    if (summary) summary = stripLeadingDatetimePrefix(summary);
+
+    // If no real summary found, set a sensible default
+    if (!summary) {
+      if (isCodexCli) {
+        const parts = ['Codex CLI session'];
+        if (codexProvider) parts.push(`provider=${codexProvider}`);
+        if (codexSource) parts.push(`source=${codexSource}`);
+        if (codexOriginator) parts.push(`originator=${codexOriginator}`);
+        summary = parts.join(' · ');
+      } else {
+        summary = 'Heartbeat session';
+      }
+    }
+
+    if (!sessionType && parentId) sessionType = 'subagent';
+
+    // Infer session type from first user message content
+    if (!sessionType && initialPrompt) {
+      const p = initialPrompt.toLowerCase();
+      if (p.includes('[cron:')) sessionType = 'cron';
+      else if (p.includes('heartbeat') && p.includes('heartbeat_ok')) sessionType = 'heartbeat';
+    }
+    if (!sessionType && !initialPrompt) sessionType = 'heartbeat';
+    // Detect subagent: task-style prompts injected by sessions_spawn
+    if (!sessionType && initialPrompt) {
+      const p = initialPrompt.trim();
+      if (/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-/.test(p) && !p.includes('[System Message]')) {
+        sessionType = 'subagent';
+      }
+    }
+
+    const modelsJson = modelsSet.size > 0 ? JSON.stringify([...modelsSet]) : null;
+    const projects = [...projectCounts.entries()]
+      .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
+      .map(([name]) => name);
+    const projectsJson = projects.length > 0 ? JSON.stringify(projects) : null;
 
     stmts.upsertSession.run(sessionId, sessionStart, sessionEnd, msgCount, toolCount, model, summary, agent, sessionType, totalCost, totalTokens, totalInputTokens, totalOutputTokens, totalCacheReadTokens, totalCacheWriteTokens, initialPrompt, firstMessageId, firstMessageTimestamp, modelsJson, projectsJson);
     if (parentId === sessionId) parentId = null;
     if (!label) label = customTitle || aiTitle;
     if (parentId || label || sourceStatus) stmts.setSessionLineage.run(parentId, label, sourceStatus, sessionId);
-    for (const ev of pendingEvents) stmts.insertEvent.run(...ev);
     for (const fa of fileActivities) stmts.insertFileActivity.run(...fa);
 
-    // Archive mode: store raw JSONL lines
-    if (archiveMode && stmts.insertArchive) {
-      for (let i = 0; i < lines.length; i++) {
-        stmts.insertArchive.run(sessionId, i + 1, lines[i]);
-      }
-    }
-
-    stmts.upsertState.run(sourceKey, lines.length, stateToken);
+    stmts.upsertState.run(sourceKey, lineCount, stateToken);
     storeSessionAttribution(db, sessionId as string);
-  });
 
-  commitIndex();
-
-  return { sessionId: sessionId as string, msgCount, toolCount };
+    return { sessionId: sessionId as string, msgCount, toolCount };
+  })();
 }
 
 // OpenClaw ≥2026.8.1 stores session transcripts in a per-agent SQLite database
@@ -1014,6 +1179,7 @@ function indexOpenClawDb(db: Database.Database, dbPath: string, agentName: strin
   // probe, so the next tick re-runs rather than missing the update.
   const probe = openClawDbProbeToken(dbPath);
   if (!REINDEX && probe && dbProbeTokens.get(dbPath) === probe) return [];
+  let quarantined = false; // a skipped session keeps the store from being marked as seen
 
   let src: Database.Database;
   try {
@@ -1050,14 +1216,16 @@ function indexOpenClawDb(db: Database.Database, dbPath: string, agentName: strin
         const state = stmts.getState.get(sourceKey) as IndexStateRow | undefined;
         if (state && state.last_modified === stateToken) continue;
       }
-      const lines = (selectLines.all(s.session_id) as Array<{ event_json: string }>).map(r => r.event_json).filter(Boolean);
-      const result: IndexResult = lines.length === 0
-        ? { skipped: true }
-        : indexSessionLines(db, sourceKey, lines, agentName, stmts, archiveMode, config, stateToken, s.session_id, lineage);
+      // Rows are streamed like file lines, so a huge session isn't held whole.
+      const lines = function* (): Generator<string> {
+        for (const r of selectLines.iterate(s.session_id) as Iterable<{ event_json: string }>) if (r.event_json) yield r.event_json;
+      };
+      if (isQuarantined(db, sourceKey)) { quarantined = true; continue; } // no state saved, so it's retried later
+      const result: IndexResult = guardCrashes(db, sourceKey, () => indexSessionLines(db, sourceKey, lines, agentName, stmts, archiveMode, config, stateToken, s.session_id, lineage));
       if (result.skipped) {
         // Record state anyway so an unparseable session is not re-read on every
         // tick; any later change to its rows changes the token and retries it.
-        stmts.upsertState.run(sourceKey, lines.length, stateToken);
+        stmts.upsertState.run(sourceKey, s.line_count, stateToken);
         if (!warnedDbSessions.has(sourceKey)) {
           warnedDbSessions.add(sourceKey);
           console.error(`Skipping unparseable or empty OpenClaw DB session ${s.session_id} in ${dbPath}`);
@@ -1066,7 +1234,7 @@ function indexOpenClawDb(db: Database.Database, dbPath: string, agentName: strin
       }
       if (result.sessionId) indexedIds.push(result.sessionId);
     }
-    if (probe) dbProbeTokens.set(dbPath, probe);
+    if (probe && !quarantined) dbProbeTokens.set(dbPath, probe);
   } finally {
     src.close();
   }
@@ -1220,6 +1388,9 @@ function run(): void {
 }
 
 function indexAll(db: Database.Database, config: AgentActaConfig): IndexAllResult {
+  db.exec('DELETE FROM index_failures'); // a manual reindex retries everything
+  warnedQuarantine.clear();
+  dbProbeTokens.clear();
   const sessionDirs = discoverSessionDirs(config);
   const archiveMode = config.storage === 'archive';
   const stmts = createStmts(db);

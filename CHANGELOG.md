@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Large session logs no longer crash the indexer**: a log is now read a line at a time and its events written as they're parsed, instead of loading the whole file at once. A 269 MB Claude Code transcript had run the indexer out of memory, and it restarted every few seconds for days. That file now indexes in about a second, at under 200 MB of memory.
+- **One bad file can't crash-loop the indexer**: if the indexer, or the whole server, dies while reading a file, the next start counts it against that file. After 3 crashes the file is skipped for 6 hours, then tried again; a manual reindex retries it right away. Restarts after a crash also back off, from 2 seconds up to 5 minutes. A single line over 32 MB, which no real log has, is skipped with a warning instead of being read.
+- **Big live sessions use less CPU**: a session log that keeps growing is re-read at most once per 10 times its last parse time, so a large active session uses at most a tenth of a core.
+- **Forked Codex sessions keep their own id**: a forked Codex log repeats its parent's header after its own, and was indexed as the parent, replacing the parent's events. It is now its own session.
+
 ## [2026.10.15] - 2026-10-15
 
 ### Added

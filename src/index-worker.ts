@@ -33,6 +33,11 @@ const sessionDirs: SessionDir[] = discoverSessionDirs(config);
 
 const REINDEX_DEBOUNCE_MS: number = 2000;
 const RECURSIVE_RESCAN_MS: number = 15000;
+// A live session file is re-parsed whole on every change. For a big one that
+// can take seconds, so wait at least this many times its last parse before the
+// next: indexing then uses at most a tenth of a core however fast it grows.
+const REPARSE_COST_FACTOR: number = 10;
+
 
 // Initial indexing pass
 const t0: number = performance.now();
@@ -106,6 +111,20 @@ try {
 
 // Debounce map: filePath -> timeout handle
 const _reindexTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+// filePath -> when its last live re-parse ended and how long it took
+const _lastParse: Map<string, { at: number; ms: number }> = new Map();
+// How long a live file must wait before its next re-parse (0 = no wait).
+function reparseWaitMs(filePath: string): number {
+  const last = _lastParse.get(filePath);
+  return last ? Math.max(0, last.at + last.ms * REPARSE_COST_FACTOR - Date.now()) : 0;
+}
+// Re-indexes a live file and records how long the parse took.
+function indexLive(filePath: string, dir: SessionDir): IndexResult {
+  const t: number = performance.now();
+  const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
+  if (!result.skipped) _lastParse.set(filePath, { at: Date.now(), ms: performance.now() - t });
+  return result;
+}
 
 // Recompute insights for re-indexed sessions and tell the server to push updates
 const upsertInsight: Database.Statement = db.prepare('INSERT OR REPLACE INTO session_insights (session_id, signals, confusion_score, flagged, computed_at) VALUES (?, ?, ?, ?, ?)');
@@ -127,7 +146,8 @@ function reindexRecursiveDir(dir: SessionDir): void {
     const files: string[] = dir.subagents && !dir.recursive ? listClaudeSubagentFiles(dir.path) : listSessionFiles(dir);
     let changed: number = 0;
     for (const filePath of files) {
-      const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
+      if (reparseWaitMs(filePath) > 0) continue; // the next rescan picks it up
+      const result: IndexResult = indexLive(filePath, dir);
       if (!result.skipped) {
         changed++;
         if (result.sessionId) refreshInsightsAndNotify([result.sessionId]);
@@ -172,12 +192,18 @@ for (const dir of sessionDirs) {
       const filePath: string = path.join(dir.path, filename);
       if (!fs.existsSync(filePath)) return;
 
-      // Debounce: cancel pending re-index for this file, schedule a new one
-      if (_reindexTimers.has(filePath)) clearTimeout(_reindexTimers.get(filePath));
+      // Debounce: cancel pending re-index for this file, schedule a new one.
+      // A throttled one is left in place (it reads the file as it is when it
+      // runs), or a file written to nonstop would never be re-indexed.
+      const delay: number = Math.max(REINDEX_DEBOUNCE_MS, reparseWaitMs(filePath));
+      if (_reindexTimers.has(filePath)) {
+        if (delay > REINDEX_DEBOUNCE_MS) return;
+        clearTimeout(_reindexTimers.get(filePath));
+      }
       _reindexTimers.set(filePath, setTimeout(() => {
         _reindexTimers.delete(filePath);
         try {
-          const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
+          const result: IndexResult = indexLive(filePath, dir);
           if (!result.skipped) {
             console.log(`Live re-indexed: ${filename} (${dir.agent})`);
             if (result.sessionId) refreshInsightsAndNotify([result.sessionId]);
@@ -185,7 +211,7 @@ for (const dir of sessionDirs) {
         } catch (err: unknown) {
           console.error(`Error re-indexing ${filename}:`, (err as Error).message);
         }
-      }, REINDEX_DEBOUNCE_MS));
+      }, delay));
     });
     console.log(`  Watching: ${dir.path}`);
     // Nested files (Codex date dirs, Claude <session>/subagents/) aren't seen by a
