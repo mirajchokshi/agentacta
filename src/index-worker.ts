@@ -9,7 +9,7 @@ import type Database from 'better-sqlite3';
 import type { AgentActaConfig, IndexResult, IndexAllResult, InsightResult, PreparedStatements, SessionDir } from './types.js';
 import { loadConfig } from './config.js';
 import { open, createStmts, FTS_VERSION } from './db.js';
-import { discoverSessionDirs, listSessionFiles, listClaudeSubagentFiles, indexFile, indexOpenClawDb, watchOpenClawDb, indexAll, recordIndexCrash, MAX_INDEX_CRASHES } from './indexer.js';
+import { discoverSessionDirs, listSessionFiles, listClaudeSubagentFiles, indexFile, indexOpenClawDb, watchOpenClawDb, indexAll } from './indexer.js';
 import { analyzeSession, analyzeAll, analyzeChanged } from './insights.js';
 import { staleAttributionIds, storeAttributionNow } from './attribution-store.js';
 
@@ -38,15 +38,6 @@ const RECURSIVE_RESCAN_MS: number = 15000;
 // next: indexing then uses at most a tenth of a core however fast it grows.
 const REPARSE_COST_FACTOR: number = 10;
 
-// If the previous indexer died mid-parse, count it against that file; after
-// MAX_INDEX_CRASHES it is skipped for a while instead of crashing every restart.
-{
-  const crash = recordIndexCrash(db);
-  if (crash) {
-    const note = crash.crashes >= MAX_INDEX_CRASHES ? '; skipping it for now' : '';
-    console.error(`Indexer crashed while indexing ${path.basename(crash.sourceKey)} (${crash.crashes} time${crash.crashes === 1 ? '' : 's'})${note}`);
-  }
-}
 
 // Initial indexing pass
 const t0: number = performance.now();
@@ -122,6 +113,18 @@ try {
 const _reindexTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 // filePath -> when its last live re-parse ended and how long it took
 const _lastParse: Map<string, { at: number; ms: number }> = new Map();
+// How long a live file must wait before its next re-parse (0 = no wait).
+function reparseWaitMs(filePath: string): number {
+  const last = _lastParse.get(filePath);
+  return last ? Math.max(0, last.at + last.ms * REPARSE_COST_FACTOR - Date.now()) : 0;
+}
+// Re-indexes a live file and records how long the parse took.
+function indexLive(filePath: string, dir: SessionDir): IndexResult {
+  const t: number = performance.now();
+  const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
+  if (!result.skipped) _lastParse.set(filePath, { at: Date.now(), ms: performance.now() - t });
+  return result;
+}
 
 // Recompute insights for re-indexed sessions and tell the server to push updates
 const upsertInsight: Database.Statement = db.prepare('INSERT OR REPLACE INTO session_insights (session_id, signals, confusion_score, flagged, computed_at) VALUES (?, ?, ?, ?, ?)');
@@ -143,7 +146,8 @@ function reindexRecursiveDir(dir: SessionDir): void {
     const files: string[] = dir.subagents && !dir.recursive ? listClaudeSubagentFiles(dir.path) : listSessionFiles(dir);
     let changed: number = 0;
     for (const filePath of files) {
-      const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
+      if (reparseWaitMs(filePath) > 0) continue; // the next rescan picks it up
+      const result: IndexResult = indexLive(filePath, dir);
       if (!result.skipped) {
         changed++;
         if (result.sessionId) refreshInsightsAndNotify([result.sessionId]);
@@ -191,8 +195,7 @@ for (const dir of sessionDirs) {
       // Debounce: cancel pending re-index for this file, schedule a new one.
       // A throttled one is left in place (it reads the file as it is when it
       // runs), or a file written to nonstop would never be re-indexed.
-      const last = _lastParse.get(filePath);
-      const delay: number = Math.max(REINDEX_DEBOUNCE_MS, last ? last.at + last.ms * REPARSE_COST_FACTOR - Date.now() : 0);
+      const delay: number = Math.max(REINDEX_DEBOUNCE_MS, reparseWaitMs(filePath));
       if (_reindexTimers.has(filePath)) {
         if (delay > REINDEX_DEBOUNCE_MS) return;
         clearTimeout(_reindexTimers.get(filePath));
@@ -200,10 +203,8 @@ for (const dir of sessionDirs) {
       _reindexTimers.set(filePath, setTimeout(() => {
         _reindexTimers.delete(filePath);
         try {
-          const t: number = performance.now();
-          const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
+          const result: IndexResult = indexLive(filePath, dir);
           if (!result.skipped) {
-            _lastParse.set(filePath, { at: Date.now(), ms: performance.now() - t });
             console.log(`Live re-indexed: ${filename} (${dir.agent})`);
             if (result.sessionId) refreshInsightsAndNotify([result.sessionId]);
           }

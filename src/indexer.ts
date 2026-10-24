@@ -508,26 +508,53 @@ const CLAUDE_CODE_LINE_TYPES = new Set(['user', 'assistant', 'system', 'summary'
 // flat however big the file is. A session log can grow past a gigabyte, and
 // reading it whole (plus splitting it) ran the indexer out of heap.
 const LINE_CHUNK_BYTES = 4 * 1024 * 1024;
-export function* readLinesSync(filePath: string): Generator<string> {
+// A single line has to be held whole to be parsed, and one big enough aborts
+// the process outright (V8 can't recover from it even in a worker). Real lines
+// top out around a few MB (an image or a file snapshot), so anything past this
+// is skipped with a warning rather than read.
+export const MAX_LINE_BYTES = 32 * 1024 * 1024;
+export function* readLinesSync(filePath: string, maxLineBytes: number = MAX_LINE_BYTES): Generator<string> {
   const fd = fs.openSync(filePath, 'r');
   try {
     const chunk = Buffer.allocUnsafe(LINE_CHUNK_BYTES);
-    let carry: Buffer | null = null; // bytes of a line that continues into the next chunk
+    // Pieces of a line that runs past the end of a chunk, joined once its
+    // newline arrives (joining every chunk would copy a long line over and over).
+    let pieces: Buffer[] = [];
+    let pending = 0; // bytes in pieces
+    let oversized = false; // dropping the rest of a line past maxLineBytes
+    const emit = (tail: Buffer): string => {
+      const tooLong = oversized || pending + tail.length > maxLineBytes;
+      const size = pending + tail.length;
+      const bytes = tooLong || !pieces.length ? tail : Buffer.concat([...pieces, tail]);
+      pieces = [];
+      pending = 0;
+      if (tooLong) {
+        const mb = Math.round((oversized ? maxLineBytes : size) / 1024 / 1024);
+        console.error(`Skipping a line of ${oversized ? 'over ' : ''}${mb} MB in ${path.basename(filePath)}`);
+        oversized = false;
+        return '';
+      }
+      return bytes.toString('utf8').trim();
+    };
     for (;;) {
       const n = fs.readSync(fd, chunk, 0, LINE_CHUNK_BYTES, null);
       if (n === 0) break;
-      const buf: Buffer = carry ? Buffer.concat([carry, chunk.subarray(0, n)]) : chunk.subarray(0, n);
+      const buf = chunk.subarray(0, n);
       let start = 0;
       let nl: number;
       while ((nl = buf.indexOf(10, start)) !== -1) {
-        const line = buf.toString('utf8', start, nl).trim();
+        const line = emit(buf.subarray(start, nl));
         if (line) yield line;
         start = nl + 1;
       }
-      carry = start < buf.length ? Buffer.from(buf.subarray(start)) : null;
+      if (start < n && !oversized) {
+        pieces.push(Buffer.from(buf.subarray(start))); // chunk is reused
+        pending += n - start;
+        if (pending > maxLineBytes) { oversized = true; pieces = []; }
+      }
     }
-    if (carry) {
-      const line = carry.toString('utf8').trim();
+    if (pieces.length || oversized) {
+      const line = emit(Buffer.alloc(0));
       if (line) yield line;
     }
   } finally {
@@ -554,46 +581,76 @@ function indexFile(db: Database.Database, filePath: string, agentName: string, s
     if (state && state.last_modified === mtime) return { skipped: true };
   }
 
-  if (isQuarantined(db, filePath)) return { skipped: true };
-  // Marks the file as being parsed; if the worker dies mid-parse, the next one
-  // finds the mark and counts a crash against this file (see recordIndexCrash).
-  setIndexingMark(db, filePath);
-  const result = indexSessionLines(db, filePath, () => readLinesSync(filePath), agentName, stmts, archiveMode, config, mtime);
-  clearIndexingMark(db, filePath);
-  return result;
+  return guardCrashes(db, filePath, () => indexSessionLines(db, filePath, () => readLinesSync(filePath), agentName, stmts, archiveMode, config, mtime));
 }
 
 // --- Crash quarantine ---
-// A file that kills the indexer (out of memory, say) would otherwise be
-// retried on every restart forever. After MAX_INDEX_CRASHES it is left alone
-// for INDEX_QUARANTINE_MS, then given one more try.
+// A source that kills the indexer (out of memory, say) would otherwise be
+// retried on every restart forever. The indexer marks each source while it
+// parses it; when the worker dies abnormally the server counts a crash against
+// the marked source (recordIndexCrash), both when the worker dies and when the
+// server starts and finds a mark from a process that died outright. A clean
+// shutdown stops the worker and clears the mark. After MAX_INDEX_CRASHES the source is
+// left alone for INDEX_QUARANTINE_MS, then given one more try.
 export const MAX_INDEX_CRASHES = 3;
 export const INDEX_QUARANTINE_MS = 6 * 60 * 60 * 1000;
 const INDEXING_KEY = 'indexing_file';
 const warnedQuarantine = new Set<string>();
 
-function setIndexingMark(db: Database.Database, sourceKey: string): void {
-  db.prepare('INSERT OR REPLACE INTO agentacta_meta (key, value) VALUES (?, ?)').run(INDEXING_KEY, sourceKey);
+type CrashStmts = Record<'mark' | 'unmark' | 'getMark' | 'dropMark' | 'failures' | 'forget' | 'count', Database.Statement>;
+const crashStmtCache = new WeakMap<Database.Database, CrashStmts>();
+function crashStmts(db: Database.Database): CrashStmts {
+  let c = crashStmtCache.get(db);
+  if (!c) {
+    c = {
+      mark: db.prepare('INSERT OR REPLACE INTO agentacta_meta (key, value) VALUES (?, ?)'),
+      unmark: db.prepare('DELETE FROM agentacta_meta WHERE key = ? AND value = ?'),
+      getMark: db.prepare('SELECT value FROM agentacta_meta WHERE key = ?'),
+      dropMark: db.prepare('DELETE FROM agentacta_meta WHERE key = ?'),
+      failures: db.prepare('SELECT crashes, last_crash_at FROM index_failures WHERE source_key = ?'),
+      forget: db.prepare('DELETE FROM index_failures WHERE source_key = ?'),
+      count: db.prepare(`INSERT INTO index_failures (source_key, crashes, last_crash_at) VALUES (?, 1, ?)
+        ON CONFLICT(source_key) DO UPDATE SET crashes = crashes + 1, last_crash_at = excluded.last_crash_at RETURNING crashes`),
+    };
+    crashStmtCache.set(db, c);
+  }
+  return c;
 }
 
-function clearIndexingMark(db: Database.Database, sourceKey: string): void {
-  db.prepare('DELETE FROM agentacta_meta WHERE key = ? AND value = ?').run(INDEXING_KEY, sourceKey);
-  db.prepare('DELETE FROM index_failures WHERE source_key = ?').run(sourceKey);
+/** Parses one source with the crash mark set, unless it is quarantined. */
+function guardCrashes(db: Database.Database, sourceKey: string, parse: () => IndexResult): IndexResult {
+  if (isQuarantined(db, sourceKey)) return { skipped: true };
+  const c = crashStmts(db);
+  c.mark.run(INDEXING_KEY, sourceKey);
+  let ok = false;
+  try {
+    const result = parse();
+    ok = true;
+    return result;
+  } finally {
+    // Only a dead worker leaves the mark behind; a thrown error is not a crash.
+    c.unmark.run(INDEXING_KEY, sourceKey);
+    if (ok && c.failures.get(sourceKey)) c.forget.run(sourceKey);
+  }
 }
 
-/** Call when an indexer starts: blames the file the last one died parsing, if any. */
+/** Called by the server when the worker dies, and on start: blames the source being parsed. */
 export function recordIndexCrash(db: Database.Database, now: number = Date.now()): { sourceKey: string; crashes: number } | null {
-  const row = db.prepare('SELECT value FROM agentacta_meta WHERE key = ?').get(INDEXING_KEY) as { value: string } | undefined;
+  const c = crashStmts(db);
+  const row = c.getMark.get(INDEXING_KEY) as { value: string } | undefined;
   if (!row) return null;
-  db.prepare('DELETE FROM agentacta_meta WHERE key = ?').run(INDEXING_KEY);
-  db.prepare(`INSERT INTO index_failures (source_key, crashes, last_crash_at) VALUES (?, 1, ?)
-    ON CONFLICT(source_key) DO UPDATE SET crashes = crashes + 1, last_crash_at = excluded.last_crash_at`).run(row.value, now);
-  const { crashes } = db.prepare('SELECT crashes FROM index_failures WHERE source_key = ?').get(row.value) as { crashes: number };
+  c.dropMark.run(INDEXING_KEY);
+  const { crashes } = c.count.get(row.value, now) as { crashes: number };
   return { sourceKey: row.value, crashes };
 }
 
+/** Called on a clean shutdown, after the worker has stopped: a mark left then is not a crash. */
+export function clearIndexingMark(db: Database.Database): void {
+  crashStmts(db).dropMark.run(INDEXING_KEY);
+}
+
 export function isQuarantined(db: Database.Database, sourceKey: string, now: number = Date.now()): boolean {
-  const row = db.prepare('SELECT crashes, last_crash_at FROM index_failures WHERE source_key = ?').get(sourceKey) as { crashes: number; last_crash_at: number } | undefined;
+  const row = crashStmts(db).failures.get(sourceKey) as { crashes: number; last_crash_at: number } | undefined;
   if (!row || row.crashes < MAX_INDEX_CRASHES || now - row.last_crash_at >= INDEX_QUARANTINE_MS) return false;
   if (!warnedQuarantine.has(sourceKey)) {
     warnedQuarantine.add(sourceKey);
@@ -724,18 +781,11 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: () =
   // Foreign keys are checked at commit, since the session row is written last.
   return db.transaction((): IndexResult => {
     db.pragma('defer_foreign_keys = ON');
-    const cleared = new Set<string>();
-    const clearSession = (id: string): void => {
-      if (cleared.has(id)) return;
-      cleared.add(id);
-      stmts.deleteEvents.run(id);
-      stmts.deleteFileActivity.run(id);
-      if (stmts.deleteArchive) stmts.deleteArchive.run(id);
-      stmts.deleteSession.run(id);
-    };
-    clearSession(sessionId as string);
+    stmts.deleteEvents.run(sessionId);
+    stmts.deleteFileActivity.run(sessionId);
+    if (stmts.deleteArchive) stmts.deleteArchive.run(sessionId);
+    stmts.deleteSession.run(sessionId);
     const emitEvent = (ev: [string, string, string, string, string, string | null, string | null, string | null, string | null, number | null]): void => {
-      clearSession(ev[1]);
       stmts.insertEvent.run(...ev);
     };
     let lineCount = 0;
@@ -768,7 +818,8 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: () =
       if (isCodexCli) {
         if (obj.type === 'session_meta') {
           const meta = (obj.payload || {}) as CodexSessionMeta;
-          if (meta.id) sessionId = meta.id;
+          // A forked rollout repeats its parent's session_meta after its own;
+          // the file's session is the first one, so a later id is ignored.
           if (meta.timestamp && !sessionStart) sessionStart = meta.timestamp;
           if (meta.model) {
             if (!model) model = meta.model;
@@ -1024,7 +1075,6 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: () =
       .map(([name]) => name);
     const projectsJson = projects.length > 0 ? JSON.stringify(projects) : null;
 
-    clearSession(sessionId as string); // a Codex log can name its id after the first line
     stmts.upsertSession.run(sessionId, sessionStart, sessionEnd, msgCount, toolCount, model, summary, agent, sessionType, totalCost, totalTokens, totalInputTokens, totalOutputTokens, totalCacheReadTokens, totalCacheWriteTokens, initialPrompt, firstMessageId, firstMessageTimestamp, modelsJson, projectsJson);
     if (parentId === sessionId) parentId = null;
     if (!label) label = customTitle || aiTitle;
@@ -1136,14 +1186,15 @@ function indexOpenClawDb(db: Database.Database, dbPath: string, agentName: strin
         const state = stmts.getState.get(sourceKey) as IndexStateRow | undefined;
         if (state && state.last_modified === stateToken) continue;
       }
-      const lines = (selectLines.all(s.session_id) as Array<{ event_json: string }>).map(r => r.event_json).filter(Boolean);
-      const result: IndexResult = lines.length === 0
-        ? { skipped: true }
-        : indexSessionLines(db, sourceKey, () => lines, agentName, stmts, archiveMode, config, stateToken, s.session_id, lineage);
+      // Rows are streamed like file lines, so a huge session isn't held whole.
+      const lines = function* (): Generator<string> {
+        for (const r of selectLines.iterate(s.session_id) as Iterable<{ event_json: string }>) if (r.event_json) yield r.event_json;
+      };
+      const result: IndexResult = guardCrashes(db, sourceKey, () => indexSessionLines(db, sourceKey, lines, agentName, stmts, archiveMode, config, stateToken, s.session_id, lineage));
       if (result.skipped) {
         // Record state anyway so an unparseable session is not re-read on every
         // tick; any later change to its rows changes the token and retries it.
-        stmts.upsertState.run(sourceKey, lines.length, stateToken);
+        stmts.upsertState.run(sourceKey, s.line_count, stateToken);
         if (!warnedDbSessions.has(sourceKey)) {
           warnedDbSessions.add(sourceKey);
           console.error(`Skipping unparseable or empty OpenClaw DB session ${s.session_id} in ${dbPath}`);
@@ -1306,6 +1357,8 @@ function run(): void {
 }
 
 function indexAll(db: Database.Database, config: AgentActaConfig): IndexAllResult {
+  db.exec('DELETE FROM index_failures'); // a manual reindex retries everything
+  warnedQuarantine.clear();
   const sessionDirs = discoverSessionDirs(config);
   const archiveMode = config.storage === 'archive';
   const stmts = createStmts(db);

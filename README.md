@@ -172,7 +172,7 @@ Open it once as `http://your-host:4003/?token=your-token` and the browser keeps 
 agent logs  ->  background indexer  ->  SQLite + full-text index  ->  HTTP API  ->  web UI
 ```
 
-A worker thread reads the logs (JSONL files, and OpenClaw's SQLite stores), keeps watching them, and writes to a local SQLite database with FTS5 full-text search. It reads each log a line at a time, so a session log of any size indexes in a few hundred MB of memory, and a file that crashes it repeatedly is set aside for a few hours instead of crash-looping. The server answers from that database right away, so it starts in well under a second and never waits on indexing. The UI is plain HTML, CSS and JavaScript served by Node's built-in HTTP server, with no framework or build step.
+A worker thread reads the logs (JSONL files, and OpenClaw's SQLite stores), keeps watching them, and writes to a local SQLite database with FTS5 full-text search. It reads each log a line at a time, so a session log of any size indexes in a few hundred MB of memory, and a file that crashes it repeatedly is set aside for a few hours instead of crash-looping (a manual reindex retries it). The server answers from that database right away, so it starts in well under a second and never waits on indexing. The UI is plain HTML, CSS and JavaScript served by Node's built-in HTTP server, with no framework or build step.
 
 ## API reference
 

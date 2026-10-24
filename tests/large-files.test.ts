@@ -53,12 +53,23 @@ describe('large session files', () => {
     // The first line ends 1 byte short of the 4 MB chunk, so the 3-byte "€"
     // that starts the second line straddles the chunk boundary.
     const first = 'a'.repeat(4 * MB - 1);
-    fs.writeFileSync(fp, `${first}\n€uro\r\n\n   \nlast line, no newline`);
+    // The fourth line spans three chunks.
+    const long = 'é'.repeat(5 * MB);
+    fs.writeFileSync(fp, `${first}\n€uro\r\n\n   \n${long}\nlast line, no newline`);
     const lines = [...readLinesSync(fp)];
-    assert.strictEqual(lines.length, 3);
+    assert.strictEqual(lines.length, 4);
     assert.strictEqual(lines[0].length, first.length);
     assert.strictEqual(lines[1], '€uro');
-    assert.strictEqual(lines[2], 'last line, no newline');
+    assert.ok(lines[2] === long, 'a line longer than a chunk comes back whole');
+    assert.strictEqual(lines[3], 'last line, no newline');
+  });
+
+  it('skips a line too big to parse instead of reading it', () => {
+    const fp = path.join(TMP, 'oversized.jsonl');
+    // Limit 1 MB: a 2 KB line passes, a 9 MB one (spanning chunks) and a 1.5 MB
+    // last line without a newline are dropped.
+    fs.writeFileSync(fp, `first\n${'s'.repeat(2048)}\n${'b'.repeat(9 * MB)}\nafter\n${'t'.repeat(1.5 * MB)}`);
+    assert.deepStrictEqual([...readLinesSync(fp, MB)].map(l => l.length > 10 ? l.length : l), ['first', 2048, 'after']);
   });
 
   it('indexes a file several times bigger than the heap allows reading whole', async () => {
@@ -124,6 +135,8 @@ describe('large session files', () => {
     // Events are written while the file is read; a failure halfway must roll
     // all of them back, not leave a half-indexed session.
     fs.appendFileSync(fp, line(3) + '\n');
+    const later = new Date(Date.now() + 60_000);
+    fs.utimesSync(fp, later, later); // a write in the same clock tick keeps the old mtime
     const insert = stmts.insertEvent;
     let calls = 0;
     stmts.insertEvent = { run: (...args: unknown[]) => { if (++calls === 2) throw new Error('disk full'); return insert.run(...args); } } as unknown as Database.Statement;
@@ -134,5 +147,21 @@ describe('large session files', () => {
     }
     assert.strictEqual(count(), 3);
     assert.ok(db.prepare("SELECT 1 FROM sessions WHERE id = 'atomic-1'").get(), 'session row survives');
+    assert.strictEqual(recordIndexCrash(db), null, 'a thrown error is not counted as a crash');
+  });
+
+  it("indexes a forked Codex log as its own session, not its parent's", () => {
+    const meta = (id: string, extra: Record<string, unknown> = {}) => ({ timestamp: '2026-08-17T00:36:00.964Z', type: 'session_meta', payload: { id, timestamp: '2026-08-17T00:36:00.964Z', cwd: '/w', originator: 'openclaw', ...extra } });
+    const msg = (text: string, ts: string) => ({ timestamp: ts, type: 'event_msg', payload: { type: 'user_message', message: text } });
+    const parentFp = path.join(TMP, 'codex-parent.jsonl');
+    fs.writeFileSync(parentFp, [meta('parent-1'), msg('parent work', '2026-08-17T00:37:00.000Z')].map(l => JSON.stringify(l)).join('\n') + '\n');
+    indexFile(db, parentFp, 'codex-cli', stmts, false, { projectAliases: {} } as never);
+    // A fork opens with its own session_meta, then repeats the parent's.
+    const forkFp = path.join(TMP, 'codex-fork.jsonl');
+    fs.writeFileSync(forkFp, [meta('fork-1', { forked_from_id: 'parent-1' }), meta('parent-1'), msg('fork work', '2026-08-17T00:38:00.000Z')].map(l => JSON.stringify(l)).join('\n') + '\n');
+    assert.strictEqual(indexFile(db, forkFp, 'codex-cli', stmts, false, { projectAliases: {} } as never).sessionId, 'fork-1');
+    const contents = (id: string) => (db.prepare('SELECT content FROM events WHERE session_id = ?').all(id) as Array<{ content: string }>).map(r => r.content);
+    assert.deepStrictEqual(contents('parent-1'), ['parent work'], 'the parent is untouched');
+    assert.deepStrictEqual(contents('fork-1'), ['fork work']);
   });
 });
