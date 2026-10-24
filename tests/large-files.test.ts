@@ -6,7 +6,7 @@ import os from 'os';
 import { Worker } from 'node:worker_threads';
 
 import { open, init, createStmts } from '../src/db.js';
-import { indexFile, readLinesSync, recordIndexCrash, isQuarantined, MAX_INDEX_CRASHES, INDEX_QUARANTINE_MS } from '../src/indexer.js';
+import { indexFile, readLinesSync, recordIndexCrash, recordStartupCrashes, clearIndexingMark, isQuarantined, MAX_INDEX_CRASHES, INDEX_QUARANTINE_MS } from '../src/indexer.js';
 import type { PreparedStatements, IndexResult } from '../src/types.js';
 import Database from 'better-sqlite3';
 
@@ -105,7 +105,7 @@ describe('large session files', () => {
     fs.writeFileSync(fp, JSON.stringify({ type: 'user', sessionId: 'crashy-1', uuid: 'u-1', timestamp: '2026-10-20T00:00:00Z', message: { role: 'user', content: 'hi' } }) + '\n');
     const markCrash = (): void => {
       // What a worker that died mid-parse leaves behind.
-      db.prepare("INSERT OR REPLACE INTO agentacta_meta (key, value) VALUES ('indexing_file', ?)").run(fp);
+      db.prepare('INSERT OR REPLACE INTO agentacta_meta (key, value) VALUES (?, ?)').run(`indexing_file:${process.pid}`, fp);
     };
     const t0 = Date.now();
     for (let i = 1; i <= MAX_INDEX_CRASHES; i++) {
@@ -122,6 +122,23 @@ describe('large session files', () => {
     assert.strictEqual(indexFile(db, fp, 'claude-code', stmts, false).sessionId, 'crashy-1');
     assert.strictEqual(db.prepare('SELECT 1 FROM index_failures WHERE source_key = ?').get(fp), undefined);
     assert.strictEqual(recordIndexCrash(db), null);
+  });
+
+  it('at startup blames marks from dead processes only, and a clean shutdown leaves none', () => {
+    const mark = (pid: number, source: string) => db.prepare('INSERT OR REPLACE INTO agentacta_meta (key, value) VALUES (?, ?)').run(`indexing_file:${pid}`, source);
+    const deadPid = 2 ** 22 + 12345; // above Linux's pid_max, so never running
+    mark(deadPid, '/logs/died-outright.jsonl');
+    mark(1, '/logs/other-live-indexer.jsonl'); // pid 1 is always running
+    const crashes = recordStartupCrashes(db);
+    assert.deepStrictEqual(crashes.map(c => c.sourceKey), ['/logs/died-outright.jsonl']);
+    assert.ok(db.prepare("SELECT 1 FROM agentacta_meta WHERE key = 'indexing_file:1'").get(), "a live process's mark is left alone");
+    db.prepare("DELETE FROM agentacta_meta WHERE key = 'indexing_file:1'").run();
+
+    mark(process.pid, '/logs/was-parsing.jsonl');
+    clearIndexingMark(db); // clean shutdown
+    assert.strictEqual(recordIndexCrash(db), null);
+    assert.deepStrictEqual(recordStartupCrashes(db), []);
+    db.exec('DELETE FROM index_failures');
   });
 
   it('keeps the previous copy when a re-parse fails partway', () => {
@@ -158,10 +175,13 @@ describe('large session files', () => {
     indexFile(db, parentFp, 'codex-cli', stmts, false, { projectAliases: {} } as never);
     // A fork opens with its own session_meta, then repeats the parent's.
     const forkFp = path.join(TMP, 'codex-fork.jsonl');
-    fs.writeFileSync(forkFp, [meta('fork-1', { forked_from_id: 'parent-1' }), meta('parent-1'), msg('fork work', '2026-08-17T00:38:00.000Z')].map(l => JSON.stringify(l)).join('\n') + '\n');
+    fs.writeFileSync(forkFp, [meta('fork-1', { forked_from_id: 'parent-1', originator: 'codex_exec' }), meta('parent-1', { model: 'parent-model' }), msg('fork work', '2026-08-17T00:38:00.000Z')].map(l => JSON.stringify(l)).join('\n') + '\n');
     assert.strictEqual(indexFile(db, forkFp, 'codex-cli', stmts, false, { projectAliases: {} } as never).sessionId, 'fork-1');
     const contents = (id: string) => (db.prepare('SELECT content FROM events WHERE session_id = ?').all(id) as Array<{ content: string }>).map(r => r.content);
     assert.deepStrictEqual(contents('parent-1'), ['parent work'], 'the parent is untouched');
     assert.deepStrictEqual(contents('fork-1'), ['fork work']);
+    const fork = db.prepare("SELECT models, summary FROM sessions WHERE id = 'fork-1'").get() as { models: string | null; summary: string };
+    assert.strictEqual(fork.models, null, "the parent's model isn't the fork's");
+    assert.match(fork.summary, /originator=codex_exec/);
   });
 });

@@ -26,7 +26,7 @@ import type {
 } from './types.js';
 import { loadConfig } from './config.js';
 import { open, init } from './db.js';
-import { discoverSessionDirs, recordIndexCrash, clearIndexingMark, MAX_INDEX_CRASHES } from './indexer.js';
+import { discoverSessionDirs, recordIndexCrash, recordStartupCrashes, clearIndexingMark, MAX_INDEX_CRASHES } from './indexer.js';
 import type { WorkerMessage } from './index-worker.js';
 import { attributeEventDelta } from './project-attribution.js';
 import { loadDeltaAttributionContext } from './delta-attribution-context.js';
@@ -288,11 +288,13 @@ const WORKER_RESTART_MIN_MS: number = 2000;
 const WORKER_RESTART_MAX_MS: number = 5 * 60 * 1000;
 const WORKER_HEALTHY_MS: number = 10 * 60 * 1000;
 let workerRestartMs: number = WORKER_RESTART_MIN_MS;
+let workerRestartTimer: ReturnType<typeof setTimeout> | null = null;
 // Blames the file the indexer died parsing; after a few crashes it is skipped.
-function blameIndexCrash(): void {
+// At startup it looks for marks left by a process that died outright.
+function blameIndexCrash(atStartup: boolean): void {
   try {
-    const crash = recordIndexCrash(db);
-    if (crash) {
+    const crashes = atStartup ? recordStartupCrashes(db) : [recordIndexCrash(db)].filter(c => c !== null);
+    for (const crash of crashes) {
       const note = crash.crashes >= MAX_INDEX_CRASHES ? '; skipping it for now' : '';
       console.error(`Indexer crashed while indexing ${path.basename(crash.sourceKey)} (${crash.crashes} time${crash.crashes === 1 ? '' : 's'})${note}`);
     }
@@ -301,6 +303,8 @@ function blameIndexCrash(): void {
   }
 }
 function startIndexWorker(): void {
+  workerRestartTimer = null;
+  if (shuttingDown) return;
   const startedAt: number = Date.now();
   // Under tsx (npm run dev, tests) the worker needs tsx's loader registered itself.
   const worker: Worker = workerFile.endsWith('.ts')
@@ -325,7 +329,7 @@ function startIndexWorker(): void {
   // fail what was waiting on it and start a new one (which re-runs the pass).
   worker.on('exit', (code: number) => {
     if (shuttingDown) return;
-    blameIndexCrash();
+    blameIndexCrash(false);
     if (Date.now() - startedAt >= WORKER_HEALTHY_MS) workerRestartMs = WORKER_RESTART_MIN_MS;
     const delay: number = workerRestartMs;
     workerRestartMs = Math.min(workerRestartMs * 2, WORKER_RESTART_MAX_MS);
@@ -334,10 +338,11 @@ function startIndexWorker(): void {
     for (const fn of indexReadyWaiters.splice(0)) fn();
     for (const [requestId, done] of reindexRequests) done({ type: 'reindexed', requestId, error: 'Indexer restarted' });
     reindexRequests.clear();
-    setTimeout(startIndexWorker, delay).unref();
+    workerRestartTimer = setTimeout(startIndexWorker, delay);
+    workerRestartTimer.unref();
   });
 }
-blameIndexCrash(); // the whole process can die mid-parse too (see MAX_LINE_BYTES)
+blameIndexCrash(true); // the whole process can die mid-parse too (see MAX_LINE_BYTES)
 startIndexWorker();
 
 const SESSION_SELECT: string = 'SELECT s.* FROM sessions s';
@@ -1062,6 +1067,7 @@ function shutdown(signal: string): void {
   console.log(`\n${signal} received, shutting down...`);
   // Stop the worker before clearing its mark, so a file it was parsing isn't
   // blamed for a crash on the next start.
+  if (workerRestartTimer) clearTimeout(workerRestartTimer);
   const workerStopped: Promise<void> = indexWorker.terminate()
     .catch(() => 0)
     .then(() => { try { clearIndexingMark(db); } catch { /* ignore */ } });
@@ -1074,6 +1080,9 @@ function shutdown(signal: string): void {
   });
   // Force exit after 5s if server doesn't close
   setTimeout(() => {
+    // The worker may still be in a long native call; exiting stops it, and
+    // this is still a clean shutdown, so its mark goes too.
+    try { clearIndexingMark(db); } catch { /* ignore */ }
     try { db.close(); } catch { /* ignore */ }
     process.exit(1);
   }, 5000);

@@ -513,6 +513,7 @@ const LINE_CHUNK_BYTES = 4 * 1024 * 1024;
 // top out around a few MB (an image or a file snapshot), so anything past this
 // is skipped with a warning rather than read.
 export const MAX_LINE_BYTES = 32 * 1024 * 1024;
+const warnedLongLines = new Set<string>(); // files already warned about, so a re-parse doesn't repeat it
 export function* readLinesSync(filePath: string, maxLineBytes: number = MAX_LINE_BYTES): Generator<string> {
   const fd = fs.openSync(filePath, 'r');
   try {
@@ -529,8 +530,11 @@ export function* readLinesSync(filePath: string, maxLineBytes: number = MAX_LINE
       pieces = [];
       pending = 0;
       if (tooLong) {
-        const mb = Math.round((oversized ? maxLineBytes : size) / 1024 / 1024);
-        console.error(`Skipping a line of ${oversized ? 'over ' : ''}${mb} MB in ${path.basename(filePath)}`);
+        if (!warnedLongLines.has(filePath)) {
+          warnedLongLines.add(filePath);
+          const mb = Math.round((oversized ? maxLineBytes : size) / 1024 / 1024);
+          console.error(`Skipping a line of ${oversized ? 'over ' : ''}${mb} MB in ${path.basename(filePath)}`);
+        }
         oversized = false;
         return '';
       }
@@ -587,17 +591,19 @@ function indexFile(db: Database.Database, filePath: string, agentName: string, s
 // --- Crash quarantine ---
 // A source that kills the indexer (out of memory, say) would otherwise be
 // retried on every restart forever. The indexer marks each source while it
-// parses it; when the worker dies abnormally the server counts a crash against
-// the marked source (recordIndexCrash), both when the worker dies and when the
-// server starts and finds a mark from a process that died outright. A clean
-// shutdown stops the worker and clears the mark. After MAX_INDEX_CRASHES the source is
-// left alone for INDEX_QUARANTINE_MS, then given one more try.
+// parses it, under a key for its process. The server counts a crash against a
+// marked source when its worker dies (recordIndexCrash) and, at startup, for
+// any mark whose process is gone (recordStartupCrashes), which catches a
+// process that died outright. A clean shutdown stops the worker and clears the
+// mark. After MAX_INDEX_CRASHES the source is left alone for
+// INDEX_QUARANTINE_MS, then given one more try.
 export const MAX_INDEX_CRASHES = 3;
 export const INDEX_QUARANTINE_MS = 6 * 60 * 60 * 1000;
-const INDEXING_KEY = 'indexing_file';
+const MARK_PREFIX = 'indexing_file:';
+const ownMarkKey = (): string => MARK_PREFIX + process.pid;
 const warnedQuarantine = new Set<string>();
 
-type CrashStmts = Record<'mark' | 'unmark' | 'getMark' | 'dropMark' | 'failures' | 'forget' | 'count', Database.Statement>;
+type CrashStmts = Record<'mark' | 'unmark' | 'getMark' | 'allMarks' | 'dropMark' | 'failures' | 'forget' | 'count', Database.Statement>;
 const crashStmtCache = new WeakMap<Database.Database, CrashStmts>();
 function crashStmts(db: Database.Database): CrashStmts {
   let c = crashStmtCache.get(db);
@@ -606,6 +612,7 @@ function crashStmts(db: Database.Database): CrashStmts {
       mark: db.prepare('INSERT OR REPLACE INTO agentacta_meta (key, value) VALUES (?, ?)'),
       unmark: db.prepare('DELETE FROM agentacta_meta WHERE key = ? AND value = ?'),
       getMark: db.prepare('SELECT value FROM agentacta_meta WHERE key = ?'),
+      allMarks: db.prepare(`SELECT key, value FROM agentacta_meta WHERE key LIKE '${MARK_PREFIX}%'`),
       dropMark: db.prepare('DELETE FROM agentacta_meta WHERE key = ?'),
       failures: db.prepare('SELECT crashes, last_crash_at FROM index_failures WHERE source_key = ?'),
       forget: db.prepare('DELETE FROM index_failures WHERE source_key = ?'),
@@ -621,7 +628,7 @@ function crashStmts(db: Database.Database): CrashStmts {
 function guardCrashes(db: Database.Database, sourceKey: string, parse: () => IndexResult): IndexResult {
   if (isQuarantined(db, sourceKey)) return { skipped: true };
   const c = crashStmts(db);
-  c.mark.run(INDEXING_KEY, sourceKey);
+  c.mark.run(ownMarkKey(), sourceKey);
   let ok = false;
   try {
     const result = parse();
@@ -629,24 +636,45 @@ function guardCrashes(db: Database.Database, sourceKey: string, parse: () => Ind
     return result;
   } finally {
     // Only a dead worker leaves the mark behind; a thrown error is not a crash.
-    c.unmark.run(INDEXING_KEY, sourceKey);
+    c.unmark.run(ownMarkKey(), sourceKey);
     if (ok && c.failures.get(sourceKey)) c.forget.run(sourceKey);
   }
 }
 
-/** Called by the server when the worker dies, and on start: blames the source being parsed. */
-export function recordIndexCrash(db: Database.Database, now: number = Date.now()): { sourceKey: string; crashes: number } | null {
+export interface IndexCrash { sourceKey: string; crashes: number }
+
+function blame(db: Database.Database, key: string, sourceKey: string, now: number): IndexCrash {
   const c = crashStmts(db);
-  const row = c.getMark.get(INDEXING_KEY) as { value: string } | undefined;
-  if (!row) return null;
-  c.dropMark.run(INDEXING_KEY);
-  const { crashes } = c.count.get(row.value, now) as { crashes: number };
-  return { sourceKey: row.value, crashes };
+  c.dropMark.run(key);
+  const { crashes } = c.count.get(sourceKey, now) as { crashes: number };
+  return { sourceKey, crashes };
+}
+
+/** Called by the server when its worker dies: blames the source the worker was parsing. */
+export function recordIndexCrash(db: Database.Database, now: number = Date.now()): IndexCrash | null {
+  const row = crashStmts(db).getMark.get(ownMarkKey()) as { value: string } | undefined;
+  return row ? blame(db, ownMarkKey(), row.value, now) : null;
+}
+
+function processAlive(pid: number): boolean {
+  if (pid === process.pid) return false; // a mark under our pid is from an earlier process
+  try { process.kill(pid, 0); return true; } catch (err: unknown) { return (err as NodeJS.ErrnoException).code === 'EPERM'; }
+}
+
+/** Called by the server at startup: blames sources left marked by processes that died. */
+export function recordStartupCrashes(db: Database.Database, now: number = Date.now()): IndexCrash[] {
+  const out: IndexCrash[] = [];
+  for (const row of crashStmts(db).allMarks.all() as Array<{ key: string; value: string }>) {
+    const pid = Number(row.key.slice(MARK_PREFIX.length));
+    if (Number.isInteger(pid) && processAlive(pid)) continue; // another live indexer's mark
+    out.push(blame(db, row.key, row.value, now));
+  }
+  return out;
 }
 
 /** Called on a clean shutdown, after the worker has stopped: a mark left then is not a crash. */
 export function clearIndexingMark(db: Database.Database): void {
-  crashStmts(db).dropMark.run(INDEXING_KEY);
+  crashStmts(db).dropMark.run(ownMarkKey());
 }
 
 export function isQuarantined(db: Database.Database, sourceKey: string, now: number = Date.now()): boolean {
@@ -818,8 +846,9 @@ function indexSessionLines(db: Database.Database, sourceKey: string, lines: () =
       if (isCodexCli) {
         if (obj.type === 'session_meta') {
           const meta = (obj.payload || {}) as CodexSessionMeta;
-          // A forked rollout repeats its parent's session_meta after its own;
-          // the file's session is the first one, so a later id is ignored.
+          // A forked rollout repeats its parent's session_meta after its own.
+          // The file's session is the first one; the parent's is ignored.
+          if (meta.id && meta.id !== sessionId) continue;
           if (meta.timestamp && !sessionStart) sessionStart = meta.timestamp;
           if (meta.model) {
             if (!model) model = meta.model;
@@ -1150,6 +1179,7 @@ function indexOpenClawDb(db: Database.Database, dbPath: string, agentName: strin
   // probe, so the next tick re-runs rather than missing the update.
   const probe = openClawDbProbeToken(dbPath);
   if (!REINDEX && probe && dbProbeTokens.get(dbPath) === probe) return [];
+  let quarantined = false; // a skipped session keeps the store from being marked as seen
 
   let src: Database.Database;
   try {
@@ -1190,6 +1220,7 @@ function indexOpenClawDb(db: Database.Database, dbPath: string, agentName: strin
       const lines = function* (): Generator<string> {
         for (const r of selectLines.iterate(s.session_id) as Iterable<{ event_json: string }>) if (r.event_json) yield r.event_json;
       };
+      if (isQuarantined(db, sourceKey)) { quarantined = true; continue; } // no state saved, so it's retried later
       const result: IndexResult = guardCrashes(db, sourceKey, () => indexSessionLines(db, sourceKey, lines, agentName, stmts, archiveMode, config, stateToken, s.session_id, lineage));
       if (result.skipped) {
         // Record state anyway so an unparseable session is not re-read on every
@@ -1203,7 +1234,7 @@ function indexOpenClawDb(db: Database.Database, dbPath: string, agentName: strin
       }
       if (result.sessionId) indexedIds.push(result.sessionId);
     }
-    if (probe) dbProbeTokens.set(dbPath, probe);
+    if (probe && !quarantined) dbProbeTokens.set(dbPath, probe);
   } finally {
     src.close();
   }
@@ -1359,6 +1390,7 @@ function run(): void {
 function indexAll(db: Database.Database, config: AgentActaConfig): IndexAllResult {
   db.exec('DELETE FROM index_failures'); // a manual reindex retries everything
   warnedQuarantine.clear();
+  dbProbeTokens.clear();
   const sessionDirs = discoverSessionDirs(config);
   const archiveMode = config.storage === 'archive';
   const stmts = createStmts(db);
