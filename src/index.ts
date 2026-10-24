@@ -281,7 +281,15 @@ let nextReindexId: number = 1;
 const workerFile: string = path.join(__dirname, 'index-worker' + path.extname(__filename));
 let indexWorker: Worker;
 let shuttingDown: boolean = false;
+// Restart delay after the worker dies: doubles on each quick death (up to 5
+// minutes) so a crash loop can't peg the CPU, and resets once a worker has
+// stayed up for a while.
+const WORKER_RESTART_MIN_MS: number = 2000;
+const WORKER_RESTART_MAX_MS: number = 5 * 60 * 1000;
+const WORKER_HEALTHY_MS: number = 10 * 60 * 1000;
+let workerRestartMs: number = WORKER_RESTART_MIN_MS;
 function startIndexWorker(): void {
+  const startedAt: number = Date.now();
   // Under tsx (npm run dev, tests) the worker needs tsx's loader registered itself.
   const worker: Worker = workerFile.endsWith('.ts')
     ? new Worker(`require('tsx/cjs/api').register(); require(${JSON.stringify(workerFile)});`, { eval: true })
@@ -305,12 +313,15 @@ function startIndexWorker(): void {
   // fail what was waiting on it and start a new one (which re-runs the pass).
   worker.on('exit', (code: number) => {
     if (shuttingDown) return;
-    console.error(`Indexer stopped (exit ${code}); restarting in 2s`);
+    if (Date.now() - startedAt >= WORKER_HEALTHY_MS) workerRestartMs = WORKER_RESTART_MIN_MS;
+    const delay: number = workerRestartMs;
+    workerRestartMs = Math.min(workerRestartMs * 2, WORKER_RESTART_MAX_MS);
+    console.error(`Indexer stopped (exit ${code}); restarting in ${Math.round(delay / 1000)}s`);
     indexReady = true;
     for (const fn of indexReadyWaiters.splice(0)) fn();
     for (const [requestId, done] of reindexRequests) done({ type: 'reindexed', requestId, error: 'Indexer restarted' });
     reindexRequests.clear();
-    setTimeout(startIndexWorker, 2000).unref();
+    setTimeout(startIndexWorker, delay).unref();
   });
 }
 startIndexWorker();

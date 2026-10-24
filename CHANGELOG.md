@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Large session logs no longer crash the indexer**: a log is now read a line at a time and its events written as they're parsed, instead of loading the whole file at once. A 269 MB Claude Code transcript had run the indexer out of memory, and it restarted every few seconds for days. That file now indexes in about a second, at under 200 MB of memory.
+- **One bad file can't crash-loop the indexer**: if the indexer dies while reading a file, the next one notes it. After 3 crashes that file is skipped for 6 hours, then tried again. Restarts after a crash also back off, from 2 seconds up to 5 minutes.
+- **Big live sessions use less CPU**: a session log that keeps growing is re-read at most once per 10 times its last parse time, so a large active session uses at most a tenth of a core.
+
 ## [2026.10.15] - 2026-10-15
 
 ### Added

@@ -9,7 +9,7 @@ import type Database from 'better-sqlite3';
 import type { AgentActaConfig, IndexResult, IndexAllResult, InsightResult, PreparedStatements, SessionDir } from './types.js';
 import { loadConfig } from './config.js';
 import { open, createStmts, FTS_VERSION } from './db.js';
-import { discoverSessionDirs, listSessionFiles, listClaudeSubagentFiles, indexFile, indexOpenClawDb, watchOpenClawDb, indexAll } from './indexer.js';
+import { discoverSessionDirs, listSessionFiles, listClaudeSubagentFiles, indexFile, indexOpenClawDb, watchOpenClawDb, indexAll, recordIndexCrash, MAX_INDEX_CRASHES } from './indexer.js';
 import { analyzeSession, analyzeAll, analyzeChanged } from './insights.js';
 import { staleAttributionIds, storeAttributionNow } from './attribution-store.js';
 
@@ -33,6 +33,20 @@ const sessionDirs: SessionDir[] = discoverSessionDirs(config);
 
 const REINDEX_DEBOUNCE_MS: number = 2000;
 const RECURSIVE_RESCAN_MS: number = 15000;
+// A live session file is re-parsed whole on every change. For a big one that
+// can take seconds, so wait at least this many times its last parse before the
+// next: indexing then uses at most a tenth of a core however fast it grows.
+const REPARSE_COST_FACTOR: number = 10;
+
+// If the previous indexer died mid-parse, count it against that file; after
+// MAX_INDEX_CRASHES it is skipped for a while instead of crashing every restart.
+{
+  const crash = recordIndexCrash(db);
+  if (crash) {
+    const note = crash.crashes >= MAX_INDEX_CRASHES ? '; skipping it for now' : '';
+    console.error(`Indexer crashed while indexing ${path.basename(crash.sourceKey)} (${crash.crashes} time${crash.crashes === 1 ? '' : 's'})${note}`);
+  }
+}
 
 // Initial indexing pass
 const t0: number = performance.now();
@@ -106,6 +120,8 @@ try {
 
 // Debounce map: filePath -> timeout handle
 const _reindexTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+// filePath -> when its last live re-parse ended and how long it took
+const _lastParse: Map<string, { at: number; ms: number }> = new Map();
 
 // Recompute insights for re-indexed sessions and tell the server to push updates
 const upsertInsight: Database.Statement = db.prepare('INSERT OR REPLACE INTO session_insights (session_id, signals, confusion_score, flagged, computed_at) VALUES (?, ?, ?, ?, ?)');
@@ -172,20 +188,29 @@ for (const dir of sessionDirs) {
       const filePath: string = path.join(dir.path, filename);
       if (!fs.existsSync(filePath)) return;
 
-      // Debounce: cancel pending re-index for this file, schedule a new one
-      if (_reindexTimers.has(filePath)) clearTimeout(_reindexTimers.get(filePath));
+      // Debounce: cancel pending re-index for this file, schedule a new one.
+      // A throttled one is left in place (it reads the file as it is when it
+      // runs), or a file written to nonstop would never be re-indexed.
+      const last = _lastParse.get(filePath);
+      const delay: number = Math.max(REINDEX_DEBOUNCE_MS, last ? last.at + last.ms * REPARSE_COST_FACTOR - Date.now() : 0);
+      if (_reindexTimers.has(filePath)) {
+        if (delay > REINDEX_DEBOUNCE_MS) return;
+        clearTimeout(_reindexTimers.get(filePath));
+      }
       _reindexTimers.set(filePath, setTimeout(() => {
         _reindexTimers.delete(filePath);
         try {
+          const t: number = performance.now();
           const result: IndexResult = indexFile(db, filePath, dir.agent, stmts, ARCHIVE_MODE, config);
           if (!result.skipped) {
+            _lastParse.set(filePath, { at: Date.now(), ms: performance.now() - t });
             console.log(`Live re-indexed: ${filename} (${dir.agent})`);
             if (result.sessionId) refreshInsightsAndNotify([result.sessionId]);
           }
         } catch (err: unknown) {
           console.error(`Error re-indexing ${filename}:`, (err as Error).message);
         }
-      }, REINDEX_DEBOUNCE_MS));
+      }, delay));
     });
     console.log(`  Watching: ${dir.path}`);
     // Nested files (Codex date dirs, Claude <session>/subagents/) aren't seen by a
